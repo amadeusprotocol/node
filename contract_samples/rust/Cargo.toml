@@ -1,17 +1,6 @@
-[package]
-name = "amadeus-sdk"
-version = "0.1.0"
-edition = "2021"
-authors = ["Amadeus Team"]
-description = "Rust SDK for writing Amadeus smart contracts"
-license = "MIT"
-repository = "https://github.com/amadeusprotocol/node"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
-
-[dependencies]
-dlmalloc = { version = "0.2", features = ["global"] }
+[workspace]
+resolver = "3"
+members = ["sdk", "sdk-macros"]
 
 [profile.release]
 opt-level = "z"
@@ -25,27 +14,3 @@ opt-level = "z"
 
 [profile.dev]
 panic = "abort"
-
-# WASM-specific build config
-[package.metadata.wasm-pack.profile.release]
-wasm-opt = false
-
-[[example]]
-name = "counter"
-path = "examples/counter.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "deposit"
-path = "examples/deposit.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "coin"
-path = "examples/coin.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "nft"
-path = "examples/nft.rs"
-crate-type = ["cdylib"]
