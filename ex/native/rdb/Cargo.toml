@@ -32,6 +32,12 @@ wasmer = "6.1.0"
 wasmer-compiler-singlepass = "6.1.0"
 wasmer-middlewares = "6.1.0"
 lazy_static = "1.4"
+hex = "0.4"
+rlp = "0.5"
+keccak-hasher = "0.16"
+trie-db = "0.31"
+primitive-types = "0.13"
+anyhow = "1.0"
 
 [dependencies.rust-rocksdb]
 git = "https://github.com/vans163/rust-rocksdb"
