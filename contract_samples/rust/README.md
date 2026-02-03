@@ -26,18 +26,17 @@ cargo install amadeus-cli
 
 To build the wasm smart contracts, simply run the `./build_and_validate.sh`.
 The artifacts will be placed in `target/wasm32-unknown-unknown/release/examples`.
-Optionally you can optimize the resulting wasm contracts.
+
+## Unit Testing
 
 ```bash
-wasm-opt -Oz --enable-bulk-memory target/wasm32-unknown-unknown/release/examples/counter.wasm -o counter.wasm
-wasm-opt -Oz --enable-bulk-memory target/wasm32-unknown-unknown/release/examples/deposit.wasm -o deposit.wasm
-wasm-opt -Oz --enable-bulk-memory target/wasm32-unknown-unknown/release/examples/coin.wasm -o coin.wasm
-wasm-opt -Oz --enable-bulk-memory target/wasm32-unknown-unknown/release/examples/nft.wasm -o nft.wasm
+cargo +nightly test --example showcase --features testing --no-default-features -- --nocapture --test-threads=1
+cargo expand -p amadeus-sdk --example showcase --target wasm32-unknown-unknown
 ```
 
-### Testing
+### Testnet Deployment
 
-Make sure you have `amadeus-cli` installed.
+Make sure you have `amadeus-cli` at least `1.3.6` installed.
 Follow the code snippet below to run each example on the testnet.
 
 ```bash
@@ -48,37 +47,47 @@ ama get-pk --sk wallet.sk
 
 ama gen-sk counter.sk
 export COUNTER_PK=$(ama get-pk --sk counter.sk)
-ama tx --sk wallet.sk --url https://testnet-rpc.ama.one Coin transfer '[{"b58": "'$COUNTER_PK'"}, "2000000000", "AMA"]'
-ama deploy-tx --sk counter.sk counter.wasm --url https://testnet-rpc.ama.one
-ama tx --sk counter.sk --url https://testnet-rpc.ama.one $COUNTER_PK init '[]'
+ama tx --sk wallet.sk --send testnet Coin transfer '[{"b58": "'$COUNTER_PK'"}, "2000000000", "AMA"]'
+ama deploy-tx --sk counter.sk counter.wasm init '[]' --send testnet
 curl "https://testnet-rpc.ama.one/api/contract/view/$COUNTER_PK/get"
-ama tx --sk wallet.sk --url https://testnet-rpc.ama.one $COUNTER_PK increment '["5"]'
+ama tx --sk wallet.sk --send testnet $COUNTER_PK increment '["5"]'
 curl "https://testnet-rpc.ama.one/api/contract/view/$COUNTER_PK/get"
 
 ama gen-sk deposit.sk
 export DEPOSIT_PK=$(ama get-pk --sk deposit.sk)
-ama tx --sk wallet.sk Coin transfer '[{"b58": "'$DEPOSIT_PK'"}, "2000000000", "AMA"]' --url https://testnet-rpc.ama.one
-ama deploy-tx --sk deposit.sk deposit.wasm --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $DEPOSIT_PK balance '["AMA"]' --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $DEPOSIT_PK deposit '[]' AMA 1500000000 --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $DEPOSIT_PK balance '["AMA"]' --url https://testnet-rpc.ama.one
+ama tx --sk wallet.sk Coin transfer '[{"b58": "'$DEPOSIT_PK'"}, "2000000000", "AMA"]' --send testnet
+ama deploy-tx --sk deposit.sk deposit.wasm --send testnet
+ama tx --sk wallet.sk $DEPOSIT_PK balance '["AMA"]' --send testnet
+ama tx --sk wallet.sk $DEPOSIT_PK deposit '[]' AMA 1500000000 --send testnet
+ama tx --sk wallet.sk $DEPOSIT_PK balance '["AMA"]' --send testnet
 
 ama gen-sk coin.sk
 export COIN_PK=$(ama get-pk --sk coin.sk)
-ama tx --sk wallet.sk Coin transfer '[{"b58": "'$COIN_PK'"}, "2000000000", "AMA"]' --url https://testnet-rpc.ama.one
-ama deploy-tx --sk coin.sk coin.wasm --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $COIN_PK deposit '[]' AMA 1500000000 --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $COIN_PK withdraw '["AMA", "500000000"]' --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $COIN_PK withdraw '["AMA", "1000000000"]' --url https://testnet-rpc.ama.one
+ama tx --sk wallet.sk Coin transfer '[{"b58": "'$COIN_PK'"}, "2000000000", "AMA"]' --send testnet
+ama deploy-tx --sk coin.sk coin.wasm init --send testnet
+ama tx --sk wallet.sk $COIN_PK deposit '[]' AMA 1500000000 --send testnet
+ama tx --sk wallet.sk $COIN_PK withdraw '["AMA", "500000000"]' --send testnet
+ama tx --sk wallet.sk $COIN_PK withdraw '["AMA", "1000000000"]' --send testnet
 
 # WARNING: "AGENTIC" collection already exists, so replace the name below
 # and also in the examples/nft.rs file (don't forget to rebuild nft.wasm)
 ama gen-sk nft.sk
 export NFT_PK=$(ama get-pk --sk nft.sk)
-ama tx --sk wallet.sk Coin transfer '[{"b58": "'$NFT_PK'"}, "2000000000", "AMA"]' --url https://testnet-rpc.ama.one
-ama deploy-tx --sk nft.sk nft.wasm --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $NFT_PK init '[]' --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $NFT_PK claim '[]' --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $NFT_PK view_nft '["AGENTIC", "1"]' --url https://testnet-rpc.ama.one
-ama tx --sk wallet.sk $NFT_PK claim '[]' --url https://testnet-rpc.ama.one
+ama tx --sk wallet.sk Coin transfer '[{"b58": "'$NFT_PK'"}, "2000000000", "AMA"]' --send testnet
+ama deploy-tx --sk nft.sk nft.wasm --send testnet
+ama tx --sk wallet.sk $NFT_PK init '[]' --send testnet
+ama tx --sk wallet.sk $NFT_PK claim '[]' --send testnet
+ama tx --sk wallet.sk $NFT_PK view_nft '["AGENTIC", "1"]' --send testnet
+ama tx --sk wallet.sk $NFT_PK claim '[]' --send testnet
+
+ama gen-sk showcase.sk
+export SHOWCASE_PK=$(ama get-pk --sk showcase.sk)
+ama tx --sk wallet.sk Coin transfer '[{"b58": "'$SHOWCASE_PK'"}, "2000000000", "AMA"]' --send testnet
+ama deploy-tx --sk showcase.sk showcase.wasm --send testnet
+ama tx --sk wallet.sk $SHOWCASE_PK increment_total_matches '[]' --send testnet
+ama tx --sk wallet.sk $SHOWCASE_PK set_tournament_info '["World Cup", "1000000"]' --send testnet
+ama tx --sk wallet.sk $SHOWCASE_PK record_win '["alice"]' --send testnet
+ama tx --sk wallet.sk $SHOWCASE_PK record_win '["alice"]' --send testnet
+ama tx --sk wallet.sk $SHOWCASE_PK get_player_wins '["alice"]' --send testnet
+ama tx --sk wallet.sk $SHOWCASE_PK get_tournament_name '[]' --send testnet
 ```

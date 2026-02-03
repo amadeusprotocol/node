@@ -176,8 +176,10 @@ defmodule API.TX do
         tx = put_in(tx, [:tx, :signer], Base58.encode(tx.tx.signer))
 
         action = TX.action(tx)
-        action = if !BlsEx.validate_public_key(action.contract) do action else
+        action = if is_binary(action.contract) and byte_size(action.contract) == 48 do
           Map.put(action, :contract, Base58.encode(action.contract))
+        else
+          action
         end
         args = Enum.map(action.args, fn(arg)->
             cond do
@@ -198,8 +200,6 @@ defmodule API.TX do
         logs = Enum.map(logs, fn(line)-> RocksDB.ascii_dump(line) end)
         receipt = %{success: success, result: result, logs: logs, exec_used: exec_used}
 
-        #TODO: remove result later
-        tx = Map.put(tx, :result, %{error: result})
         tx = Map.put(tx, :receipt, receipt)
 
         if !Map.has_key?(tx, :metadata) do tx else

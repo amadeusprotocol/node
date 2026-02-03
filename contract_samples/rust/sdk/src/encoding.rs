@@ -97,3 +97,8 @@ impl_bytes_to_int!(bytes_to_u16, u16);
 impl_bytes_to_int!(bytes_to_u32, u32);
 impl_bytes_to_int!(bytes_to_u64, u64);
 impl_bytes_to_int!(bytes_to_u128, u128);
+
+pub fn i128_to_bytes(val: i128) -> Vec<u8> {
+    use alloc::string::ToString;
+    val.to_string().into_bytes()
+}
