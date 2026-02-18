@@ -568,40 +568,6 @@ impl Hubt {
         }
     }
 
-    fn verify_zero_prefix(proof: &Proof) -> bool {
-        if !Self::verify_zero_prefix(proof) {
-            return false;
-        }
-
-        if proof.nodes.is_empty() {
-            // No nodes = all 256 bits unconstrained
-            // They must ALL be zero
-            return proof.path == ZERO_HASH;
-        }
-
-        // Find highest LCP depth (deepest node with smallest len = highest tree)
-        let max_lcp_depth = proof.nodes.iter().map(|n| n.len).min().unwrap_or(0);
-
-        // Check all bits ABOVE max_lcp_depth are zero
-        for byte_idx in 0..((max_lcp_depth >> 3) as usize) {
-            if proof.path[byte_idx] != 0 {
-                return false; // Bit above deepest branch is non-zero!
-            }
-        }
-
-        // Check remaining partial byte
-        let rem = max_lcp_depth & 7;
-        if rem > 0 && max_lcp_depth < 256 {
-            let byte_idx = (max_lcp_depth >> 3) as usize;
-            let mask = 0xFF << (8 - rem);
-            if proof.path[byte_idx] & mask != 0 {
-                return false;
-            }
-        }
-
-        true
-    }
-
     fn verify_integrity(proof: &Proof) -> bool {
         // 1. Handle Empty Tree Case
         if proof.root == ZERO_HASH {

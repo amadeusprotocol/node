@@ -176,7 +176,7 @@ defmodule API.TX do
         tx = put_in(tx, [:tx, :signer], Base58.encode(tx.tx.signer))
 
         action = TX.action(tx)
-        action = if !BlsEx.validate_public_key(action.contract) do action else
+        action = if Util.ascii?(action.contract) do action else
           Map.put(action, :contract, Base58.encode(action.contract))
         end
         args = Enum.map(action.args, fn(arg)->
