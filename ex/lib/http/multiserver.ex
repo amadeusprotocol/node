@@ -226,22 +226,28 @@ defmodule Ama.MultiServer do
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tx_events_by_account/") ->
                 query = r.query && Photon.HTTP.parse_query(r.query)
                 account = String.replace(r.path, "/api/chain/tx_events_by_account/", "")
-                filters = %{limit: query[:limit] || "100", offset: query[:offset] || "0", sort: query[:sort] || "asc"}
-                filters = %{
-                    limit: :erlang.binary_to_integer(filters.limit),
-                    offset: :erlang.binary_to_integer(filters.offset),
-                    sort: case filters.sort do "desc" -> :desc; _ -> :asc end,
-                    cursor: if query[:cursor_b58] do Base58.decode(query.cursor_b58) else query[:cursor] end,
-                    contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
-                    function: query[:function],
-                }
-                {cursor, txs} = cond do
-                    query[:type] == "sent" -> API.TX.get_by_address_sent(account, filters)
-                    query[:type] == "recv" -> API.TX.get_by_address_recv(account, filters)
-                    true -> API.TX.get_by_address(account, filters)
+                raw_limit = query[:limit] || "100"
+                raw_offset = query[:offset] || "0"
+                case {Integer.parse(raw_limit), Integer.parse(raw_offset)} do
+                    {{limit, ""}, {offset, ""}} when limit >= 0 and offset >= 0 ->
+                        filters = %{
+                            limit: limit,
+                            offset: offset,
+                            sort: case query[:sort] || "asc" do "desc" -> :desc; _ -> :asc end,
+                            cursor: if query[:cursor_b58] do Base58.decode(query.cursor_b58) else query[:cursor] end,
+                            contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
+                            function: query[:function],
+                        }
+                        {cursor, txs} = cond do
+                            query[:type] == "sent" -> API.TX.get_by_address_sent(account, filters)
+                            query[:type] == "recv" -> API.TX.get_by_address_recv(account, filters)
+                            true -> API.TX.get_by_address(account, filters)
+                        end
+                        result = %{cursor: cursor, txs: txs}
+                        quick_reply(state, result)
+                    _ ->
+                        quick_reply(state, %{error: :invalid_parameters}, 400)
                 end
-                result = %{cursor: cursor, txs: txs}
-                quick_reply(state, result)
 
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tx_by_filter") ->
                 query = r.query && Photon.HTTP.parse_query(r.query)
@@ -249,19 +255,23 @@ defmodule Ama.MultiServer do
                 signer = query[:signer] || query[:sender] || query[:pk]
                 arg0 = query[:arg0] || query[:receiver]
 
-                filters = %{
-                    signer: signer && Base58.decode(signer),
-                    arg0: arg0 && Base58.decode(arg0),
-                    contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
-                    function: query[:function],
-
-                    limit: :erlang.binary_to_integer(query[:limit] || "100"),
-                    sort: case query[:sort] do "desc" -> :desc; _ -> :asc end,
-                    cursor: query[:cursor] && Base58.decode(query.cursor),
-                }
-                {cursor, txs} = API.TX.get_by_filter(filters)
-                result = %{cursor: cursor, txs: txs}
-                quick_reply(state, result)
+                case Integer.parse(query[:limit] || "100") do
+                    {limit, ""} when limit >= 0 ->
+                        filters = %{
+                            signer: signer && Base58.decode(signer),
+                            arg0: arg0 && Base58.decode(arg0),
+                            contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
+                            function: query[:function],
+                            limit: limit,
+                            sort: case query[:sort] do "desc" -> :desc; _ -> :asc end,
+                            cursor: query[:cursor] && Base58.decode(query.cursor),
+                        }
+                        {cursor, txs} = API.TX.get_by_filter(filters)
+                        result = %{cursor: cursor, txs: txs}
+                        quick_reply(state, result)
+                    _ ->
+                        quick_reply(state, %{error: :invalid_parameters}, 400)
+                end
 
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/txs_in_entry/") ->
                 entry_hash = String.replace(r.path, "/api/chain/txs_in_entry/", "")
