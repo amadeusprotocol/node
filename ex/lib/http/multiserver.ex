@@ -4,6 +4,7 @@ defmodule Ama.MultiServer do
             :socket_ack -> :ok
         after 3000 -> throw(:no_socket_passed) end
 
+        HTTP.RateLimiter.setup()
         state = Map.put(state, :request, %{buf: <<>>})
         :ok = :inet.setopts(state.socket, [{:active, :once}])
         loop_http(state)
@@ -46,6 +47,21 @@ defmodule Ama.MultiServer do
     def quick_reply(state, reply, status_code \\ 200) do
         :ok = :gen_tcp.send(state.socket, Photon.HTTP.Response.build_cors(state.request, status_code, %{}, reply))
         state
+    end
+
+    defp client_ip(socket) do
+        case :inet.peername(socket) do
+            {:ok, {ip, _port}} -> ip
+            _ -> :unknown
+        end
+    end
+
+    defp rate_limited_reply(state, limit, window_ms, content_fn) do
+        ip = client_ip(state.socket)
+        case HTTP.RateLimiter.check(ip, limit, window_ms) do
+            :ok -> content_fn.()
+            :rate_limited -> quick_reply(state, JSX.encode!(%{error: :rate_limited}), 429)
+        end
     end
 
     defp prometheus_reply(state, content_fn) do
@@ -306,25 +322,29 @@ defmodule Ama.MultiServer do
                 quick_reply(%{state|request: r}, result)
 
             testnet and r.method == "GET" and r.path == "/api/upow/seed" ->
-              epoch = DB.Chain.epoch()
-              segment_vr_hash = DB.Chain.segment_vr_hash()
-              nonce = :crypto.strong_rand_bytes(12)
-              %{pk: pk, pop: pop} = Application.fetch_env!(:ama, :keys) |> hd()
-              seed = <<epoch::32-little, segment_vr_hash::32-binary,
-                pk::48-binary, pop::96-binary, pk::binary, nonce::12-binary>>
-              quick_reply(state, seed)
+              rate_limited_reply(state, 10, 60_000, fn ->
+                epoch = DB.Chain.epoch()
+                segment_vr_hash = DB.Chain.segment_vr_hash()
+                nonce = :crypto.strong_rand_bytes(12)
+                %{pk: pk, pop: pop} = Application.fetch_env!(:ama, :keys) |> hd()
+                seed = <<epoch::32-little, segment_vr_hash::32-binary,
+                  pk::48-binary, pop::96-binary, pk::binary, nonce::12-binary>>
+                quick_reply(state, seed)
+              end)
 
             testnet and r.method == "GET" and r.path == "/api/upow/seed_with_matrix_a_b" ->
-              epoch = DB.Chain.epoch()
-              segment_vr_hash = DB.Chain.segment_vr_hash()
-              nonce = :crypto.strong_rand_bytes(12)
-              %{pk: pk, pop: pop} = Application.fetch_env!(:ama, :keys) |> hd()
-              seed = <<epoch::32-little, segment_vr_hash::32-binary,
-                pk::48-binary, pop::96-binary, pk::binary, nonce::12-binary>>
-              b = Blake3.new()
-              Blake3.update(b, seed)
-              matrix_a_b = Blake3.finalize_xof(b, 16*50240 + 50240*16)
-              quick_reply(state, seed <> matrix_a_b)
+              rate_limited_reply(state, 2, 60_000, fn ->
+                epoch = DB.Chain.epoch()
+                segment_vr_hash = DB.Chain.segment_vr_hash()
+                nonce = :crypto.strong_rand_bytes(12)
+                %{pk: pk, pop: pop} = Application.fetch_env!(:ama, :keys) |> hd()
+                seed = <<epoch::32-little, segment_vr_hash::32-binary,
+                  pk::48-binary, pop::96-binary, pk::binary, nonce::12-binary>>
+                b = Blake3.new()
+                Blake3.update(b, seed)
+                matrix_a_b = Blake3.finalize_xof(b, 16*50240 + 50240*16)
+                quick_reply(state, seed <> matrix_a_b)
+              end)
 
             testnet and r.method == "GET" and String.starts_with?(r.path, "/api/upow/validate/") ->
               sol = String.replace(r.path, "/api/upow/validate/", "") |> Base58.decode()
