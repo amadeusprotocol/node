@@ -99,7 +99,7 @@ defmodule Ama.MultiServer do
         r = state.request
         #IO.inspect r.path
 
-        String.starts_with?(r.path, "/api/tx") && IO.inspect r
+        #String.starts_with?(r.path, "/api/tx") && IO.inspect r
         testnet = !!Application.fetch_env!(:ama, :testnet)
         cond do
             r.method in ["OPTIONS", "HEAD"] ->
