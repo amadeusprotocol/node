@@ -4,7 +4,6 @@ defmodule Ama.MultiServer do
             :socket_ack -> :ok
         after 3000 -> throw(:no_socket_passed) end
 
-        HTTP.RateLimiter.setup()
         state = Map.put(state, :request, %{buf: <<>>})
         :ok = :inet.setopts(state.socket, [{:active, :once}])
         loop_http(state)
@@ -322,7 +321,7 @@ defmodule Ama.MultiServer do
                 quick_reply(%{state|request: r}, result)
 
             testnet and r.method == "GET" and r.path == "/api/upow/seed" ->
-              rate_limited_reply(state, 10, 60_000, fn ->
+              rate_limited_reply(state, 100, 60_000, fn ->
                 epoch = DB.Chain.epoch()
                 segment_vr_hash = DB.Chain.segment_vr_hash()
                 nonce = :crypto.strong_rand_bytes(12)
@@ -333,7 +332,7 @@ defmodule Ama.MultiServer do
               end)
 
             testnet and r.method == "GET" and r.path == "/api/upow/seed_with_matrix_a_b" ->
-              rate_limited_reply(state, 2, 60_000, fn ->
+              rate_limited_reply(state, 60, 60_000, fn ->
                 epoch = DB.Chain.epoch()
                 segment_vr_hash = DB.Chain.segment_vr_hash()
                 nonce = :crypto.strong_rand_bytes(12)
@@ -347,20 +346,24 @@ defmodule Ama.MultiServer do
               end)
 
             testnet and r.method == "GET" and String.starts_with?(r.path, "/api/upow/validate/") ->
-              sol = String.replace(r.path, "/api/upow/validate/", "") |> Base58.decode()
-              diff_bits = DB.Chain.diff_bits()
-              segment_vr_hash = DB.Chain.segment_vr_hash()
-              result = try do BIC.Sol.verify(sol, %{diff_bits: diff_bits, segment_vr_hash: segment_vr_hash}) catch _,_ -> false end
-              result_math = RDB.freivalds(sol, :crypto.strong_rand_bytes(32))
-              quick_reply(state, %{valid: result, valid_math: result_math})
+              rate_limited_reply(state, 100, 60_000, fn ->
+                sol = String.replace(r.path, "/api/upow/validate/", "") |> Base58.decode()
+                diff_bits = DB.Chain.diff_bits()
+                segment_vr_hash = DB.Chain.segment_vr_hash()
+                result = try do BIC.Sol.verify(sol, %{diff_bits: diff_bits, segment_vr_hash: segment_vr_hash}) catch _,_ -> false end
+                result_math = RDB.freivalds(sol, :crypto.strong_rand_bytes(32))
+                quick_reply(state, %{valid: result, valid_math: result_math})
+              end)
 
             testnet and r.method == "POST" and r.path == "/api/upow/validate" ->
-              {r, sol} = Photon.HTTP.read_body_all(state.socket, r)
-              diff_bits = DB.Chain.diff_bits()
-              segment_vr_hash = DB.Chain.segment_vr_hash()
-              result = try do BIC.Sol.verify(sol, %{diff_bits: diff_bits, segment_vr_hash: segment_vr_hash}) catch _,_ -> false end
-              result_math = RDB.freivalds(sol, :crypto.strong_rand_bytes(32))
-              quick_reply(%{state|request: r}, %{valid: result, valid_math: result_math})
+              rate_limited_reply(state, 100, 60_000, fn ->
+                {r, sol} = Photon.HTTP.read_body_all(state.socket, r)
+                diff_bits = DB.Chain.diff_bits()
+                segment_vr_hash = DB.Chain.segment_vr_hash()
+                result = try do BIC.Sol.verify(sol, %{diff_bits: diff_bits, segment_vr_hash: segment_vr_hash}) catch _,_ -> false end
+                result_math = RDB.freivalds(sol, :crypto.strong_rand_bytes(32))
+                quick_reply(%{state|request: r}, %{valid: result, valid_math: result_math})
+              end)
 
             #r.method == "GET" ->
             #    bin = build_dashboard(state)
@@ -370,4 +373,31 @@ defmodule Ama.MultiServer do
                 quick_reply(state, %{error: :not_found}, 404)
         end
     end
+end
+
+defmodule HTTP.RateLimiter do
+  @table :http_rate_limiter
+
+  def setup do
+    if :ets.whereis(@table) == :undefined do
+      :ets.new(@table, [:named_table, :public, :set])
+    end
+  end
+
+  # Returns :ok or :rate_limited
+  def check(ip, limit, window_ms) do
+    now = System.monotonic_time(:millisecond)
+    case :ets.lookup(@table, ip) do
+      [{^ip, count, window_start}] when now - window_start < window_ms ->
+        if count >= limit do
+          :rate_limited
+        else
+          :ets.insert(@table, {ip, count + 1, window_start})
+          :ok
+        end
+      _ ->
+        :ets.insert(@table, {ip, 1, now})
+        :ok
+    end
+  end
 end
