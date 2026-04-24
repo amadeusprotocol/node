@@ -15,7 +15,7 @@ config :ama, :work_folder, work_folder
 
 #load env
 #Envvar.load(Path.join([work_folder, ".env"]))
-config :ama, :snapshot_height, (System.get_env("SNAPSHOT_HEIGHT") || "49001472") |> :erlang.binary_to_integer()
+config :ama, :snapshot_height, (System.get_env("SNAPSHOT_HEIGHT") || "63000010") |> :erlang.binary_to_integer()
 
 # https://snapshots.amadeus.bot/000041960861.zip
 # zip -0 -r 000037454455.zip db/
