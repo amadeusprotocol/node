@@ -43,8 +43,66 @@ struct HostEnv {
     readonly: bool,
 }
 
+const ARTIFACT_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
+struct ArtifactEntry {
+    value: Vec<u8>,
+    last_used: u64,
+}
+
+struct ArtifactCache {
+    map: HashMap<Vec<u8>, ArtifactEntry>,
+    bytes: usize,
+    tick: u64,
+}
+
+impl ArtifactCache {
+    fn new() -> Self {
+        Self { map: HashMap::new(), bytes: 0, tick: 0 }
+    }
+
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.wrapping_add(1);
+        self.tick
+    }
+
+    // &mut self because a hit refreshes the entry's last_used tick (LRU).
+    fn get(&mut self, key: &[u8]) -> Option<&Vec<u8>> {
+        let tick = self.next_tick();
+        let entry = self.map.get_mut(key)?;
+        entry.last_used = tick;
+        Some(&entry.value)
+    }
+
+    fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        if let Some(entry) = self.map.get_mut(&key) {
+            // Same bytes already cached — just refresh the tick.
+            entry.last_used = self.tick.wrapping_add(1);
+            self.tick = entry.last_used;
+            return;
+        }
+        // Evict least-recently-used entries until the new artifact fits.
+        while self.bytes + value.len() > ARTIFACT_CACHE_MAX_BYTES {
+            let lru_key = self.map.iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k.clone());
+            match lru_key {
+                Some(k) => {
+                    if let Some(old) = self.map.remove(&k) {
+                        self.bytes -= old.value.len();
+                    }
+                }
+                None => break,
+            }
+        }
+        let tick = self.next_tick();
+        self.bytes += value.len();
+        self.map.insert(key, ArtifactEntry { value, last_used: tick });
+    }
+}
+
 lazy_static! {
-    static ref ARTIFACT_CACHE: Mutex<HashMap<Vec<u8>, Vec<u8>>> = Mutex::new(HashMap::new());
+    static ref ARTIFACT_CACHE: Mutex<ArtifactCache> = Mutex::new(ArtifactCache::new());
 }
 
 fn set_return_value(applyenv: &mut ApplyEnv, return_value: Vec<u8>) {
