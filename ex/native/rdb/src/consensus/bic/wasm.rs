@@ -387,14 +387,24 @@ fn as_read_string(view: &MemoryView, ptr: i32) -> String {
 
     // 1. Read Length (stored at ptr - 4)
     // AssemblyScript stores length in BYTES (not characters) at offset -4
+    let len_ptr = match ptr.checked_sub(4) {
+        Some(p) => p,
+        None => return "<invalid-ptr>".to_string(),
+    };
     let mut len_buf = [0u8; 4];
-    if view.read(ptr - 4, &mut len_buf).is_err() {
+    if view.read(len_ptr, &mut len_buf).is_err() {
         return "<invalid-ptr>".to_string();
     }
-    let len_bytes = u32::from_le_bytes(len_buf) as u64;
+    let len_bytes = u32::from_le_bytes(len_buf) as usize;
+
+    // Cap before allocating: len_bytes is attacker-controlled and could otherwise
+    // force a multi-GB zero-init before the view.read bounds check runs.
+    if len_bytes > protocol::WASM_MAX_PTR_LEN {
+        return "<invalid-len>".to_string();
+    }
 
     // 2. Read UTF-16 Bytes
-    let mut str_buf = vec![0u8; len_bytes as usize];
+    let mut str_buf = vec![0u8; len_bytes];
     if view.read(ptr, &mut str_buf).is_err() {
         return "<invalid-mem>".to_string();
     }
