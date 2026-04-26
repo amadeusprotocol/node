@@ -99,10 +99,52 @@ impl ArtifactCache {
         self.bytes += value.len();
         self.map.insert(key, ArtifactEntry { value, last_used: tick });
     }
+
+    fn remove(&mut self, key: &[u8]) {
+        if let Some(old) = self.map.remove(key) {
+            self.bytes -= old.value.len();
+        }
+    }
 }
 
 lazy_static! {
     static ref ARTIFACT_CACHE: Mutex<ArtifactCache> = Mutex::new(ArtifactCache::new());
+}
+
+const ENGINE_VERSION_TAG: &[u8] =
+    b"wasmer-6.1.0+singlepass+canonicalize_nans+metering+bulk_memory/v1";
+
+fn artifact_cache_key(wasm_bytes: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(ENGINE_VERSION_TAG);
+    hasher.update(wasm_bytes);
+    hasher.finalize().to_vec()
+}
+
+fn artifact_cache_get(cache_key: &[u8]) -> Option<Vec<u8>> {
+    let mut cache = ARTIFACT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    cache.get(cache_key).cloned()
+}
+
+fn artifact_cache_insert(cache_key: Vec<u8>, artifact: Vec<u8>) {
+    let mut cache = ARTIFACT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    cache.insert(cache_key, artifact);
+}
+
+fn artifact_cache_remove(cache_key: &[u8]) {
+    let mut cache = ARTIFACT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    cache.remove(cache_key);
+}
+
+fn compile_and_cache_module(store: &Store, wasm_bytes: &[u8], cache_key: Vec<u8>) -> Module {
+    let new_module = Module::new(store, wasm_bytes)
+        .unwrap_or_else(|_| panic_any("exec_invalid_module"));
+    // If serialize fails, skip caching but still return a working module --
+    // the next call will simply recompile.
+    if let Ok(artifact) = new_module.serialize() {
+        artifact_cache_insert(cache_key, artifact.to_vec());
+    }
+    new_module
 }
 
 fn set_return_value(applyenv: &mut ApplyEnv, return_value: Vec<u8>) {
@@ -779,25 +821,16 @@ pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: Strin
     let mut store = Store::new(engine);
 
     // Load Module (From Cache or Compile)
-    let wasm_hash = Sha256::digest(wasm_bytes).to_vec();
-    let module = {
-        let mut cache = ARTIFACT_CACHE.lock().unwrap();
-
-        //TODO: fix this to be more deterministic, as caches are node local
-        if let Some(artifact_bytes) = cache.get(&wasm_hash) {
-            // FAST PATH: Deserialize from cache
-            unsafe { Module::deserialize(&store, artifact_bytes) }
-                .unwrap_or_else(|_| panic_any("exec_deserialize_err"))
-        } else {
-            // SLOW PATH: Compile from scratch
-            let new_module = Module::new(&store, wasm_bytes).unwrap_or_else(|_| panic_any("exec_invalid_module"));
-
-            // Serialize and Cache
-            let artifact = new_module.serialize().unwrap_or_else(|_| panic_any("exec_serialize_err"));
-            cache.insert(wasm_hash, artifact.to_vec());
-
-            new_module
-        }
+    let cache_key = artifact_cache_key(wasm_bytes);
+    let module = match artifact_cache_get(&cache_key) {
+        Some(artifact_bytes) => match unsafe { Module::deserialize(&store, &artifact_bytes) } {
+            Ok(m) => m,
+            Err(_) => {
+                artifact_cache_remove(&cache_key);
+                compile_and_cache_module(&store, wasm_bytes, cache_key)
+            }
+        },
+        None => compile_and_cache_module(&store, wasm_bytes, cache_key),
     };
 
     let (instance, wasm_args) = setup_wasm_instance(env, &module, &mut store, false, &function_args);
