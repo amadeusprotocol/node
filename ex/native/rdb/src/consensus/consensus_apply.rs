@@ -615,7 +615,7 @@ fn call_exit(env: &mut ApplyEnv) {
     let vr = env.caller_env.entry_vr.to_vec();
     let seed_hash = blake3::hash(&vr);
     env.caller_env.seed = seed_hash.as_bytes().to_vec();
-    // extract f64 from first 8 bytes of seed_hash in little-endian
+    //for assemblyscript
     let seedf64 = f64::from_le_bytes(seed_hash.as_bytes()[0..8].try_into().unwrap_or([0u8; 8]));
     env.caller_env.seedf64 = seedf64;
 
@@ -822,10 +822,9 @@ pub fn call_wasmvm(env: &mut ApplyEnv, contract: Vec<u8>, function: Vec<u8>, arg
 
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&result_hash.as_bytes()[0..8]);
-    let val_u64 = u64::from_le_bytes(buf);
 
     env.caller_env.seed = result_hash.as_bytes().to_vec();
-    env.caller_env.seedf64 = val_u64 as f64;
+    env.caller_env.seedf64 = f64::from_le_bytes(buf);
 
     //attachments
     env.caller_env.attached_symbol = Vec::new();
