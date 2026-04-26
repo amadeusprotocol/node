@@ -69,6 +69,8 @@ pub const WASM_MAX_GLOBALS: u32 = 100;
 pub const WASM_MAX_EXPORTS: u32 = 50;
 pub const WASM_MAX_IMPORTS: u32 = 50;
 
+pub const MAX_CALL_DEPTH: u32 = 16;
+
 pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i128) {
     consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]), -cost);
     // Increment validator / burn

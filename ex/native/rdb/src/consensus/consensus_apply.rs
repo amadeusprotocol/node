@@ -95,6 +95,7 @@ pub struct ApplyEnv<'db> {
     pub testnet: bool,
     pub testnet_peddlebikes: Vec<Vec<u8>>,
     pub readonly: bool,
+    pub call_depth: u32,
 }
 
 impl<'db> ApplyEnv<'db> {
@@ -143,6 +144,7 @@ pub fn make_apply_env<'db>(db: &'db TransactionDB<MultiThreaded>, txn: Transacti
         testnet: testnet,
         testnet_peddlebikes: testnet_peddlebikes,
         readonly: false,
+        call_depth: 0,
     }
 }
 
@@ -210,6 +212,7 @@ pub fn apply_entry<'db, 'a>(db: &'db TransactionDB<MultiThreaded>, txn: Transact
         applyenv.exec_max = protocol::AMA_10_CENT;
         applyenv.storage_left = protocol::AMA_1_DOLLAR;
         applyenv.storage_max = protocol::AMA_1_DOLLAR;
+        applyenv.call_depth = 0;
 
         std::panic::set_hook(Box::new(|_| {}));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -804,6 +807,11 @@ pub fn call_bic(env: &mut ApplyEnv, contract: Vec<u8>, function: Vec<u8>, args: 
 }
 
 pub fn call_wasmvm(env: &mut ApplyEnv, contract: Vec<u8>, function: Vec<u8>, args: Vec<Vec<u8>>, attached_symbol: Option<Vec<u8>>, attached_amount: Option<Vec<u8>>) -> Vec<u8> {
+    env.call_depth = env.call_depth.saturating_add(1);
+    if env.call_depth > protocol::MAX_CALL_DEPTH {
+        panic_any("exec_call_depth_exceeded");
+    }
+
     let function = String::from_utf8(function).unwrap_or_else(|_| panic_any("invalid_function"));
 
     //seed the rng
@@ -846,5 +854,6 @@ pub fn call_wasmvm(env: &mut ApplyEnv, contract: Vec<u8>, function: Vec<u8>, arg
     }
 
     let error = consensus::bic::wasm::call_contract(env, bytecode.as_deref().unwrap_or_else(|| panic_any("invalid_bytecode")), function, args);
+    env.call_depth = env.call_depth.saturating_sub(1);
     error
 }
