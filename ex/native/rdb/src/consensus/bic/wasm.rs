@@ -196,6 +196,8 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
                 let arg_ptr = i32::from_le_bytes(row_buf[0..4].try_into().unwrap());
                 let arg_len = i32::from_le_bytes(row_buf[4..8].try_into().unwrap());
 
+                if arg_len < 0 || arg_len as usize > protocol::WASM_MAX_PTR_LEN { panic_any("exec_call_extra_ptr_term_too_long") }
+
                 let mut arg_data = vec![0u8; arg_len as usize];
                 view.read(arg_ptr as u64, &mut arg_data).unwrap_or_else(|_| panic_any("exec_read_extra_data"));
                 final_args_extra.push(arg_data);
