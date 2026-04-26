@@ -169,11 +169,11 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
 
     let og_account_caller = applyenv.caller_env.account_caller.clone();
     let og_account_current = applyenv.caller_env.account_current.clone();
+    let og_call_return_value = std::mem::take(&mut applyenv.caller_env.call_return_value);
 
     applyenv.caller_env.account_caller = og_account_current.clone();
     applyenv.caller_env.account_current = contract.clone();
     applyenv.caller_env.call_counter += 1;
-    applyenv.caller_env.call_return_value = Vec::new();
 
     let result = match crate::consensus::bls12_381::validate_public_key(contract.as_slice()) {
         false => {
@@ -189,6 +189,7 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
 
     applyenv.caller_env.account_caller = og_account_caller;
     applyenv.caller_env.account_current = og_account_current;
+    applyenv.caller_env.call_return_value = og_call_return_value;
 
     let view = data.memory.clone().view(&store);
     view.write(10_000, &(result.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
