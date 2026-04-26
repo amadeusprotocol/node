@@ -84,7 +84,8 @@ pub fn call_unlock(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: 
         let unlock_height = env.caller_env.entry_height.saturating_add(100_000 * 5);
         create_lock(env, env.caller_env.account_caller.to_vec().as_slice(), disbursement as i128, b"AMA", unlock_height);
     } else {
-        let prime_points = unlock_amount * multiplier;
+        let prime_points = unlock_amount.checked_mul(multiplier)
+            .unwrap_or_else(|| panic_any("prime_points_overflow"));
         mint(env, env.caller_env.account_caller.to_vec().as_slice(), prime_points as i128, b"PRIME");
         kv_increment(env, &bcat(&[b"account:", &env.caller_env.account_caller, b":balance:AMA"]), unlock_amount as i128);
     }
@@ -103,7 +104,8 @@ pub fn call_daily_checkin(env: &mut crate::consensus::consensus_apply::ApplyEnv,
         let vault_parts: Vec<Vec<u8>> = val.split(|&b| b == b'-').map(|seg| seg.to_vec()).collect();
         let unlock_amount = vault_parts[3].as_slice();
         let unlock_amount = std::str::from_utf8(&unlock_amount).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_unlock_amount"));
-        total_unlock_amount += unlock_amount;
+        total_unlock_amount = total_unlock_amount.checked_add(unlock_amount)
+            .unwrap_or_else(|| panic_any("total_unlock_amount_overflow"));
         cursor = next_key_suffix;
     }
 
@@ -124,7 +126,8 @@ pub fn call_daily_checkin(env: &mut crate::consensus::consensus_apply::ApplyEnv,
         let streak = kv_increment(env, &bcat(&[b"bic:lockup_prime:daily_streak:", &env.caller_env.account_caller]), 1);
         if streak >= 30 {
             kv_put(env, &bcat(&[b"bic:lockup_prime:daily_streak:", &env.caller_env.account_caller]), b"0");
-            let streak_bonus = daily_bonus * 30;
+            let streak_bonus = daily_bonus.checked_mul(30)
+                .unwrap_or_else(|| panic_any("streak_bonus_overflow"));
             mint(env, env.caller_env.account_caller.to_vec().as_slice(), streak_bonus as i128, b"PRIME");
         }
     } else if delta > 2 {
