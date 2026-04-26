@@ -28,9 +28,10 @@ rayon = "1"
 serde = { version = "1.0", features = ["derive"] }
 vecpak = { git = "https://github.com/amadeusprotocol/chain", package = "vecpak" }
 vecpak_ex = { git = "https://github.com/amadeusprotocol/chain", package = "vecpak_ex" }
-wasmer = "6.1.0"
-wasmer-compiler-singlepass = "6.1.0"
-wasmer-middlewares = "6.1.0"
+wasmer = "7.1.0"
+wasmer-compiler-singlepass = "7.1.0"
+wasmer-middlewares = "7.1.0"
+wasmparser = "0.247.0"
 lazy_static = "1.4"
 
 [dependencies.rust-rocksdb]

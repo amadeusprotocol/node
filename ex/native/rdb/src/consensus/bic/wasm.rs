@@ -8,10 +8,11 @@ use std::panic::panic_any;
 use std::time::Instant;
 use lazy_static::lazy_static;
 use sha2::{Sha256, Digest};
+use wasmparser::{DataKind, Operator as ParserOperator, Parser, Payload};
 
 use wasmer::{
     imports,
-    wasmparser::{Parser, Payload, Operator},
+    wasmparser::Operator as WasmerOperator,
     sys::{EngineBuilder, Features, CompilerConfig as _},
     AsStoreMut, Function, FunctionEnv, FunctionEnvMut, FunctionType, Global, Instance, Memory, MemoryType, Engine,
     MemoryView, Module, Pages, Store, Type, Value,
@@ -112,7 +113,7 @@ lazy_static! {
 }
 
 const ENGINE_VERSION_TAG: &[u8] =
-    b"wasmer-6.1.0+singlepass+canonicalize_nans+metering+bulk_memory/v1";
+    b"wasmer-7.1.0+singlepass+canonicalize_nans+metering+bulk_memory/v1";
 
 fn artifact_cache_key(wasm_bytes: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
@@ -608,13 +609,13 @@ pub fn check_module_limits(wasm_bytes: &[u8]) -> Result<(), String> {
             Payload::DataSection(reader) => {
                 for data in reader {
                     let d = data.map_err(|e| e.to_string())?;
-                    if let wasmer::wasmparser::DataKind::Active { offset_expr, .. } = d.kind {
-                         let mut r = offset_expr.get_binary_reader();
-                         if let Ok(wasmer::wasmparser::Operator::I32Const { value }) = r.read_operator() {
-                             if value >= 0 && value < 65536 {
-                                 return Err("wasmparser_first_65536_bytes_not_reserved".to_string());
-                             }
-                         }
+                    if let DataKind::Active { offset_expr, .. } = d.kind {
+                        let mut r = offset_expr.get_operators_reader();
+                        if let Ok(ParserOperator::I32Const { value }) = r.read() {
+                            if value >= 0 && value < 65536 {
+                                return Err("wasmparser_first_65536_bytes_not_reserved".to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -637,36 +638,36 @@ pub fn validate_contract(env: &mut ApplyEnv, wasm_bytes: &[u8]) {
     setup_wasm_instance(env, &module, &mut store, true, &[]);
 }
 
-fn cost_function(operator: &Operator) -> u64 {
+fn cost_function(operator: &WasmerOperator) -> u64 {
     match operator {
-        Operator::Loop { .. }
-        | Operator::Block { .. }
-        | Operator::End { .. }
-        | Operator::Br { .. } => 1,
+        WasmerOperator::Loop { .. }
+        | WasmerOperator::Block { .. }
+        | WasmerOperator::End { .. }
+        | WasmerOperator::Br { .. } => 1,
 
-        Operator::I32Load { .. }
-        | Operator::I64Load { .. }
-        | Operator::I32Store { .. }
-        | Operator::I64Store { .. } => 3,
+        WasmerOperator::I32Load { .. }
+        | WasmerOperator::I64Load { .. }
+        | WasmerOperator::I32Store { .. }
+        | WasmerOperator::I64Store { .. } => 3,
 
-        Operator::F32Load { .. }
-        | Operator::F64Load { .. }
-        | Operator::F32Store { .. }
-        | Operator::F64Store { .. } => 10,
+        WasmerOperator::F32Load { .. }
+        | WasmerOperator::F64Load { .. }
+        | WasmerOperator::F32Store { .. }
+        | WasmerOperator::F64Store { .. } => 10,
 
-        Operator::Call { .. }
-        | Operator::CallIndirect { .. } => 10,
+        WasmerOperator::Call { .. }
+        | WasmerOperator::CallIndirect { .. } => 10,
 
         //TODO: middleware based on bytes copied
-        Operator::MemoryCopy { .. }
-        | Operator::MemoryFill { .. } => 1000,
-        Operator::MemoryGrow { .. } => 2000,
+        WasmerOperator::MemoryCopy { .. }
+        | WasmerOperator::MemoryFill { .. } => 1000,
+        WasmerOperator::MemoryGrow { .. } => 2000,
 
-        Operator::If { .. }
-        | Operator::Else { .. }
-        | Operator::BrIf { .. }
-        | Operator::Return { .. }
-        | Operator::Unreachable { .. } => 2,
+        WasmerOperator::If { .. }
+        | WasmerOperator::Else { .. }
+        | WasmerOperator::BrIf { .. }
+        | WasmerOperator::Return { .. }
+        | WasmerOperator::Unreachable { .. } => 2,
         _ => 2,
     }
 }
