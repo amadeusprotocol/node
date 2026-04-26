@@ -548,8 +548,12 @@ fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filen
 }
 
 fn as_seed_implementation(mut env: FunctionEnvMut<HostEnv>) -> Result<f64, RuntimeError> {
-    let (data, _store) = env.data_and_store_mut();
+    let (data, mut store) = env.data_and_store_mut();
+    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, 100);
+    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
     Ok(applyenv.caller_env.seedf64)
 }
@@ -658,10 +662,16 @@ fn cost_function(operator: &WasmerOperator) -> u64 {
         WasmerOperator::Call { .. }
         | WasmerOperator::CallIndirect { .. } => 10,
 
-        //TODO: middleware based on bytes copied
+        // Static upper-bound: wasmer's metering middleware can't see the size
+        // operand on the wasm stack, so per-byte metering needs a custom middleware.
+        // Until that's written, charge a flat cost that approximates ~33KB worth
+        // of equivalent I32Store ops (≈ 100_000 / 3). MemoryGrow is per-page
+        // (64KB) so a similar flat cost is reasonable.
+        // TODO: replace with custom middleware that injects size-aware gas
+        // decrement before each MemoryCopy/Fill/Grow (reads operand off stack).
         WasmerOperator::MemoryCopy { .. }
-        | WasmerOperator::MemoryFill { .. } => 1000,
-        WasmerOperator::MemoryGrow { .. } => 2000,
+        | WasmerOperator::MemoryFill { .. } => 100_000,
+        WasmerOperator::MemoryGrow { .. } => 100_000,
 
         WasmerOperator::If { .. }
         | WasmerOperator::Else { .. }
