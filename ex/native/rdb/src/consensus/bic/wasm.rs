@@ -155,10 +155,21 @@ fn set_return_value(applyenv: &mut ApplyEnv, return_value: Vec<u8>) {
     applyenv.caller_env.call_return_value = return_value
 }
 
+fn budget_sync_in(store: &mut impl AsStoreMut, instance: &Instance, applyenv: &mut ApplyEnv) {
+    let wasm_remaining: i128 = match get_remaining_points(store, instance) {
+        MeteringPoints::Remaining(v) => v as i128,
+        MeteringPoints::Exhausted => 0,
+    };
+    if wasm_remaining < applyenv.exec_left {
+        applyenv.exec_left = wasm_remaining;
+    }
+}
+
 fn import_log_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i32) {
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
     let len = len as usize;
 
     if len <= 0 {
@@ -182,6 +193,7 @@ fn import_return_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len:
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
     let len = len as usize;
 
     if len > protocol::WASM_MAX_PTR_LEN {
@@ -266,6 +278,7 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_CALL);
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
@@ -311,6 +324,7 @@ fn import_storage_kv_put_implementation(mut env: FunctionEnvMut<HostEnv>, key_pt
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     if key_len as usize > protocol::WASM_MAX_PTR_LEN {
         panic_any("exec_ptr_term_too_long")
@@ -325,6 +339,7 @@ fn import_storage_kv_put_implementation(mut env: FunctionEnvMut<HostEnv>, key_pt
     view.read(val_ptr as u64, &mut value).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
 
     kv_put(applyenv, &key, &value);
+    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     Ok(())
 }
 
@@ -332,6 +347,7 @@ fn import_storage_kv_increment_implementation(mut env: FunctionEnvMut<HostEnv>, 
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     if key_len as usize > protocol::WASM_MAX_PTR_LEN {
         panic_any("exec_ptr_term_too_long")
@@ -352,6 +368,7 @@ fn import_storage_kv_increment_implementation(mut env: FunctionEnvMut<HostEnv>, 
     view.write(10_000, &(new_value.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
     view.write(10_004, &new_value).unwrap_or_else(|_| panic_any("exec_memwrite"));
 
+    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     Ok(10_000)
 }
 
@@ -359,6 +376,7 @@ fn import_storage_kv_delete_implementation(mut env: FunctionEnvMut<HostEnv>, key
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     if key_len as usize > protocol::WASM_MAX_PTR_LEN {
         panic_any("exec_ptr_term_too_long")
@@ -369,6 +387,7 @@ fn import_storage_kv_delete_implementation(mut env: FunctionEnvMut<HostEnv>, key
 
     kv_delete(applyenv, &key);
 
+    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     Ok(())
 }
 
@@ -376,6 +395,7 @@ fn import_storage_kv_get_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     if len as usize > protocol::WASM_MAX_PTR_LEN {
         panic_any("exec_ptr_term_too_long")
@@ -400,6 +420,7 @@ fn import_storage_kv_get_prev_implementation(mut env: FunctionEnvMut<HostEnv>, p
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     if prefix_len as usize > protocol::WASM_MAX_PTR_LEN {
         panic_any("exec_ptr_term_too_long")
@@ -433,6 +454,7 @@ fn import_storage_kv_get_next_implementation(mut env: FunctionEnvMut<HostEnv>, p
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     if prefix_len as usize > protocol::WASM_MAX_PTR_LEN {
         panic_any("exec_ptr_term_too_long")
@@ -466,6 +488,7 @@ fn import_storage_kv_exists_implementation(mut env: FunctionEnvMut<HostEnv>, ptr
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     if len as usize > protocol::WASM_MAX_PTR_LEN {
         panic_any("exec_ptr_term_too_long")
@@ -526,6 +549,7 @@ fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filen
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let view = data.memory.clone().view(&store);
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     //set_return_value(applyenv, b"as_abort".to_vec());
 
@@ -551,6 +575,7 @@ fn as_seed_implementation(mut env: FunctionEnvMut<HostEnv>) -> Result<f64, Runti
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
     crate::consensus::consensus_kv::exec_budget_decr(applyenv, 100);
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
@@ -682,6 +707,14 @@ fn cost_function(operator: &WasmerOperator) -> u64 {
     }
 }
 
+// ⚠ ARTIFACT-CACHE INVARIANT
+// Cached compilation artifacts are keyed by Sha256(ENGINE_VERSION_TAG || wasm_bytes)
+// — see `artifact_cache_key` near the top of this file. If you change ANY of the
+// settings below (compiler, canonicalize_nans, the `cost_function`, the feature
+// flags, the wasmer crate version, or anything else that affects the compiled
+// artifact's bit-for-bit layout), you MUST bump the /vN suffix in
+// ENGINE_VERSION_TAG. Otherwise old cached artifacts will be deserialized into
+// the new engine via `unsafe Module::deserialize`, which is undefined behavior.
 fn make_engine(exec_remaining: u64) -> Engine {
     let metering = Arc::new(Metering::new(exec_remaining, cost_function));
 
