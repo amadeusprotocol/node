@@ -74,6 +74,7 @@ defmodule TX do
 
       #if !!txu.tx[:genesis_hash] and !is_integer(txu.tx.chain_id), do: throw(%{error: :chain_id_not_integer})
       if !is_integer(txu.tx.nonce), do: throw(%{error: :nonce_not_integer})
+      if txu.tx.nonce < 0, do: throw(%{error: :nonce_negative})
       if txu.tx.nonce > 18_446_744_073_709_551_615, do: throw(%{error: :nonce_too_high})
       if !is_map(action), do: throw(%{error: :action_must_be_map})
       if action[:op] != "call", do: throw %{error: :op_must_be_call}
