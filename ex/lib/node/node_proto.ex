@@ -58,13 +58,97 @@ defmodule NodeProto do
     %{op: :special_business_reply, business: business}
   end
 
+  @max_decompressed_size 64 * 1024 * 1024  # 64 MiB
+  @decompress_chunk_size 64 * 1024          # 64 KiB feed per streaming step
+
   def decompress_and_unpack(compressed_data) do
-    vec = compressed_data
-    |> :zstd.decompress()
-    |> IO.iodata_to_binary()
-    |> RDB.vecpak_decode()
+    case zstd_declared_size(compressed_data) do
+      {:ok, size} when size > @max_decompressed_size ->
+        throw(%{error: :decompressed_size_too_large, declared: size})
+      _ -> :ok
+    end
+
+    decompressed = stream_decompress(compressed_data)
+
+    vec = RDB.vecpak_decode(decompressed)
     Map.put(vec, :op, String.to_existing_atom(vec.op))
   end
+
+  defp stream_decompress(input) do
+    stream = :zstd.decompress_init()
+    chunks = stream_decompress_loop(stream, input, [], 0)
+    IO.iodata_to_binary(chunks)
+  end
+
+  defp stream_decompress_loop(_stream, <<>>, acc, _total) do
+    Enum.reverse(acc)
+  end
+
+  defp stream_decompress_loop(stream, input, acc, total) do
+    {chunk, rest} =
+      if byte_size(input) > @decompress_chunk_size do
+        <<c::binary-size(@decompress_chunk_size), r::binary>> = input
+        {c, r}
+      else
+        {input, <<>>}
+      end
+
+    {out, stream2} = :zstd.decompress(stream, chunk)
+    out_size = :erlang.iolist_size(out)
+    new_total = total + out_size
+
+    if new_total > @max_decompressed_size do
+      throw(%{error: :decompressed_size_too_large, exceeded_at: new_total})
+    end
+
+    stream_decompress_loop(stream2, rest, [out | acc], new_total)
+  end
+
+  defp zstd_declared_size(<<0x28, 0xB5, 0x2F, 0xFD, fhd, rest::binary>>) do
+    import Bitwise
+    fcs_flag = bsr(fhd, 6)
+    ss_flag = band(bsr(fhd, 5), 1)
+    di_flag = band(fhd, 0x03)
+
+    window_size = if ss_flag == 0, do: 1, else: 0
+    did_size =
+      case di_flag do
+        0 -> 0
+        1 -> 1
+        2 -> 2
+        3 -> 4
+      end
+
+    fcs_size =
+      cond do
+        fcs_flag == 0 and ss_flag == 1 -> 1
+        fcs_flag == 0 -> 0
+        fcs_flag == 1 -> 2
+        fcs_flag == 2 -> 4
+        fcs_flag == 3 -> 8
+        true -> 0
+      end
+
+    skip = window_size + did_size
+
+    cond do
+      fcs_size == 0 -> {:unknown, :no_fcs}
+      byte_size(rest) < skip + fcs_size -> {:unknown, :short_frame}
+      fcs_size == 1 ->
+        <<_::binary-size(skip), fcs::8, _::binary>> = rest
+        {:ok, fcs}
+      fcs_size == 2 ->
+        <<_::binary-size(skip), fcs::16-little, _::binary>> = rest
+        {:ok, fcs + 256}
+      fcs_size == 4 ->
+        <<_::binary-size(skip), fcs::32-little, _::binary>> = rest
+        {:ok, fcs}
+      fcs_size == 8 ->
+        <<_::binary-size(skip), fcs::64-little, _::binary>> = rest
+        {:ok, fcs}
+    end
+  end
+  defp zstd_declared_size(_), do: {:unknown, :bad_magic}
 
   def compress(msg) do
     msg
