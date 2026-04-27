@@ -325,7 +325,6 @@ defmodule FabricGen do
       #IO.inspect Enum.map(m, & Map.put(&1, :key, RocksDB.ascii_dump(&1.key))), limit: 11111111111
 
       #call the exit
-      Process.put({RocksDB, :ctx}, %{rtx: rtx, cf: cf})
       #mapenv = make_mapenv(next_entry)
       #{m_exit, m_exit_rev} = BIC.Base.call_exit(mapenv)
       #m = m ++ m_exit

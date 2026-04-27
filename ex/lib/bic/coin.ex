@@ -1,6 +1,4 @@
 defmodule BIC.Coin do
-    import ConsensusKV
-
     @decimals 9
     @burn_address :binary.copy(<<0>>, 48)
 

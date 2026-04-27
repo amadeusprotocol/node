@@ -1,6 +1,4 @@
 defmodule BIC.Sol do
-    import ConsensusKV
-
     @preamble_size 240
     @matrix_size 1024
     @sol_size @preamble_size + @matrix_size

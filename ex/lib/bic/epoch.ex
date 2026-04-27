@@ -1,6 +1,4 @@
 defmodule BIC.Epoch do
-    import ConsensusKV
-
     @epoch_emission_base BIC.Coin.to_flat(1_000_000)
     @epoch_emission_fixed BIC.Coin.to_flat(100_000)
     @epoch_interval 100_000
