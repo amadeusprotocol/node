@@ -77,11 +77,10 @@ defmodule FabricGen do
   end
 
   def best_entry_for_height(height) do
-    rooted_tip = DB.Chain.rooted_tip()
+    parent_hash = DB.Entry.by_height_in_main_chain(height - 1)
     next_entries = height
     |> DB.Entry.by_height()
-    #TODO: fix this via a secondary index on is_in_main_chain
-    #|> Enum.filter(& &1.header_unpacked.prev_hash == rooted_tip)
+    |> Enum.filter(& &1.header.prev_hash == parent_hash)
     |> Enum.map(fn(entry)->
         {mut_hash, score} = DB.Attestation.best_consensus_by_entryhash(entry.hash)
         {entry, mut_hash, score}
