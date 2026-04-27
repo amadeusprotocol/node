@@ -59,12 +59,15 @@ defmodule NodeProto do
   end
 
   @max_decompressed_size 64 * 1024 * 1024  # 64 MiB
+  @max_window_log 26
   @decompress_chunk_size 64 * 1024          # 64 KiB feed per streaming step
 
   def decompress_and_unpack(compressed_data) do
-    case zstd_declared_size(compressed_data) do
-      {:ok, size} when size > @max_decompressed_size ->
+    case :zstd.get_frame_header(compressed_data) do
+      {:ok, %{frameContentSize: size}} when size > @max_decompressed_size ->
         throw(%{error: :decompressed_size_too_large, declared: size})
+      {:ok, %{windowSize: size}} when size > @max_decompressed_size ->
+        throw(%{error: :decompression_window_too_large, declared: size})
       _ -> :ok
     end
 
@@ -75,13 +78,20 @@ defmodule NodeProto do
   end
 
   defp stream_decompress(input) do
-    stream = :zstd.decompress_init()
-    chunks = stream_decompress_loop(stream, input, [], 0)
-    IO.iodata_to_binary(chunks)
+    {:ok, stream} = :zstd.context(:decompress, %{windowLogMax: @max_window_log})
+
+    try do
+      chunks = stream_decompress_loop(stream, input, [], 0)
+      IO.iodata_to_binary(Enum.reverse(chunks))
+    after
+      :zstd.close(stream)
+    end
   end
 
-  defp stream_decompress_loop(_stream, <<>>, acc, _total) do
-    Enum.reverse(acc)
+  defp stream_decompress_loop(stream, <<>>, acc, total) do
+    {:done, out} = :zstd.finish(stream, <<>>)
+    {acc, _total} = append_decompressed_chunk(acc, total, out)
+    acc
   end
 
   defp stream_decompress_loop(stream, input, acc, total) do
@@ -93,7 +103,25 @@ defmodule NodeProto do
         {input, <<>>}
       end
 
-    {out, stream2} = :zstd.decompress(stream, chunk)
+    if rest == <<>> do
+      {:done, out} = :zstd.finish(stream, chunk)
+      {acc, _total} = append_decompressed_chunk(acc, total, out)
+      acc
+    else
+      case :zstd.stream(stream, chunk) do
+        {:continue, out} ->
+          {acc, total} = append_decompressed_chunk(acc, total, out)
+          stream_decompress_loop(stream, rest, acc, total)
+
+        {:continue, remainder, out} ->
+          {acc, total} = append_decompressed_chunk(acc, total, out)
+          remainder = IO.iodata_to_binary(remainder)
+          stream_decompress_loop(stream, <<remainder::binary, rest::binary>>, acc, total)
+      end
+    end
+  end
+
+  defp append_decompressed_chunk(acc, total, out) do
     out_size = :erlang.iolist_size(out)
     new_total = total + out_size
 
@@ -101,54 +129,8 @@ defmodule NodeProto do
       throw(%{error: :decompressed_size_too_large, exceeded_at: new_total})
     end
 
-    stream_decompress_loop(stream2, rest, [out | acc], new_total)
+    {[out | acc], new_total}
   end
-
-  defp zstd_declared_size(<<0x28, 0xB5, 0x2F, 0xFD, fhd, rest::binary>>) do
-    import Bitwise
-    fcs_flag = bsr(fhd, 6)
-    ss_flag = band(bsr(fhd, 5), 1)
-    di_flag = band(fhd, 0x03)
-
-    window_size = if ss_flag == 0, do: 1, else: 0
-    did_size =
-      case di_flag do
-        0 -> 0
-        1 -> 1
-        2 -> 2
-        3 -> 4
-      end
-
-    fcs_size =
-      cond do
-        fcs_flag == 0 and ss_flag == 1 -> 1
-        fcs_flag == 0 -> 0
-        fcs_flag == 1 -> 2
-        fcs_flag == 2 -> 4
-        fcs_flag == 3 -> 8
-        true -> 0
-      end
-
-    skip = window_size + did_size
-
-    cond do
-      fcs_size == 0 -> {:unknown, :no_fcs}
-      byte_size(rest) < skip + fcs_size -> {:unknown, :short_frame}
-      fcs_size == 1 ->
-        <<_::binary-size(skip), fcs::8, _::binary>> = rest
-        {:ok, fcs}
-      fcs_size == 2 ->
-        <<_::binary-size(skip), fcs::16-little, _::binary>> = rest
-        {:ok, fcs + 256}
-      fcs_size == 4 ->
-        <<_::binary-size(skip), fcs::32-little, _::binary>> = rest
-        {:ok, fcs}
-      fcs_size == 8 ->
-        <<_::binary-size(skip), fcs::64-little, _::binary>> = rest
-        {:ok, fcs}
-    end
-  end
-  defp zstd_declared_size(_), do: {:unknown, :bad_magic}
 
   def compress(msg) do
     msg
