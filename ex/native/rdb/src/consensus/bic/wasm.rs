@@ -212,17 +212,23 @@ fn import_return_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len:
 }
 
 fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, extra_table_ptr: i32) -> Result<i32, RuntimeError> {
-    let (contract, function, args, attached_symbol, attached_amount) = {
-        let (data, store) = env.data_and_store_mut();
-        let view = data.memory.view(&store);
+    let (data, mut store) = env.data_and_store_mut();
+    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let applyenv = unsafe { data.applyenv_ptr.as_mut() };
+    budget_sync_in(&mut store, &instance, applyenv);
 
-        // Read table
+    let (contract, function, args, attached_symbol, attached_amount) = {
+        let view = data.memory.clone().view(&store);
+
+        // First pass: read tables (cheap — only ptr/len pairs), validate per-arg cap,
+        // and sum total marshalled bytes. NO allocation/copy yet.
         let mut count_buf = [0u8; 4];
         view.read(table_ptr as u64, &mut count_buf).unwrap_or_else(|_| panic_any("exec_call_table_invalid_ptr"));
         let arg_count = i32::from_le_bytes(count_buf) as usize;
         if arg_count > 16 { panic_any("exec_call_too_many_args") }
 
-        let mut final_args: Vec<Vec<u8>> = Vec::with_capacity(arg_count);
+        let mut main_table: Vec<(i32, i32)> = Vec::with_capacity(arg_count);
+        let mut total_bytes: usize = 0;
         for i in 0..arg_count {
             let offset = (table_ptr as u64) + 4 + (i as u64 * 8);
             let mut row_buf = [0u8; 8];
@@ -230,15 +236,13 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
             let arg_ptr = i32::from_le_bytes(row_buf[0..4].try_into().unwrap());
             let arg_len = i32::from_le_bytes(row_buf[4..8].try_into().unwrap());
 
-            if arg_len as usize > protocol::WASM_MAX_PTR_LEN { panic_any("exec_call_ptr_term_too_long") }
+            if arg_len < 0 || arg_len as usize > protocol::WASM_MAX_PTR_LEN { panic_any("exec_call_ptr_term_too_long") }
 
-            let mut arg_data = vec![0u8; arg_len as usize];
-            view.read(arg_ptr as u64, &mut arg_data).unwrap_or_else(|_| panic_any("exec_read_call_table_data_error"));
-            final_args.push(arg_data);
+            total_bytes = total_bytes.saturating_add(arg_len as usize);
+            main_table.push((arg_ptr, arg_len));
         }
 
-        // Read extra table
-        let mut final_args_extra: Vec<Vec<u8>> = Vec::new();
+        let mut extra_table: Vec<(i32, i32)> = Vec::new();
         if extra_table_ptr != 0 {
             view.read(extra_table_ptr as u64, &mut count_buf).unwrap_or_else(|_| panic_any("exec_call_extra_invalid"));
             let extra_count = i32::from_le_bytes(count_buf) as usize;
@@ -253,10 +257,30 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
 
                 if arg_len < 0 || arg_len as usize > protocol::WASM_MAX_PTR_LEN { panic_any("exec_call_extra_ptr_term_too_long") }
 
-                let mut arg_data = vec![0u8; arg_len as usize];
-                view.read(arg_ptr as u64, &mut arg_data).unwrap_or_else(|_| panic_any("exec_read_extra_data"));
-                final_args_extra.push(arg_data);
+                total_bytes = total_bytes.saturating_add(arg_len as usize);
+                extra_table.push((arg_ptr, arg_len));
             }
+        }
+
+        if total_bytes > protocol::WASM_MAX_CALL_ARGS_TOTAL { panic_any("exec_call_total_args_too_long") }
+
+        crate::consensus::consensus_kv::exec_budget_decr(
+            applyenv,
+            protocol::COST_PER_BYTE_HISTORICAL * total_bytes as i128,
+        );
+
+        // Second pass: now allocate and copy. Total bytes already capped + paid for.
+        let mut final_args: Vec<Vec<u8>> = Vec::with_capacity(main_table.len());
+        for (arg_ptr, arg_len) in &main_table {
+            let mut arg_data = vec![0u8; *arg_len as usize];
+            view.read(*arg_ptr as u64, &mut arg_data).unwrap_or_else(|_| panic_any("exec_read_call_table_data_error"));
+            final_args.push(arg_data);
+        }
+        let mut final_args_extra: Vec<Vec<u8>> = Vec::with_capacity(extra_table.len());
+        for (arg_ptr, arg_len) in &extra_table {
+            let mut arg_data = vec![0u8; *arg_len as usize];
+            view.read(*arg_ptr as u64, &mut arg_data).unwrap_or_else(|_| panic_any("exec_read_extra_data"));
+            final_args_extra.push(arg_data);
         }
 
         // Process Arguments
@@ -273,12 +297,6 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
 
         (contract, function, args, attached_symbol, attached_amount)
     };
-
-
-    let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
-    let applyenv = unsafe { data.applyenv_ptr.as_mut() };
-    budget_sync_in(&mut store, &instance, applyenv);
 
     crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_CALL);
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);

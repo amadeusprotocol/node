@@ -64,6 +64,7 @@ pub const MAX_DB_KEY_SIZE: usize = 512;
 pub const MAX_DB_VALUE_SIZE: usize = 1048576;
 
 pub const WASM_MAX_BINARY_SIZE: usize = 1048576;
+pub const WASM_MAX_CALL_ARGS_TOTAL: usize = 1 * 1024 * 1024;
 pub const WASM_MAX_FUNCTIONS: u32 = 1000;
 pub const WASM_MAX_GLOBALS: u32 = 100;
 pub const WASM_MAX_EXPORTS: u32 = 50;
