@@ -547,9 +547,9 @@ fn as_read_string(view: &MemoryView, ptr: i32) -> String {
 fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filename_ptr: i32, line: i32, column: i32) -> Result<(), RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
-    let view = data.memory.clone().view(&store);
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
+    let view = data.memory.clone().view(&store);
 
     //set_return_value(applyenv, b"as_abort".to_vec());
 
