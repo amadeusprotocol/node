@@ -648,6 +648,9 @@ pub fn check_module_limits(wasm_bytes: &[u8]) -> Result<(), String> {
                     }
                 }
             }
+            Payload::StartSection { .. } => {
+                return Err("wasmparser_start_section_not_allowed".to_string());
+            }
             _ => {}
         }
     }
@@ -664,7 +667,7 @@ pub fn validate_contract(env: &mut ApplyEnv, wasm_bytes: &[u8]) {
 
     let module = Module::new(&store, wasm_bytes).unwrap_or_else(|_| panic_any("exec_invalid_module"));
 
-    setup_wasm_instance(env, &module, &mut store, true, &[]);
+    setup_wasm_instance(env, &module, &mut store, true, true, &[]);
 }
 
 fn cost_function(operator: &WasmerOperator) -> u64 {
@@ -737,7 +740,29 @@ fn make_engine(exec_remaining: u64) -> Engine {
         .into()
 }
 
-pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Store, readonly: bool, function_args: &[Vec<u8>]) -> (Instance, Vec<Value>) {
+fn stub_panic_validation() -> ! {
+    panic_any("validation_must_not_call_host")
+}
+fn stub_log(_env: FunctionEnvMut<HostEnv>, _ptr: i32, _len: i32) {
+    stub_panic_validation();
+}
+fn stub_two_void(_env: FunctionEnvMut<HostEnv>, _: i32, _: i32) -> Result<(), RuntimeError> {
+    stub_panic_validation();
+}
+fn stub_two_i32(_env: FunctionEnvMut<HostEnv>, _: i32, _: i32) -> Result<i32, RuntimeError> {
+    stub_panic_validation();
+}
+fn stub_four_void(_env: FunctionEnvMut<HostEnv>, _: i32, _: i32, _: i32, _: i32) -> Result<(), RuntimeError> {
+    stub_panic_validation();
+}
+fn stub_four_i32(_env: FunctionEnvMut<HostEnv>, _: i32, _: i32, _: i32, _: i32) -> Result<i32, RuntimeError> {
+    stub_panic_validation();
+}
+fn stub_seed(_env: FunctionEnvMut<HostEnv>) -> Result<f64, RuntimeError> {
+    stub_panic_validation();
+}
+
+pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Store, readonly: bool, validation_only: bool, function_args: &[Vec<u8>]) -> (Instance, Vec<Value>) {
     // Setup Memory
     let memory = Memory::new(store, MemoryType::new(Pages(2), Some(Pages(30)), false)).unwrap_or_else(|_| panic_any("exec_memory_alloc"));
 
@@ -771,36 +796,46 @@ pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Stor
 
     let host_env = FunctionEnv::new(store, host_env_data);
 
-    // Imports
-    let import_object = imports! {
-        "env" => {
-            "memory" => memory,
-            "import_log" => Function::new_typed_with_env(store, &host_env, import_log_implementation),
-            "import_return" => Function::new_typed_with_env(store, &host_env, import_return_implementation),
-            "import_call" => Function::new_typed_with_env(store, &host_env, import_call_implementation),
+    let import_object = if validation_only {
+        imports! {
+            "env" => {
+                "memory" => memory,
+                "import_log"           => Function::new_typed_with_env(store, &host_env, stub_log),
+                "import_return"        => Function::new_typed_with_env(store, &host_env, stub_two_void),
+                "import_call"          => Function::new_typed_with_env(store, &host_env, stub_two_i32),
+                "import_kv_put"        => Function::new_typed_with_env(store, &host_env, stub_four_void),
+                "import_kv_increment"  => Function::new_typed_with_env(store, &host_env, stub_four_i32),
+                "import_kv_delete"     => Function::new_typed_with_env(store, &host_env, stub_two_void),
+                "import_kv_get"        => Function::new_typed_with_env(store, &host_env, stub_two_i32),
+                "import_kv_exists"     => Function::new_typed_with_env(store, &host_env, stub_two_i32),
+                "import_kv_get_prev"   => Function::new_typed_with_env(store, &host_env, stub_four_i32),
+                "import_kv_get_next"   => Function::new_typed_with_env(store, &host_env, stub_four_i32),
+                "abort"                => Function::new_typed_with_env(store, &host_env, stub_four_void),
+                "seed"                 => Function::new_typed_with_env(store, &host_env, stub_seed),
+            }
+        }
+    } else {
+        imports! {
+            "env" => {
+                "memory" => memory,
+                "import_log" => Function::new_typed_with_env(store, &host_env, import_log_implementation),
+                "import_return" => Function::new_typed_with_env(store, &host_env, import_return_implementation),
+                "import_call" => Function::new_typed_with_env(store, &host_env, import_call_implementation),
 
-            //Storage
-            "import_kv_put" => Function::new_typed_with_env(store, &host_env, import_storage_kv_put_implementation),
-            "import_kv_increment" => Function::new_typed_with_env(store, &host_env, import_storage_kv_increment_implementation),
-            "import_kv_delete" => Function::new_typed_with_env(store, &host_env, import_storage_kv_delete_implementation),
+                //Storage
+                "import_kv_put" => Function::new_typed_with_env(store, &host_env, import_storage_kv_put_implementation),
+                "import_kv_increment" => Function::new_typed_with_env(store, &host_env, import_storage_kv_increment_implementation),
+                "import_kv_delete" => Function::new_typed_with_env(store, &host_env, import_storage_kv_delete_implementation),
 
-            "import_kv_get" => Function::new_typed_with_env(store, &host_env, import_storage_kv_get_implementation),
-            "import_kv_exists" => Function::new_typed_with_env(store, &host_env, import_storage_kv_exists_implementation),
-            "import_kv_get_prev" => Function::new_typed_with_env(store, &host_env, import_storage_kv_get_prev_implementation),
-            "import_kv_get_next" => Function::new_typed_with_env(store, &host_env, import_storage_kv_get_next_implementation),
+                "import_kv_get" => Function::new_typed_with_env(store, &host_env, import_storage_kv_get_implementation),
+                "import_kv_exists" => Function::new_typed_with_env(store, &host_env, import_storage_kv_exists_implementation),
+                "import_kv_get_prev" => Function::new_typed_with_env(store, &host_env, import_storage_kv_get_prev_implementation),
+                "import_kv_get_next" => Function::new_typed_with_env(store, &host_env, import_storage_kv_get_next_implementation),
 
-
-
-/*
-
-            //storage
-            "import_kv_clear" => Function::new_typed_with_env(&mut store, &host_env, import_storage_kv_clear_implementation),
-
- */
-
-            //AssemblyScript specific
-            "abort" => Function::new_typed_with_env(store, &host_env, as_abort_implementation),
-            "seed" => Function::new_typed_with_env(store, &host_env, as_seed_implementation),
+                //AssemblyScript specific
+                "abort" => Function::new_typed_with_env(store, &host_env, as_abort_implementation),
+                "seed" => Function::new_typed_with_env(store, &host_env, as_seed_implementation),
+            }
         }
     };
 
@@ -877,7 +912,7 @@ pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: Strin
         None => compile_and_cache_module(&store, wasm_bytes, cache_key),
     };
 
-    let (instance, wasm_args) = setup_wasm_instance(env, &module, &mut store, false, &function_args);
+    let (instance, wasm_args) = setup_wasm_instance(env, &module, &mut store, env.readonly, false, &function_args);
 
     let entry_to_call = instance.exports.get_function(&function_name).unwrap_or_else(|e| {
         log_line(env, e.to_string().into_bytes());
