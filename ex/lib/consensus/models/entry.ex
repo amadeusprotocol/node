@@ -94,23 +94,26 @@ defmodule Entry do
         try do
         entry = unpack_from_net(entry)
 
-        res_sig = validate_signature(entry)
-        res_entry = validate_entry(entry)
+        res_sig = validate_signature(entry, true)
+        if res_sig.error != :ok, do: throw res_sig
 
-        cond do
-            res_sig.error != :ok -> throw res_sig
-            res_entry.error != :ok -> throw res_entry
-            true -> %{error: :ok, entry: entry}
-        end
+        entry = Map.put(entry, :hash, res_sig.hash)
+        res_entry = validate_entry(entry, res_sig.hash)
+        if res_entry.error != :ok, do: throw res_entry
+
+        %{error: :ok, entry: entry}
         catch
             :throw,r -> r
             e,r -> IO.inspect {Entry, :unpack_and_validate, e, r, __STACKTRACE__}; %{error: :unknown}
         end
     end
 
-    def validate_entry(e) do
+    def validate_entry(e, hash \\ nil) do
         try do
         eh = e.header
+        hash = hash || header_hash(eh)
+        validate_hash(e, hash)
+
         if !is_integer(eh.slot), do: throw(%{error: :slot_not_integer})
         if !is_integer(eh.prev_slot), do: throw(%{error: :prev_slot_not_integer})
         if !is_integer(eh.height), do: throw(%{error: :height_not_integer})
@@ -153,11 +156,13 @@ defmodule Entry do
         end
     end
 
-    def validate_signature(e) do
+    def validate_signature(e, require_hash \\ false) do
         header = e.header
-        hash = :crypto.hash(:sha256, RDB.vecpak_encode(header))
+        hash = header_hash(header)
         mask = e[:mask]
         try do
+          if require_hash, do: validate_hash(e, hash)
+
           if mask do
               trainers = DB.Chain.validators_for_height(header.height)
               trainers_signed = BLS12AggSig.unmask_trainers(trainers, e.mask, e.mask_size)
@@ -172,6 +177,19 @@ defmodule Entry do
         catch
             :throw,r -> Map.put(r, :hash, hash)
             e,r -> IO.inspect({Entry, :validate_signature, e, r, __STACKTRACE__}, limit: 1111111); %{error: :unknown, hash: hash}
+        end
+    end
+
+    defp header_hash(header) do
+        :crypto.hash(:sha256, RDB.vecpak_encode(header))
+    end
+
+    defp validate_hash(entry, hash) do
+        cond do
+            !is_binary(entry[:hash]) -> throw(%{error: :hash_not_binary})
+            byte_size(entry.hash) != 32 -> throw(%{error: :hash_not_256_bits})
+            entry.hash != hash -> throw(%{error: :invalid_hash})
+            true -> true
         end
     end
 
