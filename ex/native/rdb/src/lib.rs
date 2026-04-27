@@ -43,89 +43,55 @@ impl AsColumnFamilyRef for CfResource {
 
 type Tx<'a> = Transaction<'a, TransactionDB<MultiThreaded>>;
 pub struct TxResource {
-    db: ResourceArc<DbResource>,
     tx: Mutex<Option<Tx<'static>>>,
+    _db: ResourceArc<DbResource>,
 }
 unsafe impl Send for TxResource {}
 unsafe impl Sync for TxResource {}
 impl Drop for TxResource {
     fn drop(&mut self) {
         // Best effort: if still open, rollback to release locks
-        if let Ok(mut guard) = self.tx.lock() {
-            if let Some(txn) = guard.take() {
-                let _ = txn.rollback(); // ignore error; we're cleaning up
-            }
+        let tx = match self.tx.get_mut() {
+            Ok(tx) => tx,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(txn) = tx.take() {
+            let _ = txn.rollback(); // ignore error; we're cleaning up
         }
     }
 }
 
 type DbIter<'a> = DBRawIteratorWithThreadMode<'a, TransactionDB<MultiThreaded>>;
-type TxIter<'a> = DBRawIteratorWithThreadMode<'a, Tx<'a>>;
-enum IterInner { Db(DbIter<'static>), Tx(TxIter<'static>) }
+enum IterInner { Db(DbIter<'static>) }
 pub struct ItResource {
-  db: ResourceArc<DbResource>,
-  cf: Option<ResourceArc<CfResource>>,
-  tx: Option<ResourceArc<TxResource>>,
   it: Mutex<Option<IterInner>>,
+  _db: ResourceArc<DbResource>,
+  _cf: Option<ResourceArc<CfResource>>,
 }
 unsafe impl Send for ItResource {} unsafe impl Sync for ItResource {}
 
 impl ItResource {
   pub fn new(
       db: ResourceArc<DbResource>,
-      tx: Option<ResourceArc<TxResource>>,
       cf: Option<ResourceArc<CfResource>>,
   ) -> ResourceArc<Self> {
-      let it = if let Some(txr) = &tx {
-          let guard = txr.tx.lock().expect("tx mutex poisoned");
-          let txn = guard.as_ref().expect("transaction missing (mutex_closed)");
-          let real: TxIter<'_> = match &cf {
-              Some(cf) => txn.raw_iterator_cf(&**cf),
-              None     => txn.raw_iterator(),
-          };
-          IterInner::Tx(unsafe { std::mem::transmute::<TxIter<'_>, TxIter<'static>>(real) })
-      } else {
-          let real: DbIter<'_> = match &cf {
-              Some(cf) => db.db.raw_iterator_cf(&**cf),
-              None     => db.db.raw_iterator(),
-          };
-          IterInner::Db(unsafe { std::mem::transmute::<DbIter<'_>, DbIter<'static>>(real) })
+      let real: DbIter<'_> = match &cf {
+          Some(cf) => db.db.raw_iterator_cf(&**cf),
+          None     => db.db.raw_iterator(),
       };
+      let it = IterInner::Db(unsafe { std::mem::transmute::<DbIter<'_>, DbIter<'static>>(real) });
 
-      ResourceArc::new(Self { db, tx, cf, it: Mutex::new(Some(it)) })
+      ResourceArc::new(Self { it: Mutex::new(Some(it)), _db: db, _cf: cf })
   }
 }
 
-macro_rules! with_it { ($s:expr, $it:ident => $body:expr) => {{
-  let mut g = $s.it.lock().unwrap();
-  match &mut *g {
-      Some(IterInner::Db($it)) => $body,
-      Some(IterInner::Tx($it)) => $body,
-      None => panic!("rocksdb iterator used after close")
-  }
-}}}
-
-#[inline]
-fn to_bin<'a>(env: Env<'a>, src: &[u8]) -> Binary<'a> {
-    let mut ob = OwnedBinary::new(src.len()).expect("alloc failed");
-    ob.as_mut_slice().copy_from_slice(src);
-    Binary::from_owned(ob, env)
-}
-
-impl ItResource {
-  pub fn seek(&self, k: &[u8])         { with_it!(self, it => it.seek(k)); }
-  pub fn seek_to_first(&self)          { with_it!(self, it => it.seek_to_first()); }
-  pub fn seek_to_last(&self)           { with_it!(self, it => it.seek_to_last()); }
-  pub fn next(&self)                   { with_it!(self, it => it.next()); }
-  pub fn prev(&self)                   { with_it!(self, it => it.prev()); }
-  pub fn valid(&self) -> bool          { with_it!(self, it => it.valid()) }
-  pub fn key<'a>(&self, env: Env<'a>) -> Option<Binary<'a>> { with_it!(self, it => it.key().map(|k| to_bin(env, k))) }
-  pub fn val<'a>(&self, env: Env<'a>) -> Option<Binary<'a>> { with_it!(self, it => it.value().map(|v| to_bin(env, v))) }
-  pub fn item<'a>(&self, env: Env<'a>) -> Option<(Binary<'a>, Binary<'a>)> {
-    with_it!(self, it => match (it.key(), it.value()) {
-        (Some(k), Some(v)) => Some((to_bin(env, k), to_bin(env, v))),
-        _ => None,
-    })
+impl Drop for ItResource {
+  fn drop(&mut self) {
+      let it = match self.it.get_mut() {
+          Ok(it) => it,
+          Err(poisoned) => poisoned.into_inner(),
+      };
+      let _ = it.take();
   }
 }
 
@@ -468,7 +434,7 @@ fn delete_range_cf(cf: ResourceArc<CfResource>, start_key: Binary, end_key: Bina
 
 #[rustler::nif]
 fn iterator<'a>(env: Env<'a>, db: ResourceArc<DbResource>) -> NifResult<Term<'a>> {
-    let res = ItResource::new(db.clone(), None, None);
+    let res = ItResource::new(db.clone(), None);
     Ok((atoms::ok(), res).encode(env))
 }
 
@@ -481,7 +447,7 @@ fn iterator_close(it_resource: ResourceArc<ItResource>) -> Atom {
 
 #[rustler::nif]
 fn iterator_cf<'a>(env: Env<'a>, cf: ResourceArc<CfResource>) -> NifResult<Term<'a>> {
-    let res = ItResource::new(cf.db.clone(), None, Some(cf.clone()));
+    let res = ItResource::new(cf.db.clone(), Some(cf.clone()));
     Ok((atoms::ok(), res).encode(env))
 }
 
@@ -495,7 +461,7 @@ fn transaction<'a>(env: Env<'a>, db: ResourceArc<DbResource>) -> NifResult<Term<
     let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(tx_local) };
 
     Ok((atoms::ok(), ResourceArc::new(TxResource {
-        db: db,
+        _db: db,
         tx: Mutex::new(Some(tx_static)),
     })).encode(env))
 }
@@ -627,16 +593,115 @@ fn transaction_delete_cf(tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource
         .map_err(to_nif_rdb_err)
 }
 
-#[rustler::nif]
-fn transaction_iterator<'a>(env: Env<'a>, tx: ResourceArc<TxResource>) -> NifResult<Term<'a>> {
-    let res = ItResource::new(tx.db.clone(), Some(tx.clone()), None);
-    Ok((atoms::ok(), res).encode(env))
-}
+#[rustler::nif(schedule = "DirtyIo")]
+fn transaction_scan_cf<'a>(
+    env: Env<'a>,
+    tx: ResourceArc<TxResource>,
+    cf: Option<ResourceArc<CfResource>>,
+    prefix: Binary<'a>,
+    cursor: Binary<'a>,
+    direction: Atom,
+    skip_cursor: bool,
+    offset: u32,
+    limit: u32,
+    max_bytes: u64,
+) -> NifResult<(Option<Binary<'a>>, Vec<(Binary<'a>, Binary<'a>)>)> {
+    let reverse = if direction == atoms::reverse() {
+        true
+    } else if direction == atoms::forward() {
+        false
+    } else {
+        return Err(Error::BadArg);
+    };
 
-#[rustler::nif]
-fn transaction_iterator_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource>) -> NifResult<Term<'a>> {
-    let res = ItResource::new(cf.db.clone(), Some(tx.clone()), Some(cf.clone()));
-    Ok((atoms::ok(), res).encode(env))
+    if limit == 0 {
+        return Ok((None, Vec::new()));
+    }
+
+    let prefix = prefix.as_slice();
+    let cursor = cursor.as_slice();
+    let mut start_key = Vec::with_capacity(prefix.len() + cursor.len());
+    start_key.extend_from_slice(prefix);
+    start_key.extend_from_slice(cursor);
+
+    let guard = tx.tx.lock().unwrap();
+    let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
+    let mut it = match cf {
+        Some(cf) => txn.raw_iterator_cf(&*cf),
+        None => txn.raw_iterator(),
+    };
+
+    if reverse {
+        it.seek_for_prev(&start_key);
+    } else {
+        it.seek(&start_key);
+    }
+
+    if skip_cursor && it.valid() {
+        if let Some(k) = it.key() {
+            if k == start_key.as_slice() {
+                if reverse {
+                    it.prev();
+                } else {
+                    it.next();
+                }
+            }
+        }
+    }
+
+    for _ in 0..offset {
+        if !it.valid() {
+            break;
+        }
+        match it.key() {
+            Some(k) if k.starts_with(prefix) => {
+                if reverse {
+                    it.prev();
+                } else {
+                    it.next();
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut last_cursor = None;
+    let mut bytes = 0u64;
+
+    while rows.len() < limit as usize && it.valid() {
+        let Some(k) = it.key() else { break };
+        if !k.starts_with(prefix) {
+            break;
+        }
+        let Some(v) = it.value() else { break };
+
+        let suffix = &k[prefix.len()..];
+        let next_bytes = bytes.saturating_add(suffix.len() as u64).saturating_add(v.len() as u64);
+        if max_bytes > 0 && !rows.is_empty() && next_bytes > max_bytes {
+            break;
+        }
+        bytes = next_bytes;
+
+        let mut kb = OwnedBinary::new(suffix.len()).ok_or_else(|| Error::Term(Box::new("alloc key")))?;
+        kb.as_mut_slice().copy_from_slice(suffix);
+        let key_bin = Binary::from_owned(kb, env);
+
+        let mut vb = OwnedBinary::new(v.len()).ok_or_else(|| Error::Term(Box::new("alloc val")))?;
+        vb.as_mut_slice().copy_from_slice(v);
+        let val_bin = Binary::from_owned(vb, env);
+
+        last_cursor = Some(key_bin);
+        rows.push((key_bin, val_bin));
+
+        if reverse {
+            it.prev();
+        } else {
+            it.next();
+        }
+    }
+
+    Ok((last_cursor, rows))
 }
 
 //Iterator Generic
@@ -657,38 +722,37 @@ fn parse_iter_move<'a>(term: Term<'a>) -> Result<IterMove<'a>, Error> {
 #[rustler::nif]
 fn iterator_move<'a>(env: Env<'a>, res: ResourceArc<ItResource>, action: Term<'a>) -> NifResult<Term<'a>> {
     let action = parse_iter_move(action)?;
-
-    match action {
-        IterMove::First => with_it!(res, it => it.seek_to_first()),
-        IterMove::Last => with_it!(res, it => it.seek_to_last()),
-        IterMove::Next => with_it!(res, it => it.next()),
-        IterMove::Prev => with_it!(res, it => it.prev()),
-        IterMove::Seek(ref key) => with_it!(res, it => it.seek(key.as_slice())),
-        IterMove::SeekForPrev(ref key) => with_it!(res, it => it.seek_for_prev(key.as_slice())),
-    }
-
     let mut g = res.it.lock().unwrap();
-    let is_valid = match &*g {
-        Some(IterInner::Db(it)) => it.valid(),
-        Some(IterInner::Tx(it)) => it.valid(),
-        None => false,
-    };
-    if !is_valid { return Ok((atoms::error(), atoms::invalid_iterator()).encode(env)); }
 
-    let (k_opt, v_opt) = match &mut *g {
-        Some(IterInner::Db(it)) => (it.key(), it.value()),
-        Some(IterInner::Tx(it)) => (it.key(), it.value()),
-        None => (None, None), // If closed, return no data
-    };
-    match (k_opt, v_opt) {
-        (Some(k), Some(v)) => {
-            let mut kb = OwnedBinary::new(k.len()).ok_or_else(|| Error::Term(Box::new("alloc key")))?;
-            kb.as_mut_slice().copy_from_slice(k);
-            let mut vb = OwnedBinary::new(v.len()).ok_or_else(|| Error::Term(Box::new("alloc val")))?;
-            vb.as_mut_slice().copy_from_slice(v);
-            Ok((atoms::ok(), Binary::from_owned(kb, env), Binary::from_owned(vb, env)).encode(env))
+    macro_rules! move_and_encode { ($it:ident) => {{
+        match action {
+            IterMove::First => $it.seek_to_first(),
+            IterMove::Last => $it.seek_to_last(),
+            IterMove::Next => $it.next(),
+            IterMove::Prev => $it.prev(),
+            IterMove::Seek(ref key) => $it.seek(key.as_slice()),
+            IterMove::SeekForPrev(ref key) => $it.seek_for_prev(key.as_slice()),
         }
-        _ => Ok((atoms::ok(), atoms::nil(), atoms::nil()).encode(env)),
+
+        if !$it.valid() {
+            return Ok((atoms::error(), atoms::invalid_iterator()).encode(env));
+        }
+
+        match ($it.key(), $it.value()) {
+            (Some(k), Some(v)) => {
+                let mut kb = OwnedBinary::new(k.len()).ok_or_else(|| Error::Term(Box::new("alloc key")))?;
+                kb.as_mut_slice().copy_from_slice(k);
+                let mut vb = OwnedBinary::new(v.len()).ok_or_else(|| Error::Term(Box::new("alloc val")))?;
+                vb.as_mut_slice().copy_from_slice(v);
+                Ok((atoms::ok(), Binary::from_owned(kb, env), Binary::from_owned(vb, env)).encode(env))
+            }
+            _ => Ok((atoms::ok(), atoms::nil(), atoms::nil()).encode(env)),
+        }
+    }}}
+
+    match &mut *g {
+        Some(IterInner::Db(it)) => move_and_encode!(it),
+        None => Ok((atoms::error(), atoms::invalid_iterator()).encode(env)),
     }
 }
 
@@ -729,7 +793,7 @@ fn apply_entry<'a>(env: Env<'a>, db: ResourceArc<DbResource>, entry_vecpak: Bina
 
     let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(txn) };
     let term_txn = ResourceArc::new(TxResource {
-        db: db,
+        _db: db,
         tx: Mutex::new(Some(tx_static)),
     }).encode(env);
 
@@ -1022,7 +1086,7 @@ fn contract_view<'a>(env: Env<'a>, db: ResourceArc<DbResource>, cur_entry_trimme
 
     let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(txn) };
     let term_txn = ResourceArc::new(TxResource {
-        db: db,
+        _db: db,
         tx: Mutex::new(Some(tx_static)),
     }).encode(env);
 

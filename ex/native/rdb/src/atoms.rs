@@ -3,7 +3,6 @@ rustler::atoms! {
     error,
     nil,
     mutex_closed,
-    busy_iterators,
 
     invalid_iterator,
     // Iterator control atoms
