@@ -77,8 +77,13 @@ defmodule Entry do
         entry = Map.put(entry, :header, entry_header)
         if !entry[:mask] do entry else
           trainers = DB.Chain.validators_for_height(entry_header.height)
-          trainers_signed = BLS12AggSig.unmask_trainers(trainers, entry.mask, entry.mask_size)
+          true = is_integer(entry.mask_size)
+          true = is_integer(entry.mask_set_size)
+          true = is_bitstring(entry.mask)
           true = entry.mask_size == length(trainers)
+          true = bit_size(entry.mask) >= entry.mask_size
+
+          trainers_signed = BLS12AggSig.unmask_trainers(trainers, entry.mask, entry.mask_size)
           true = entry.mask_set_size == length(trainers_signed)
           entry
         end
@@ -165,6 +170,11 @@ defmodule Entry do
 
           if mask do
               trainers = DB.Chain.validators_for_height(header.height)
+              if !is_integer(e.mask_size), do: throw(%{error: :mask_size_not_integer})
+              if !is_bitstring(e.mask), do: throw(%{error: :mask_not_bitstring})
+              if e.mask_size != length(trainers), do: throw(%{error: :mask_size_mismatch})
+              if bit_size(e.mask) < e.mask_size, do: throw(%{error: :mask_too_short})
+
               trainers_signed = BLS12AggSig.unmask_trainers(trainers, e.mask, e.mask_size)
               if nil in trainers_signed, do: throw(%{error: :wrong_epoch})
 
