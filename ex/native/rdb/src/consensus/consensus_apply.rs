@@ -202,7 +202,7 @@ pub fn apply_entry<'db, 'a>(db: &'db TransactionDB<MultiThreaded>, txn: Transact
         let attached_symbol = action.attached_symbol.clone();
         let attached_amount = action.attached_amount.clone();
 
-        applyenv.caller_env.call_counter = applyenv.caller_env.call_counter.saturating_add(1);
+        applyenv.caller_env.call_counter = 1;
         applyenv.caller_env.account_current = contract.to_vec();
         applyenv.muts = Vec::new();
         applyenv.muts_rev = Vec::new();
@@ -824,8 +824,16 @@ pub fn call_wasmvm(env: &mut ApplyEnv, contract: Vec<u8>, function: Vec<u8>, arg
     let function = String::from_utf8(function).unwrap_or_else(|_| panic_any("invalid_function"));
 
     //seed the rng
+    // Inputs:
+    //   entry_vr      — block-level VRF, fixed for the entry
+    //   tx_hash       — unique per TX and signed, producer can't tamper
+    //   tx_index      — TX position within the entry
+    //   call_counter  — call ordinal within THIS tx (reset per-tx in apply_entry)
+    // call_counter is per-tx so a prior failed/reverted tx cannot shift this seed.
     let mut hasher = blake3::Hasher::new();
     hasher.update(&env.caller_env.entry_vr);
+    hasher.update(&env.caller_env.tx_hash);
+    hasher.update(&env.caller_env.tx_index.to_le_bytes());
     hasher.update(&env.caller_env.call_counter.to_le_bytes());
     let result_hash = hasher.finalize();
 
