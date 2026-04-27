@@ -14,7 +14,7 @@ pub fn call_deploy(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: 
 
         env.caller_env.account_current = og_account_caller.clone();
         env.caller_env.account_caller = og_account_current.clone();
-        env.caller_env.call_counter += 1;
+        env.caller_env.call_counter = env.caller_env.call_counter.saturating_add(1);
         env.caller_env.call_return_value = Vec::new();
 
         let init_function = args[1].as_slice().to_vec();

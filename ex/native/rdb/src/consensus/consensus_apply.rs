@@ -179,7 +179,8 @@ pub fn apply_entry<'db, 'a>(db: &'db TransactionDB<MultiThreaded>, txn: Transact
 
     call_txs_pre_upfront_cost(&mut applyenv, &entry.txs);
 
-    for (i, txu) in entry.txs.clone().into_iter().enumerate() {
+    let txs_count = entry.txs.len();
+    for (i, txu) in entry.txs.into_iter().enumerate() {
         let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(&txu);
 
         let tx_hash = txu.hash.as_slice().try_into().unwrap_or_else(|_| panic!("tx_hash_len_wrong"));
@@ -201,13 +202,12 @@ pub fn apply_entry<'db, 'a>(db: &'db TransactionDB<MultiThreaded>, txn: Transact
         let attached_symbol = action.attached_symbol.clone();
         let attached_amount = action.attached_amount.clone();
 
-        applyenv.caller_env.call_counter += 1;
+        applyenv.caller_env.call_counter = applyenv.caller_env.call_counter.saturating_add(1);
         applyenv.caller_env.account_current = contract.to_vec();
         applyenv.muts = Vec::new();
         applyenv.muts_rev = Vec::new();
         applyenv.logs = Vec::new();
         applyenv.logs_size = 0;
-        applyenv.exec_track = true;
         applyenv.exec_left = protocol::AMA_10_CENT;
         applyenv.exec_max = protocol::AMA_10_CENT;
         applyenv.storage_left = protocol::AMA_1_DOLLAR;
@@ -216,6 +216,7 @@ pub fn apply_entry<'db, 'a>(db: &'db TransactionDB<MultiThreaded>, txn: Transact
 
         std::panic::set_hook(Box::new(|_| {}));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            applyenv.exec_track = true;
             match consensus::bls12_381::validate_public_key(contract.as_slice()) {
                 false => {
                     //println!("{:?}->{:?} {:?} {:?}", String::from_utf8_lossy(&contract), String::from_utf8_lossy(&function), attached_amount, attached_symbol);
@@ -300,7 +301,7 @@ pub fn apply_entry<'db, 'a>(db: &'db TransactionDB<MultiThreaded>, txn: Transact
 
     call_exit(&mut applyenv);
 
-    let root_receipts = root_receipts(entry.txs.clone(), applyenv.receipts.clone());
+    let root_receipts = root_receipts(txs_count, applyenv.receipts.clone());
     let root_contractstate = update_and_root_contractstate(&mut applyenv);
     applyenv.into_parts(root_receipts, root_contractstate)
 
@@ -469,9 +470,8 @@ fn update_and_root_contractstate(applyenv: &mut ApplyEnv) -> [u8; 32] {
     contractstate_root
 }
 
-fn root_receipts(txus: Vec<crate::model::tx::TXU>, receipts: Vec<TXReceipt>) -> [u8; 32] {
+fn root_receipts(count: usize, receipts: Vec<TXReceipt>) -> [u8; 32] {
     use sha2::{Sha256, Digest};
-    let count = txus.len();
     let mut kvs = Vec::with_capacity((count * 4) + 1);
 
     kvs.push(bintree::Op::Insert(None, b"count".to_vec(), (count as u32).to_be_bytes().to_vec()));
@@ -594,8 +594,17 @@ fn call_txs_pre_upfront_cost<'a>(env: &mut ApplyEnv, txus: &[crate::model::tx::T
 
         set_apply_env_tx(env, &tx_hash, &tx_signer, tx_nonce);
 
-        // Update nonce
-        consensus_kv::kv_put(env, &crate::bcat(&[b"account:", &tx_signer, b":attribute:nonce"]), &tx_nonce.to_string().into_bytes());
+        // Update nonce — defensive monotonicity check (Elixir validate_next is the
+        // primary enforcement; this catches regressions in that layer).
+        let nonce_key = crate::bcat(&[b"account:", &tx_signer, b":attribute:nonce"]);
+        if let Some(existing) = consensus_kv::kv_get(env, &nonce_key) {
+            let existing_nonce: u64 = std::str::from_utf8(&existing)
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or_else(|| panic_any("invalid_existing_nonce"));
+            if tx_nonce <= existing_nonce { panic_any("invalid_tx_nonce_not_monotonic") }
+        }
+        consensus_kv::kv_put(env, &nonce_key, &tx_nonce.to_string().into_bytes());
 
         // Deduct tx historical cost
         let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(txu);

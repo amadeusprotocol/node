@@ -72,6 +72,9 @@ pub const WASM_MAX_IMPORTS: u32 = 50;
 pub const MAX_CALL_DEPTH: u32 = 16;
 
 pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i128) {
+    if cost < 0 {
+        std::panic::panic_any("pay_cost_negative")
+    }
     consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]), -cost);
     // Increment validator / burn
     consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.entry_signer, b":balance:AMA"]), cost/2);
@@ -79,8 +82,10 @@ pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i12
 }
 
 pub fn tx_historical_cost(txu: &crate::model::tx::TXU) -> i128 {
+    let tx_bytes = crate::model::tx::to_bytes_tx(&txu.tx)
+        .unwrap_or_else(|_| std::panic::panic_any("invalid_tx_serialization"));
     std::cmp::max(
             AMA_1_CENT,
-            COST_PER_BYTE_HISTORICAL * crate::model::tx::to_bytes_tx(&txu.tx).unwrap().len() as i128,
+            COST_PER_BYTE_HISTORICAL * tx_bytes.len() as i128,
         )
 }

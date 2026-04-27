@@ -288,7 +288,7 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
 
     applyenv.caller_env.account_caller = og_account_current.clone();
     applyenv.caller_env.account_current = contract.clone();
-    applyenv.caller_env.call_counter += 1;
+    applyenv.caller_env.call_counter = applyenv.caller_env.call_counter.saturating_add(1);
     applyenv.caller_env.call_return_value = Vec::new();
 
     let result = match crate::consensus::bls12_381::validate_public_key(contract.as_slice()) {
