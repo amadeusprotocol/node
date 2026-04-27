@@ -459,8 +459,7 @@ fn delete_cf(cf: ResourceArc<CfResource>, key: Binary) -> NifResult<Atom> {
 fn delete_range_cf(cf: ResourceArc<CfResource>, start_key: Binary, end_key: Binary, compact: bool) -> NifResult<Atom> {
     cf.db.db
         .delete_range_cf(&*cf, start_key.as_slice(), end_key.as_slice())
-        .map(|_| atoms::ok())
-        .map_err(to_nif_rdb_err);
+        .map_err(to_nif_rdb_err)?;
     if compact {
         cf.db.db.compact_range_cf(&*cf, Option::<&[u8]>::None, Option::<&[u8]>::None);
     }
