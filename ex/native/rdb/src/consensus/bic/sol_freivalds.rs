@@ -56,6 +56,8 @@ fn borrow_scratch() -> ScratchGuard {
 }
 
 pub fn freivalds(tensor: &[u8], vr_b3: &[u8]) -> bool {
+    if tensor.len() < crate::consensus::bic::sol::SOL_SIZE { return false; }
+
     let mut scratch = borrow_scratch();
 
     let tensor_slice = tensor;
