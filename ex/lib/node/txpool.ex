@@ -36,14 +36,18 @@ defmodule TXPool do
         nonceValid = !chainNonce or txu.tx.nonce > chainNonce
 
         action = TX.action(txu)
-        hasSol = action.function == "submit_sol" and hd(action.args)
-        epochSolValid = if !hasSol do true else
-            <<sol_epoch::32-little, _::binary>> = hasSol
-            cur_epoch == sol_epoch
-        end
+        solGateOk =
+          if action.function == "submit_sol" do
+            case action.args do
+              [<<sol_epoch::32-little, _::binary>> | _] -> cur_epoch == sol_epoch
+              _ -> false
+            end
+          else
+            true
+          end
 
         cond do
-            !epochSolValid -> true
+            !solGateOk -> true
             !nonceValid -> true
             true -> false
         end
@@ -70,15 +74,16 @@ defmodule TXPool do
         batch_state = Map.put(batch_state, {:balance, txu.tx.signer}, balance)
 
         action = TX.action(txu)
-        hasSol = action.function == "submit_sol" and hd(action.args)
-        epochSolValid = if !hasSol do true else
-          <<sol_epoch::32-little, sol_svrh::32-binary, _::binary>> = hasSol
-
-          chain_epoch == sol_epoch
-          and chain_segment_vr_hash == sol_svrh
-          and byte_size(hasSol) == BIC.Sol.size()
+        if action.function == "submit_sol" do
+          with [<<sol_epoch::32-little, sol_svrh::32-binary, _::binary>> = arg0 | _] <- action.args,
+               true <- sol_epoch == chain_epoch,
+               true <- sol_svrh == chain_segment_vr_hash,
+               true <- byte_size(arg0) == BIC.Sol.size() do
+            :ok
+          else
+            _ -> throw(%{error: :invalid_tx_sol, key: {txu.tx.nonce, txu.hash}})
+          end
         end
-        if !epochSolValid, do: throw(%{error: :invalid_tx_sol, key: {txu.tx.nonce, txu.hash}})
 
         %{error: :ok, batch_state: batch_state}
       catch
