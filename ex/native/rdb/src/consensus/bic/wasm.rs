@@ -41,7 +41,6 @@ struct HostEnv {
     applyenv_ptr: ApplyEnvPtr,
     instance: Option<Instance>,
     memory: Memory,
-    readonly: bool,
 }
 
 const ARTIFACT_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
@@ -685,7 +684,7 @@ pub fn validate_contract(env: &mut ApplyEnv, wasm_bytes: &[u8]) {
 
     let module = Module::new(&store, wasm_bytes).unwrap_or_else(|_| panic_any("exec_invalid_module"));
 
-    setup_wasm_instance(env, &module, &mut store, true, true, &[]);
+    setup_wasm_instance(env, &module, &mut store, true, &[]);
 }
 
 fn cost_function(operator: &WasmerOperator) -> u64 {
@@ -780,7 +779,7 @@ fn stub_seed(_env: FunctionEnvMut<HostEnv>) -> Result<f64, RuntimeError> {
     stub_panic_validation();
 }
 
-pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Store, readonly: bool, validation_only: bool, function_args: &[Vec<u8>]) -> (Instance, Vec<Value>) {
+pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Store, validation_only: bool, function_args: &[Vec<u8>]) -> (Instance, Vec<Value>) {
     // Setup Memory
     let memory = Memory::new(store, MemoryType::new(Pages(2), Some(Pages(30)), false)).unwrap_or_else(|_| panic_any("exec_memory_alloc"));
 
@@ -808,7 +807,6 @@ pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Stor
     let host_env_data = HostEnv {
         memory: memory.clone(),
         instance: None,
-        readonly,
         applyenv_ptr,
     };
 
@@ -930,7 +928,7 @@ pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: Strin
         None => compile_and_cache_module(&store, wasm_bytes, cache_key),
     };
 
-    let (instance, wasm_args) = setup_wasm_instance(env, &module, &mut store, env.readonly, false, &function_args);
+    let (instance, wasm_args) = setup_wasm_instance(env, &module, &mut store, false, &function_args);
 
     let entry_to_call = instance.exports.get_function(&function_name).unwrap_or_else(|e| {
         log_line(env, e.to_string().into_bytes());
