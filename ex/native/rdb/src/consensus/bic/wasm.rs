@@ -616,57 +616,57 @@ fn log_line(applyenv: &mut ApplyEnv, line: Vec<u8>) {
     applyenv.logs_size += len
 }
 
-pub fn check_module_limits(wasm_bytes: &[u8]) -> Result<(), String> {
+pub fn check_module_limits(wasm_bytes: &[u8]) -> Result<(), &'static str> {
     if wasm_bytes.len() > protocol::WASM_MAX_BINARY_SIZE {
-        return Err("wasmparser_binary_size_exceeds_limit".to_string());
+        return Err("wasmparser_binary_size_exceeds_limit");
     }
 
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        match payload.map_err(|e| e.to_string())? {
+        match payload.map_err(|_| "wasmparser_parse_error")? {
             Payload::FunctionSection(reader) => {
                 let count = reader.count();
                 if count > protocol::WASM_MAX_FUNCTIONS {
-                    return Err("wasmparser_function_count_exceeds_limit".to_string());
+                    return Err("wasmparser_function_count_exceeds_limit");
                 }
             },
             Payload::GlobalSection(reader) => {
                 let count = reader.count();
                 if count > protocol::WASM_MAX_GLOBALS {
-                    return Err("wasmparser_global_count_exceeds_limit".to_string());
+                    return Err("wasmparser_global_count_exceeds_limit");
                 }
             },
             Payload::ExportSection(reader) => {
                 let count = reader.count();
                 if count > protocol::WASM_MAX_EXPORTS {
-                    return Err("wasmparser_export_count_exceeds_limit".to_string());
+                    return Err("wasmparser_export_count_exceeds_limit");
                 }
             },
             Payload::ImportSection(reader) => {
                 let count = reader.count();
                 if count > protocol::WASM_MAX_IMPORTS {
-                    return Err("wasmparser_import_count_exceeds_limit".to_string());
+                    return Err("wasmparser_import_count_exceeds_limit");
                 }
             },
             Payload::CodeSectionStart { count, .. } => {
                 if count > protocol::WASM_MAX_FUNCTIONS {
-                    return Err("wasmparser_code_body_count_exceeds_limit".to_string());
+                    return Err("wasmparser_code_body_count_exceeds_limit");
                 }
             },
             Payload::DataSection(reader) => {
                 for data in reader {
-                    let d = data.map_err(|e| e.to_string())?;
+                    let d = data.map_err(|_| "wasmparser_data_section_error")?;
                     if let DataKind::Active { offset_expr, .. } = d.kind {
                         let mut r = offset_expr.get_operators_reader();
                         if let Ok(ParserOperator::I32Const { value }) = r.read() {
                             if value >= 0 && value < 65536 {
-                                return Err("wasmparser_first_65536_bytes_not_reserved".to_string());
+                                return Err("wasmparser_first_65536_bytes_not_reserved");
                             }
                         }
                     }
                 }
             }
             Payload::StartSection { .. } => {
-                return Err("wasmparser_start_section_not_allowed".to_string());
+                return Err("wasmparser_start_section_not_allowed");
             }
             _ => {}
         }
