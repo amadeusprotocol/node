@@ -20,11 +20,7 @@ pub trait DecodeFromTerm: Sized {
 
 #[inline]
 pub fn pl_find<'a>(pairs: &'a [(Term, Term)], key: &[u8]) -> &'a Term {
-    &pairs
-        .iter()
-        .find(|(k, _)| matches!(k, Term::Binary(b) if b.as_slice() == key))
-        .unwrap()
-        .1
+    &pairs.iter().find(|(k, _)| matches!(k, Term::Binary(b) if b.as_slice() == key)).unwrap().1
 }
 
 #[inline]
@@ -86,10 +82,7 @@ pub fn pl_get_list_of_bytes(pairs: &[(Term, Term)], key: &[u8]) -> Vec<Vec<u8>> 
 
 #[inline]
 pub fn pl_find_opt<'a>(pairs: &'a [(Term, Term)], key: &[u8]) -> Option<&'a Term> {
-    pairs
-        .iter()
-        .find(|(k, _)| matches!(k, Term::Binary(b) if b.as_slice() == key))
-        .map(|(_, v)| v)
+    pairs.iter().find(|(k, _)| matches!(k, Term::Binary(b) if b.as_slice() == key)).map(|(_, v)| v)
 }
 
 #[inline]

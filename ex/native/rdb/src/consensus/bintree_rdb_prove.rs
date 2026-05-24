@@ -3,8 +3,7 @@ use std::cmp::{min, Ordering};
 use std::convert::TryInto;
 
 use crate::consensus::bintree::{
-    compute_namespace_path, get_bit_be, lcp_be, leaf_hash, mask_after_be, prefix_match_be,
-    set_bit_be, Hash, NodeKey, Path, Proof, ProofNode, ZERO_HASH,
+    compute_namespace_path, get_bit_be, lcp_be, leaf_hash, mask_after_be, prefix_match_be, set_bit_be, Hash, NodeKey, Path, Proof, ProofNode, ZERO_HASH,
 };
 
 // ============================================================================
@@ -43,21 +42,11 @@ impl RocksHubtProveViaIterator {
         let (found_key, found_hash) = match Self::find_longest_prefix_node(iter, &target_path) {
             Some((key, hash)) => (key, hash),
             None => {
-                return Proof {
-                    root: ZERO_HASH,
-                    nodes: vec![],
-                    path: ZERO_HASH,
-                    hash: ZERO_HASH,
-                };
+                return Proof { root: ZERO_HASH, nodes: vec![], path: ZERO_HASH, hash: ZERO_HASH };
             }
         };
 
-        Proof {
-            root: root_hash,
-            nodes: Self::generate_proof_nodes(iter, found_key.path, found_key.len),
-            path: found_key.path,
-            hash: found_hash,
-        }
+        Proof { root: root_hash, nodes: Self::generate_proof_nodes(iter, found_key.path, found_key.len), path: found_key.path, hash: found_hash }
     }
 
     // ========================================================================
@@ -84,10 +73,7 @@ impl RocksHubtProveViaIterator {
             let last_key = deserialize_key(iter.key().unwrap());
 
             let (lcp_path, len) = lcp_be(&first_key.path, &last_key.path);
-            let root_key = NodeKey {
-                path: lcp_path,
-                len,
-            };
+            let root_key = NodeKey { path: lcp_path, len };
 
             // Get the actual root hash
             if let Some(h) = Self::get_exact(iter, &root_key) {
@@ -102,10 +88,7 @@ impl RocksHubtProveViaIterator {
         // Hubt2 checks `leaves.get(target)` first.
         // Then checks `prev` and `next`.
 
-        let target_key_leaf = NodeKey {
-            path: *target,
-            len: 256,
-        };
+        let target_key_leaf = NodeKey { path: *target, len: 256 };
 
         // 1. Exact Match Check
         if let Some(h) = Self::get_exact(iter, &target_key_leaf) {
@@ -150,10 +133,7 @@ impl RocksHubtProveViaIterator {
                         cursor = k;
                     } else {
                         let (lcp_p, lcp_l) = lcp_be(&path, &k.path);
-                        let jump = NodeKey {
-                            path: lcp_p,
-                            len: lcp_l + 1,
-                        };
+                        let jump = NodeKey { path: lcp_p, len: lcp_l + 1 };
                         cursor = if jump < k { jump } else { k };
                     }
                 }
@@ -161,10 +141,7 @@ impl RocksHubtProveViaIterator {
         }
 
         if !ancestors.iter().any(|k| k.len == 0) {
-            let root_key = NodeKey {
-                path: ZERO_HASH,
-                len: 0,
-            };
+            let root_key = NodeKey { path: ZERO_HASH, len: 0 };
             if Self::get_exact(iter, &root_key).is_some() {
                 ancestors.push(root_key);
             }
@@ -178,11 +155,7 @@ impl RocksHubtProveViaIterator {
             let sibling_dir = 1 - my_dir;
 
             let s_hash = Self::get_child_hash(iter, anc.path, anc.len, sibling_dir);
-            nodes.push(ProofNode {
-                hash: s_hash,
-                direction: sibling_dir,
-                len: anc.len,
-            });
+            nodes.push(ProofNode { hash: s_hash, direction: sibling_dir, len: anc.len });
         }
         nodes
     }
@@ -192,10 +165,7 @@ impl RocksHubtProveViaIterator {
         set_bit_be(&mut target_path, p_len, dir);
         mask_after_be(&mut target_path, p_len + 1);
 
-        let target_key = NodeKey {
-            path: target_path,
-            len: p_len + 1,
-        };
+        let target_key = NodeKey { path: target_path, len: p_len + 1 };
 
         // Seek >= target_key
         if let Some((f_key, hash)) = Self::seek_next_inclusive(iter, &target_key) {

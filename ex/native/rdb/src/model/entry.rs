@@ -30,45 +30,22 @@ pub struct Entry {
 impl EncodeToTerm for Header {
     fn to_term(&self) -> Result<Term, &'static str> {
         Ok(Term::PropList(vec![
-            (
-                Term::Binary(b"prev_hash".to_vec()),
-                Term::Binary(self.prev_hash.clone()),
-            ),
-            (
-                Term::Binary(b"height".to_vec()),
-                Term::VarInt(self.height as i128),
-            ),
-            (
-                Term::Binary(b"slot".to_vec()),
-                Term::VarInt(self.slot as i128),
-            ),
-            (
-                Term::Binary(b"prev_slot".to_vec()),
-                Term::VarInt(self.prev_slot as i128),
-            ),
-            (
-                Term::Binary(b"signer".to_vec()),
-                Term::Binary(self.signer.clone()),
-            ),
+            (Term::Binary(b"prev_hash".to_vec()), Term::Binary(self.prev_hash.clone())),
+            (Term::Binary(b"height".to_vec()), Term::VarInt(self.height as i128)),
+            (Term::Binary(b"slot".to_vec()), Term::VarInt(self.slot as i128)),
+            (Term::Binary(b"prev_slot".to_vec()), Term::VarInt(self.prev_slot as i128)),
+            (Term::Binary(b"signer".to_vec()), Term::Binary(self.signer.clone())),
             (Term::Binary(b"dr".to_vec()), Term::Binary(self.dr.clone())),
             (Term::Binary(b"vr".to_vec()), Term::Binary(self.vr.clone())),
-            (
-                Term::Binary(b"root_tx".to_vec()),
-                Term::Binary(self.root_tx.clone()),
-            ),
-            (
-                Term::Binary(b"root_validator".to_vec()),
-                Term::Binary(self.root_validator.clone()),
-            ),
+            (Term::Binary(b"root_tx".to_vec()), Term::Binary(self.root_tx.clone())),
+            (Term::Binary(b"root_validator".to_vec()), Term::Binary(self.root_validator.clone())),
         ]))
     }
 }
 
 impl DecodeFromTerm for Header {
     fn from_term(t: &Term) -> Self {
-        let Term::PropList(pairs) = t else {
-            unreachable!("Expected PropList for Header")
-        };
+        let Term::PropList(pairs) = t else { unreachable!("Expected PropList for Header") };
 
         Header {
             prev_hash: codec::pl_get_bytes(pairs, b"prev_hash").to_vec(),
@@ -92,14 +69,8 @@ impl EncodeToTerm for Entry {
         }
 
         let mut pairs = vec![
-            (
-                Term::Binary(b"hash".to_vec()),
-                Term::Binary(self.hash.clone()),
-            ),
-            (
-                Term::Binary(b"signature".to_vec()),
-                Term::Binary(self.signature.clone()),
-            ),
+            (Term::Binary(b"hash".to_vec()), Term::Binary(self.hash.clone())),
+            (Term::Binary(b"signature".to_vec()), Term::Binary(self.signature.clone())),
             (Term::Binary(b"header".to_vec()), self.header.to_term()?),
             (Term::Binary(b"txs".to_vec()), Term::List(txs_list)),
         ];
@@ -120,9 +91,7 @@ impl EncodeToTerm for Entry {
 
 impl DecodeFromTerm for Entry {
     fn from_term(t: &Term) -> Self {
-        let Term::PropList(pairs) = t else {
-            unreachable!("Expected PropList for Entry")
-        };
+        let Term::PropList(pairs) = t else { unreachable!("Expected PropList for Entry") };
 
         let hash = codec::pl_get_bytes(pairs, b"hash").to_vec();
         let signature = codec::pl_get_bytes(pairs, b"signature").to_vec();
@@ -138,15 +107,7 @@ impl DecodeFromTerm for Entry {
         let mask_size = codec::pl_get_varint_opt(pairs, b"mask_size");
         let mask_set_size = codec::pl_get_varint_opt(pairs, b"mask_set_size");
 
-        Entry {
-            hash,
-            signature,
-            header,
-            txs,
-            mask,
-            mask_size,
-            mask_set_size,
-        }
+        Entry { hash, signature, header, txs, mask, mask_size, mask_set_size }
     }
 }
 

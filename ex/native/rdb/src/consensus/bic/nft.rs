@@ -4,36 +4,18 @@ use crate::{bcat, consensus};
 use std::panic::panic_any;
 use vecpak::{decode, encode, Term};
 
-pub fn balance_burnt(
-    env: &mut crate::consensus::consensus_apply::ApplyEnv,
-    collection: &[u8],
-    token: &[u8],
-) -> i128 {
+pub fn balance_burnt(env: &mut crate::consensus::consensus_apply::ApplyEnv, collection: &[u8], token: &[u8]) -> i128 {
     balance(env, &BURN_ADDRESS, collection, token)
 }
 
-pub fn balance(
-    env: &mut crate::consensus::consensus_apply::ApplyEnv,
-    address: &[u8],
-    collection: &[u8],
-    token: &[u8],
-) -> i128 {
-    match kv_get(
-        env,
-        &bcat(&[b"account:", address, b":nft:", collection, b":", token]),
-    ) {
-        Some(amount) => std::str::from_utf8(&amount)
-            .unwrap()
-            .parse::<i128>()
-            .unwrap_or_else(|_| panic_any("invalid_balance")),
+pub fn balance(env: &mut crate::consensus::consensus_apply::ApplyEnv, address: &[u8], collection: &[u8], token: &[u8]) -> i128 {
+    match kv_get(env, &bcat(&[b"account:", address, b":nft:", collection, b":", token])) {
+        Some(amount) => std::str::from_utf8(&amount).unwrap().parse::<i128>().unwrap_or_else(|_| panic_any("invalid_balance")),
         None => 0,
     }
 }
 
-pub fn view_account(
-    env: &mut crate::consensus::consensus_apply::ApplyEnv,
-    collection: &[u8],
-) -> Option<Vec<u8>> {
+pub fn view_account(env: &mut crate::consensus::consensus_apply::ApplyEnv, collection: &[u8]) -> Option<Vec<u8>> {
     kv_get(env, &bcat(&[b"nft:", collection, b":view_account"]))
 }
 
@@ -48,11 +30,7 @@ pub fn soulbound(env: &mut crate::consensus::consensus_apply::ApplyEnv, collecti
     }
 }
 
-pub fn has_permission(
-    env: &mut crate::consensus::consensus_apply::ApplyEnv,
-    collection: &[u8],
-    signer: &[u8],
-) -> bool {
+pub fn has_permission(env: &mut crate::consensus::consensus_apply::ApplyEnv, collection: &[u8], signer: &[u8]) -> bool {
     match view_account(env, collection) {
         None => false,
         Some(account) => account == signer,
@@ -65,10 +43,7 @@ pub fn call_transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, args
     }
     let receiver = args[0].as_slice();
     let amount = args[1].as_slice();
-    let amount = std::str::from_utf8(&amount)
-        .ok()
-        .and_then(|s| s.parse::<i128>().ok())
-        .unwrap_or_else(|| panic_any("invalid_amount"));
+    let amount = std::str::from_utf8(&amount).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_amount"));
     let collection = args[2].as_slice();
     let token = args[3].as_slice();
 
@@ -81,14 +56,7 @@ pub fn call_transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, args
     if amount <= 0 {
         panic_any("invalid_amount")
     }
-    if amount
-        > balance(
-            env,
-            &env.caller_env.account_caller.clone(),
-            &collection,
-            &token,
-        )
-    {
+    if amount > balance(env, &env.caller_env.account_caller.clone(), &collection, &token) {
         panic_any("insufficient_tokens")
     }
 
@@ -96,49 +64,18 @@ pub fn call_transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, args
         panic_any("soulbound")
     }
 
-    kv_increment(
-        env,
-        &bcat(&[
-            b"account:",
-            &env.caller_env.account_caller,
-            b":nft:",
-            collection,
-            b":",
-            token,
-        ]),
-        -amount,
-    );
-    kv_increment(
-        env,
-        &bcat(&[b"account:", receiver, b":nft:", collection, b":", token]),
-        amount,
-    );
+    kv_increment(env, &bcat(&[b"account:", &env.caller_env.account_caller, b":nft:", collection, b":", token]), -amount);
+    kv_increment(env, &bcat(&[b"account:", receiver, b":nft:", collection, b":", token]), amount);
 }
 
-pub fn call_create_collection(
-    env: &mut crate::consensus::consensus_apply::ApplyEnv,
-    args: Vec<Vec<u8>>,
-) {
+pub fn call_create_collection(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Vec<Vec<u8>>) {
     if args.len() < 2 {
         panic_any("invalid_args")
     }
     let collection_original = args[0].as_slice();
-    let soulbound = args
-        .get(1)
-        .and_then(|v| {
-            if v.is_empty() {
-                None
-            } else {
-                Some(v.as_slice())
-            }
-        })
-        .unwrap_or(b"false");
+    let soulbound = args.get(1).and_then(|v| if v.is_empty() { None } else { Some(v.as_slice()) }).unwrap_or(b"false");
 
-    let collection: Vec<u8> = collection_original
-        .iter()
-        .copied()
-        .filter(u8::is_ascii_alphanumeric)
-        .collect();
+    let collection: Vec<u8> = collection_original.iter().copied().filter(u8::is_ascii_alphanumeric).collect();
     if collection_original != collection.as_slice() {
         panic_any("invalid_collection")
     }
@@ -156,11 +93,7 @@ pub fn call_create_collection(
         panic_any("collection_exists")
     }
 
-    kv_put(
-        env,
-        &bcat(&[b"nft:", &collection, b":view_account"]),
-        &env.caller_env.account_caller.clone(),
-    );
+    kv_put(env, &bcat(&[b"nft:", &collection, b":view_account"]), &env.caller_env.account_caller.clone());
 
     if soulbound == b"true" {
         kv_put(env, &bcat(&[b"nft:", &collection, b":soulbound"]), b"true")
@@ -173,10 +106,7 @@ pub fn call_mint(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Ve
     }
     let receiver = args[0].as_slice();
     let amount = args[1].as_slice();
-    let amount = std::str::from_utf8(&amount)
-        .ok()
-        .and_then(|s| s.parse::<i128>().ok())
-        .unwrap_or_else(|| panic_any("invalid_amount"));
+    let amount = std::str::from_utf8(&amount).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_amount"));
     let collection = args[2].as_slice();
     let token = args[3].as_slice();
     if receiver.len() != 48 {
@@ -202,13 +132,7 @@ pub fn call_mint(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Ve
     mint(env, receiver, amount, collection, token);
 }
 
-pub fn mint(
-    env: &mut crate::consensus::consensus_apply::ApplyEnv,
-    receiver: &[u8],
-    amount: i128,
-    collection: &[u8],
-    token: &[u8],
-) {
+pub fn mint(env: &mut crate::consensus::consensus_apply::ApplyEnv, receiver: &[u8], amount: i128, collection: &[u8], token: &[u8]) {
     if !(consensus::bls12_381::validate_public_key(receiver)) {
         panic_any("invalid_receiver_pk")
     }
@@ -220,9 +144,5 @@ pub fn mint(
         panic_any("collection_doesnt_exist")
     }
 
-    kv_increment(
-        env,
-        &bcat(&[b"account:", receiver, b":nft:", collection, b":", token]),
-        amount,
-    );
+    kv_increment(env, &bcat(&[b"account:", receiver, b":nft:", collection, b":", token]), amount);
 }

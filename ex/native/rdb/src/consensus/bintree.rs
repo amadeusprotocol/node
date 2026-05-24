@@ -205,10 +205,7 @@ pub struct Hubt {
 
 impl Hubt {
     pub fn new() -> Self {
-        Hubt {
-            leaves: BTreeMap::new(),
-            internals: BTreeMap::new(),
-        }
+        Hubt { leaves: BTreeMap::new(), internals: BTreeMap::new() }
     }
 
     pub fn root(&self) -> Hash {
@@ -228,10 +225,7 @@ impl Hubt {
         let (lcp_path, len) = lcp_be(first.0, last.0);
 
         // This node MUST exist in internals if the tree is valid
-        if let Some(h) = self.internals.get(&NodeKey {
-            path: lcp_path,
-            len,
-        }) {
+        if let Some(h) = self.internals.get(&NodeKey { path: lcp_path, len }) {
             return *h;
         }
 
@@ -286,11 +280,7 @@ impl Hubt {
                     if let Some((k, _)) = self.leaves.range(..*p).next_back() {
                         dirty_leaf_paths.insert(*k);
                     }
-                    if let Some((k, _)) = self
-                        .leaves
-                        .range((Bound::Excluded(*p), Bound::Unbounded))
-                        .next()
-                    {
+                    if let Some((k, _)) = self.leaves.range((Bound::Excluded(*p), Bound::Unbounded)).next() {
                         dirty_leaf_paths.insert(*k);
                     }
                 }
@@ -320,11 +310,7 @@ impl Hubt {
         if let Some((n_path, n_hash)) = self.leaves.range(..path).next_back() {
             self.check_neighbor(path, leaf_hash, *n_path, *n_hash);
         }
-        if let Some((n_path, n_hash)) = self
-            .leaves
-            .range((Bound::Excluded(path), Bound::Unbounded))
-            .next()
-        {
+        if let Some((n_path, n_hash)) = self.leaves.range((Bound::Excluded(path), Bound::Unbounded)).next() {
             self.check_neighbor(path, leaf_hash, *n_path, *n_hash);
         }
     }
@@ -332,25 +318,12 @@ impl Hubt {
     fn check_neighbor(&mut self, path: Path, leaf: Hash, n_path: Path, n_leaf: Hash) {
         let (lcp_path, len) = lcp_be(&path, &n_path);
         let dir = get_bit_be(&path, len);
-        let temp_val = if dir == 0 {
-            node_hash(&lcp_path, len, &leaf, &n_leaf)
-        } else {
-            node_hash(&lcp_path, len, &n_leaf, &leaf)
-        };
-        self.internals.insert(
-            NodeKey {
-                path: lcp_path,
-                len,
-            },
-            temp_val,
-        );
+        let temp_val = if dir == 0 { node_hash(&lcp_path, len, &leaf, &n_leaf) } else { node_hash(&lcp_path, len, &n_leaf, &leaf) };
+        self.internals.insert(NodeKey { path: lcp_path, len }, temp_val);
     }
 
     fn collect_dirty_ancestors(&self, target_path: Path, acc: &mut BTreeSet<NodeKey>) {
-        let mut cursor = NodeKey {
-            path: target_path,
-            len: 256,
-        };
+        let mut cursor = NodeKey { path: target_path, len: 256 };
         loop {
             match self.internals.range(..cursor).next_back() {
                 None => break,
@@ -360,10 +333,7 @@ impl Hubt {
                         cursor = *k;
                     } else {
                         let (lcp_p, lcp_l) = lcp_be(&target_path, &k.path);
-                        let jump = NodeKey {
-                            path: lcp_p,
-                            len: lcp_l + 1,
-                        };
+                        let jump = NodeKey { path: lcp_p, len: lcp_l + 1 };
                         cursor = if jump < *k { jump } else { *k };
                     }
                 }
@@ -384,8 +354,7 @@ impl Hubt {
             let r_hash = self.get_child_hash(node.path, node.len, 1);
 
             if l_hash != ZERO_HASH && r_hash != ZERO_HASH {
-                self.internals
-                    .insert(node, node_hash(&node.path, node.len, &l_hash, &r_hash));
+                self.internals.insert(node, node_hash(&node.path, node.len, &l_hash, &r_hash));
             } else {
                 self.internals.remove(&node);
             }
@@ -408,10 +377,7 @@ impl Hubt {
         }
 
         // 2. Check Internals
-        let target_key = NodeKey {
-            path: target_path,
-            len: child_len,
-        };
+        let target_key = NodeKey { path: target_path, len: child_len };
         if let Some((f_key, hash)) = self.internals.range(target_key..).next() {
             if prefix_match_be(&f_key.path, &target_path, child_len) {
                 return *hash;
@@ -438,21 +404,11 @@ impl Hubt {
         let (found_key, found_hash) = match self.find_longest_prefix_node(&target_path) {
             Some((key, hash)) => (key, hash),
             None => {
-                return Proof {
-                    root: ZERO_HASH,
-                    nodes: vec![],
-                    path: ZERO_HASH,
-                    hash: ZERO_HASH,
-                };
+                return Proof { root: ZERO_HASH, nodes: vec![], path: ZERO_HASH, hash: ZERO_HASH };
             }
         };
 
-        Proof {
-            root: self.root(),
-            nodes: self.generate_proof_nodes(found_key.path, found_key.len),
-            path: found_key.path,
-            hash: found_hash,
-        }
+        Proof { root: self.root(), nodes: self.generate_proof_nodes(found_key.path, found_key.len), path: found_key.path, hash: found_hash }
     }
 
     fn generate_proof_nodes(&self, path: Path, len: u16) -> Vec<ProofNode> {
@@ -470,25 +426,14 @@ impl Hubt {
                         cursor = *k;
                     } else {
                         let (lcp_p, lcp_l) = lcp_be(&path, &k.path);
-                        let jump = NodeKey {
-                            path: lcp_p,
-                            len: lcp_l + 1,
-                        };
+                        let jump = NodeKey { path: lcp_p, len: lcp_l + 1 };
                         cursor = if jump < *k { jump } else { *k };
                     }
                 }
             }
         }
-        if !ancestors.iter().any(|k| k.len == 0)
-            && self.internals.contains_key(&NodeKey {
-                path: ZERO_HASH,
-                len: 0,
-            })
-        {
-            ancestors.push(NodeKey {
-                path: ZERO_HASH,
-                len: 0,
-            });
+        if !ancestors.iter().any(|k| k.len == 0) && self.internals.contains_key(&NodeKey { path: ZERO_HASH, len: 0 }) {
+            ancestors.push(NodeKey { path: ZERO_HASH, len: 0 });
         }
         ancestors.sort_unstable_by(|a, b| b.len.cmp(&a.len));
 
@@ -496,31 +441,18 @@ impl Hubt {
         for anc in ancestors {
             let my_dir = get_bit_be(&path, anc.len);
             let sibling_dir = 1 - my_dir;
-            nodes.push(ProofNode {
-                hash: self.get_child_hash(anc.path, anc.len, sibling_dir),
-                direction: sibling_dir,
-                len: anc.len,
-            });
+            nodes.push(ProofNode { hash: self.get_child_hash(anc.path, anc.len, sibling_dir), direction: sibling_dir, len: anc.len });
         }
         nodes
     }
 
     fn find_longest_prefix_node(&self, target: &Path) -> Option<(NodeKey, Hash)> {
         if let Some(h) = self.leaves.get(target) {
-            return Some((
-                NodeKey {
-                    path: *target,
-                    len: 256,
-                },
-                *h,
-            ));
+            return Some((NodeKey { path: *target, len: 256 }, *h));
         }
 
         let prev = self.leaves.range(..*target).next_back();
-        let next = self
-            .leaves
-            .range((Bound::Excluded(*target), Bound::Unbounded))
-            .next();
+        let next = self.leaves.range((Bound::Excluded(*target), Bound::Unbounded)).next();
 
         match (prev, next) {
             (None, None) => None,
@@ -530,21 +462,9 @@ impl Hubt {
                 let (_, rp) = lcp_be(target, pk);
                 let (_, rn) = lcp_be(target, nk);
                 if rp >= rn {
-                    Some((
-                        NodeKey {
-                            path: *pk,
-                            len: 256,
-                        },
-                        *ph,
-                    ))
+                    Some((NodeKey { path: *pk, len: 256 }, *ph))
                 } else {
-                    Some((
-                        NodeKey {
-                            path: *nk,
-                            len: 256,
-                        },
-                        *nh,
-                    ))
+                    Some((NodeKey { path: *nk, len: 256 }, *nh))
                 }
             }
         }
@@ -554,11 +474,7 @@ impl Hubt {
         let target_path = compute_namespace_path(ns.as_deref(), &k);
         let claimed_leaf_hash = leaf_hash(&target_path, &k, &v);
 
-        if proof.root == ZERO_HASH
-            && proof.hash == ZERO_HASH
-            && proof.path == ZERO_HASH
-            && proof.nodes.is_empty()
-        {
+        if proof.root == ZERO_HASH && proof.hash == ZERO_HASH && proof.path == ZERO_HASH && proof.nodes.is_empty() {
             return VerifyStatus::NonExistence;
         }
 
@@ -720,18 +636,12 @@ mod tests {
 
         // Case 1: Inclusion (Key exists, Value matches)
         let proof_inc = hubt.prove(None, k1.clone());
-        assert_eq!(
-            Hubt::verify(&proof_inc, None, k1.clone(), v1.clone()),
-            VerifyStatus::Included
-        );
+        assert_eq!(Hubt::verify(&proof_inc, None, k1.clone(), v1.clone()), VerifyStatus::Included);
 
         // Case 2: Mismatch (Key exists, Value differs)
         let v1_fake = b"999".to_vec();
         let proof_mis = hubt.prove(None, k1.clone()); // Same proof generation!
-        assert_eq!(
-            Hubt::verify(&proof_mis, None, k1.clone(), v1_fake),
-            VerifyStatus::Mismatch
-        );
+        assert_eq!(Hubt::verify(&proof_mis, None, k1.clone(), v1_fake), VerifyStatus::Mismatch);
 
         // Case 3: Non-Existence in single key tree (Key does not exist)
         let k_missing = b"user:999".to_vec();
@@ -741,10 +651,7 @@ mod tests {
 
         // Case 4: Non-Existence in multi key tree (Key does not exist)
         hubt.batch_update(vec![Op::Insert(None, k2.clone(), v2.clone())]);
-        assert_eq!(
-            Hubt::verify(&proof_non, None, k_missing, v1.clone()),
-            VerifyStatus::NonExistence
-        );
+        assert_eq!(Hubt::verify(&proof_non, None, k_missing, v1.clone()), VerifyStatus::NonExistence);
     }
 
     #[test]
@@ -767,10 +674,7 @@ mod tests {
     }
 
     fn insert_two(h: &mut Hubt, k0: &[u8], v0: &[u8], k1: &[u8], v1: &[u8]) {
-        h.batch_update(vec![
-            Op::Insert(None, k0.to_vec(), v0.to_vec()),
-            Op::Insert(None, k1.to_vec(), v1.to_vec()),
-        ]);
+        h.batch_update(vec![Op::Insert(None, k0.to_vec(), v0.to_vec()), Op::Insert(None, k1.to_vec(), v1.to_vec())]);
     }
 
     fn delete_one(h: &mut Hubt, k: &[u8]) {
@@ -778,10 +682,7 @@ mod tests {
     }
 
     fn insert_two_none(h: &mut Hubt, k0: &[u8], v0: &[u8], k1: &[u8], v1: &[u8]) {
-        h.batch_update(vec![
-            Op::Insert(None, k0.to_vec(), v0.to_vec()),
-            Op::Insert(None, k1.to_vec(), v1.to_vec()),
-        ]);
+        h.batch_update(vec![Op::Insert(None, k0.to_vec(), v0.to_vec()), Op::Insert(None, k1.to_vec(), v1.to_vec())]);
     }
 
     fn flip_bit(path: &mut Path, idx: u16) {
@@ -819,12 +720,7 @@ mod tests {
     fn repro_8_prove_finds_correct_leaf_for_missing_key() {
         // This test ensures we find the CLOSEST LEAF for non-existence,
         // rather than crashing or returning an internal node (which we don't store in leaves).
-        let inserted = [
-            b"I9382df".to_vec(),
-            b"Ifx1kVZ".to_vec(),
-            b"IQ2tqMn".to_vec(),
-            b"IMcLRkB".to_vec(),
-        ];
+        let inserted = [b"I9382df".to_vec(), b"Ifx1kVZ".to_vec(), b"IQ2tqMn".to_vec(), b"IMcLRkB".to_vec()];
         let v = b"v".to_vec();
         let mut hubt = Hubt::new();
         for k in inserted.iter() {
@@ -834,9 +730,7 @@ mod tests {
         let missing = b"MOzZU3G".to_vec();
         let target_path = compute_namespace_path(None, &missing);
 
-        let (found_key, _found_hash) = hubt
-            .find_longest_prefix_node(&target_path)
-            .expect("tree should be non-empty");
+        let (found_key, _found_hash) = hubt.find_longest_prefix_node(&target_path).expect("tree should be non-empty");
 
         // We must find a leaf (len 256)
         assert_eq!(found_key.len, 256);
@@ -856,27 +750,15 @@ mod tests {
 
         // 1. Insert
         hubt.batch_update(vec![Op::Insert(None, k.clone(), v1.clone())]);
-        assert_eq!(
-            Hubt::verify(&hubt.prove(None, k.clone()), None, k.clone(), v1.clone()),
-            VerifyStatus::Included
-        );
+        assert_eq!(Hubt::verify(&hubt.prove(None, k.clone()), None, k.clone(), v1.clone()), VerifyStatus::Included);
 
         // 2. Delete
         hubt.batch_update(vec![Op::Delete(None, k.clone())]);
-        assert_eq!(
-            Hubt::verify(&hubt.prove(None, k.clone()), None, k.clone(), v1.clone()),
-            VerifyStatus::NonExistence
-        );
+        assert_eq!(Hubt::verify(&hubt.prove(None, k.clone()), None, k.clone(), v1.clone()), VerifyStatus::NonExistence);
 
         // 3. Upsert (Delete + Insert in same batch) - Should result in INSERT
-        hubt.batch_update(vec![
-            Op::Delete(None, k.clone()),
-            Op::Insert(None, k.clone(), v2.clone()),
-        ]);
-        assert_eq!(
-            Hubt::verify(&hubt.prove(None, k.clone()), None, k.clone(), v2.clone()),
-            VerifyStatus::Included
-        );
+        hubt.batch_update(vec![Op::Delete(None, k.clone()), Op::Insert(None, k.clone(), v2.clone())]);
+        assert_eq!(Hubt::verify(&hubt.prove(None, k.clone()), None, k.clone(), v2.clone()), VerifyStatus::Included);
     }
 
     #[test]
@@ -892,18 +774,12 @@ mod tests {
         let v1 = b"200".to_vec();
 
         // Insert two keys ONLY into namespace A
-        hubt.batch_update(vec![
-            Op::Insert(Some(ns_a.clone()), k0.clone(), v0.clone()),
-            Op::Insert(Some(ns_a.clone()), k1.clone(), v1.clone()),
-        ]);
+        hubt.batch_update(vec![Op::Insert(Some(ns_a.clone()), k0.clone(), v0.clone()), Op::Insert(Some(ns_a.clone()), k1.clone(), v1.clone())]);
 
         // Honest inclusion proof in namespace A should work
         let proof_a = hubt.prove(Some(ns_a.clone()), k0.clone());
         assert!(Hubt::verify_integrity(&proof_a));
-        assert_eq!(
-            Hubt::verify(&proof_a, Some(ns_a.clone()), k0.clone(), v0.clone()),
-            VerifyStatus::Included
-        );
+        assert_eq!(Hubt::verify(&proof_a, Some(ns_a.clone()), k0.clone(), v0.clone()), VerifyStatus::Included);
 
         // Forge: rewrite the claimed leaf path to namespace B but keep hashes/nodes the same.
         // This is "sanitized": it's just a different 32-byte path.
@@ -913,11 +789,7 @@ mod tests {
         // A correct verifier MUST NOT return Included here (key was never inserted into ns_b).
         // Current code returns Included -> this test FAILS until you fix the design.
         let status = Hubt::verify(&forged, Some(ns_b), k0, v0);
-        assert_ne!(
-            status,
-            VerifyStatus::Included,
-            "BUG: proof from namespace A can be replayed as Included in namespace B"
-        );
+        assert_ne!(status, VerifyStatus::Included, "BUG: proof from namespace A can be replayed as Included in namespace B");
     }
 
     #[test]
@@ -934,16 +806,10 @@ mod tests {
         // Get a valid proof for k0
         let proof0 = hubt.prove(None, k0.clone());
         assert!(Hubt::verify_integrity(&proof0));
-        assert!(
-            !proof0.nodes.is_empty(),
-            "two-leaf tree should have at least one proof node"
-        );
+        assert!(!proof0.nodes.is_empty(), "two-leaf tree should have at least one proof node");
 
         // Baseline: using k0's proof to verify k1 should be Invalid
-        assert_eq!(
-            Hubt::verify(&proof0, None, k1.clone(), v1.clone()),
-            VerifyStatus::Invalid
-        );
+        assert_eq!(Hubt::verify(&proof0, None, k1.clone(), v1.clone()), VerifyStatus::Invalid);
 
         // Forge: flip a high-level bit that is not authenticated by any proof node (bit 0).
         // This is still "sanitized": it's just a different path value.
@@ -955,11 +821,7 @@ mod tests {
         //
         // Current code returns NonExistence -> this test FAILS until you fix the design.
         let status = Hubt::verify(&forged, None, k1, v1);
-        assert_eq!(
-            status,
-            VerifyStatus::Invalid,
-            "BUG: path malleability + div_len logic allows false NonExistence"
-        );
+        assert_eq!(status, VerifyStatus::Invalid, "BUG: path malleability + div_len logic allows false NonExistence");
     }
 
     #[test]
@@ -975,27 +837,17 @@ mod tests {
 
         let proof0 = hubt.prove(None, k0.clone());
         assert!(Hubt::verify_integrity(&proof0));
-        assert!(
-            !proof0.nodes.is_empty(),
-            "two-leaf tree should have at least one proof node"
-        );
+        assert!(!proof0.nodes.is_empty(), "two-leaf tree should have at least one proof node");
 
         // Baseline: wrong leaf proof for an existing key should be Invalid.
-        assert_eq!(
-            Hubt::verify(&proof0, None, k1.clone(), v1.clone()),
-            VerifyStatus::Invalid
-        );
+        assert_eq!(Hubt::verify(&proof0, None, k1.clone(), v1.clone()), VerifyStatus::Invalid);
 
         // Find divergence depth between target_path(k1) and proof.path(k0)
         let target_path = compute_namespace_path(None, k1.as_slice());
         let (_, div_len) = lcp_be(&target_path, &proof0.path);
 
         // Find the proof node at that divergence depth
-        let idx = proof0
-            .nodes
-            .iter()
-            .position(|n| n.len == div_len)
-            .expect("expected divergence node to appear in proof for a two-leaf tree");
+        let idx = proof0.nodes.iter().position(|n| n.len == div_len).expect("expected divergence node to appear in proof for a two-leaf tree");
 
         // Forge: move that node.len to a different value while still passing verify_integrity() checks.
         let mut forged = proof0.clone();
@@ -1020,10 +872,6 @@ mod tests {
         //
         // Current code returns NonExistence -> this test FAILS until you fix the design.
         let status = Hubt::verify(&forged, None, k1, v1);
-        assert_eq!(
-            status,
-            VerifyStatus::Invalid,
-            "BUG: len malleability makes verifier fall through to NonExistence"
-        );
+        assert_eq!(status, VerifyStatus::Invalid, "BUG: len malleability makes verifier fall through to NonExistence");
     }
 }

@@ -19,11 +19,7 @@ fn get_bit_be(mask: &[u8], i: usize) -> bool {
     ((mask[byte] >> bit) & 1) != 0
 }
 
-pub fn unmask_trainers<'a>(
-    trainers: &'a [Vec<u8>],
-    mask: &[u8],
-    mask_size: usize,
-) -> Vec<&'a [u8]> {
+pub fn unmask_trainers<'a>(trainers: &'a [Vec<u8>], mask: &[u8], mask_size: usize) -> Vec<&'a [u8]> {
     let bound = mask_size.min(trainers.len()).min(mask.len() * 8);
     let mut out = Vec::with_capacity(bound);
     for i in 0..bound {

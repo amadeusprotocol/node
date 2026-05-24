@@ -1,9 +1,7 @@
 pub use rust_rocksdb::{
-    AsColumnFamilyRef, BlockBasedIndexType, BlockBasedOptions, BottommostLevelCompaction,
-    BoundColumnFamily, Cache, ColumnFamilyDescriptor, CompactOptions, DBCompressionType,
-    DBRawIteratorWithThreadMode, LruCacheOptions, MultiThreaded, Options, ReadOptions,
-    SliceTransform, Transaction, TransactionDB, TransactionDBOptions, TransactionOptions,
-    WriteOptions,
+    AsColumnFamilyRef, BlockBasedIndexType, BlockBasedOptions, BottommostLevelCompaction, BoundColumnFamily, Cache, ColumnFamilyDescriptor, CompactOptions,
+    DBCompressionType, DBRawIteratorWithThreadMode, LruCacheOptions, MultiThreaded, Options, ReadOptions, SliceTransform, Transaction, TransactionDB,
+    TransactionDBOptions, TransactionOptions, WriteOptions,
 };
 
 use rustler::{Atom, Binary, Env, Error, NewBinary, NifResult, Term};
@@ -31,10 +29,7 @@ pub fn create_filter_key(parts: &[&[u8]]) -> [u8; 16] {
     output
 }
 
-pub fn build_tx_hashfilters<'a>(
-    env: Env<'a>,
-    txus: Vec<Term<'a>>,
-) -> NifResult<Vec<(Binary<'a>, Binary<'a>)>> {
+pub fn build_tx_hashfilters<'a>(env: Env<'a>, txus: Vec<Term<'a>>) -> NifResult<Vec<(Binary<'a>, Binary<'a>)>> {
     let mut all_filters = Vec::with_capacity(txus.len() * 8);
 
     for txu in txus {

@@ -79,8 +79,7 @@ pub fn freivalds(tensor: &[u8], vr_b3: &[u8]) -> bool {
                    + 16 * 64; // B2
 
     unsafe {
-        let dest = ptr::slice_from_raw_parts_mut((&mut scratch.A) as *mut _ as *mut u8, ab_bytes)
-            as *mut [u8];
+        let dest = ptr::slice_from_raw_parts_mut((&mut scratch.A) as *mut _ as *mut u8, ab_bytes) as *mut [u8];
         xof.fill(&mut *dest);
     }
 
@@ -105,12 +104,7 @@ pub fn freivalds(tensor: &[u8], vr_b3: &[u8]) -> bool {
     freivalds_inner(&scratch.Rs, &scratch.A, &scratch.B, &scratch.C)
 }
 
-pub fn freivalds_inner(
-    Rs: &[[i8; 16]; 3],
-    A: &[[u8; 50_240]; 16],
-    B: &[[i8; 16]; 50_240],
-    C: &[[i32; 16]; 16],
-) -> bool {
+pub fn freivalds_inner(Rs: &[[i8; 16]; 3], A: &[[u8; 50_240]; 16], B: &[[i8; 16]; 50_240], C: &[[i32; 16]; 16]) -> bool {
     if std::is_x86_feature_detected!("avx2") {
         unsafe { freivalds_inner_avx2(Rs, A, B, C) }
     } else {
@@ -145,12 +139,7 @@ unsafe fn load_i8x16_as_i32(ptr: *const i8) -> I32x16 {
     I32x16 { lo, hi }
 }
 
-pub unsafe fn freivalds_inner_avx2(
-    Rs: &[[i8; 16]; 3],
-    A: &[[u8; 50_240]; 16],
-    B: &[[i8; 16]; 50_240],
-    C: &[[i32; 16]; 16],
-) -> bool {
+pub unsafe fn freivalds_inner_avx2(Rs: &[[i8; 16]; 3], A: &[[u8; 50_240]; 16], B: &[[i8; 16]; 50_240], C: &[[i32; 16]; 16]) -> bool {
     // the *body* is exactly what we previously had in `freivalds_inner_avx2`
     // (helpers like `hsum256_epi32` go below, unchanged)
     // ------------------------------------------------------------------ //
@@ -166,18 +155,9 @@ pub unsafe fn freivalds_inner_avx2(
         let c_lo = _mm256_loadu_si256(C[i].as_ptr() as *const __m256i);
         let c_hi = _mm256_loadu_si256(C[i].as_ptr().add(8) as *const __m256i);
 
-        let u0 = _mm256_add_epi32(
-            _mm256_mullo_epi32(c_lo, r0_i32.lo),
-            _mm256_mullo_epi32(c_hi, r0_i32.hi),
-        );
-        let u1 = _mm256_add_epi32(
-            _mm256_mullo_epi32(c_lo, r1_i32.lo),
-            _mm256_mullo_epi32(c_hi, r1_i32.hi),
-        );
-        let u2 = _mm256_add_epi32(
-            _mm256_mullo_epi32(c_lo, r2_i32.lo),
-            _mm256_mullo_epi32(c_hi, r2_i32.hi),
-        );
+        let u0 = _mm256_add_epi32(_mm256_mullo_epi32(c_lo, r0_i32.lo), _mm256_mullo_epi32(c_hi, r0_i32.hi));
+        let u1 = _mm256_add_epi32(_mm256_mullo_epi32(c_lo, r1_i32.lo), _mm256_mullo_epi32(c_hi, r1_i32.hi));
+        let u2 = _mm256_add_epi32(_mm256_mullo_epi32(c_lo, r2_i32.lo), _mm256_mullo_epi32(c_hi, r2_i32.hi));
 
         U[0][i] = hsum256_epi32(u0);
         U[1][i] = hsum256_epi32(u1);
@@ -218,22 +198,14 @@ pub unsafe fn freivalds_inner_avx2(
             acc2 = _mm256_add_epi32(acc2, _mm256_mullo_epi32(a_i32, p2));
         }
 
-        if hsum256_epi32(acc0) != U[0][i]
-            || hsum256_epi32(acc1) != U[1][i]
-            || hsum256_epi32(acc2) != U[2][i]
-        {
+        if hsum256_epi32(acc0) != U[0][i] || hsum256_epi32(acc1) != U[1][i] || hsum256_epi32(acc2) != U[2][i] {
             return false;
         }
     }
     true
 }
 
-fn freivalds_inner_scalar(
-    Rs: &[[i8; 16]; 3],
-    A: &[[u8; 50_240]; 16],
-    B: &[[i8; 16]; 50_240],
-    C: &[[i32; 16]; 16],
-) -> bool {
+fn freivalds_inner_scalar(Rs: &[[i8; 16]; 3], A: &[[u8; 50_240]; 16], B: &[[i8; 16]; 50_240], C: &[[i32; 16]; 16]) -> bool {
     let mut U = [[0i32; 16]; 3];
     for r in 0..3 {
         for i in 0..16 {

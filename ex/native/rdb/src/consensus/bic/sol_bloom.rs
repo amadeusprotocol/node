@@ -39,12 +39,7 @@ pub fn hash_to_indices(bin: &[u8]) -> Vec<u64> {
 #[inline]
 pub fn segs_from_digest(digest: &[u8]) -> Vec<Seg> {
     let idxs = indices_from_digest(digest);
-    idxs.into_iter()
-        .map(|idx| Seg {
-            page: (idx / PAGE_SIZE),
-            bit_offset: (idx % PAGE_SIZE),
-        })
-        .collect()
+    idxs.into_iter().map(|idx| Seg { page: (idx / PAGE_SIZE), bit_offset: (idx % PAGE_SIZE) }).collect()
 }
 
 #[inline]

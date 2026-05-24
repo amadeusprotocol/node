@@ -23,15 +23,7 @@ pub fn unpack(sol: &[u8; SOL_SIZE]) -> Sol {
     let computor: [u8; 48] = sol[180..228].try_into().unwrap();
     let nonce: [u8; 12] = sol[228..240].try_into().unwrap();
     let tensor_c: [u8; 1024] = sol[240..(240 + 1024)].try_into().unwrap();
-    Sol {
-        epoch,
-        segment_vr_hash,
-        pk,
-        pop,
-        computor,
-        nonce,
-        tensor_c,
-    }
+    Sol { epoch, segment_vr_hash, pk, pop, computor, nonce, tensor_c }
 }
 
 pub fn verify_hash_diff(_epoch: u64, hash: &[u8], diff_bits: u64) -> bool {
@@ -42,13 +34,7 @@ pub fn verify_hash_diff(_epoch: u64, hash: &[u8], diff_bits: u64) -> bool {
     hash[..full].iter().all(|&b| b == 0) && (rem == 0 || (hash[full] & (0xFF << (8 - rem))) == 0)
 }
 
-pub fn verify(
-    sol: &[u8; SOL_SIZE],
-    solhash: &[u8],
-    segment_vr_hash: &[u8],
-    vr_b3: &[u8],
-    diff_bits: u64,
-) -> Result<bool, &'static str> {
+pub fn verify(sol: &[u8; SOL_SIZE], solhash: &[u8], segment_vr_hash: &[u8], vr_b3: &[u8], diff_bits: u64) -> Result<bool, &'static str> {
     let usol = unpack(sol);
     if segment_vr_hash != &usol.segment_vr_hash {
         return Err("segment_vr_hash");
@@ -56,6 +42,5 @@ pub fn verify(
     if sol.len() != SOL_SIZE {
         return Err("invalid_sol_seed_size");
     }
-    Ok(verify_hash_diff(usol.epoch, solhash, diff_bits)
-        && crate::consensus::bic::sol_freivalds::freivalds(sol, vr_b3))
+    Ok(verify_hash_diff(usol.epoch, solhash, diff_bits) && crate::consensus::bic::sol_freivalds::freivalds(sol, vr_b3))
 }
