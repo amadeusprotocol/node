@@ -14,7 +14,7 @@ defmodule NodeGenReassemblyGen do
   def clear_stale(state) do
     ts_nano = :os.system_time(:nanosecond)
     threshold_min = ts_nano - 8_000_000_000
-    threshold_max = ts_nano + 300_000_000_000
+    threshold_max = ts_nano + 30_000_000_000
     reorg = state.reorg
     |> Map.filter(fn {{_pk, ts_nano, _shard_total}, _value} ->
         ts_nano > threshold_min and ts_nano < threshold_max
