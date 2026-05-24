@@ -110,16 +110,25 @@ defmodule NodeANR do
     MnesiaKV.merge(NODEANR, anr.pk, anr)
   end
 
+  def routed_peer?(ip4) do
+    !Application.fetch_env!(:ama, :check_routed_peer) or CymruRouting.globally_routed?(ip4)
+  end
+
   def insert(anr) do
     anr = Map.put(anr, :hasChainPop, !!DB.Chain.pop(anr.pk))
     old_anr = MnesiaKV.get(NODEANR, anr.pk)
-    routed = if !Application.fetch_env!(:ama, :check_routed_peer) do true else CymruRouting.globally_routed?(anr.ip4) end
-    cond do
-      !routed -> nil
-      !old_anr or !old_anr[:ts] -> insert_new(anr)
-      anr.ts <= old_anr.ts -> nil
-      old_anr.ip4 == anr.ip4 and old_anr.port == anr.port -> MnesiaKV.merge(NODEANR, anr.pk, anr)
-      true -> insert_new(anr)
+    if !routed_peer?(anr.ip4) do
+      if !old_anr or old_anr[:ip4] == anr.ip4 or !old_anr[:ts] or anr.ts > old_anr.ts do
+        delete(anr.pk)
+      end
+      nil
+    else
+      cond do
+        !old_anr or !old_anr[:ts] -> insert_new(anr)
+        anr.ts <= old_anr.ts -> nil
+        old_anr.ip4 == anr.ip4 and old_anr.port == anr.port -> MnesiaKV.merge(NODEANR, anr.pk, anr)
+        true -> insert_new(anr)
+      end
     end
   end
 
@@ -226,6 +235,17 @@ defmodule NodeANR do
     |> Enum.each(fn(pk)->
       if get_last_message(pk) < cutoff do
         set_handshaked(pk, false)
+      end
+    end)
+  end
+
+  def clear_verified_unrouted() do
+    my_pk = Application.fetch_env!(:ama, :trainer_pk)
+    handshaked()
+    |> Enum.reject(& &1.pk == my_pk)
+    |> Enum.each(fn %{pk: pk, ip4: ip4}->
+      if !routed_peer?(ip4) do
+        delete(pk)
       end
     end)
   end

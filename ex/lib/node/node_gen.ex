@@ -46,7 +46,7 @@ defmodule NodeGen do
     peers = NodeANR.get_random_unverified(3)
     |> Enum.filter(& &1.pk != my_pk)
     |> Enum.filter(fn %{ip4: ip4, pk: pk} ->
-      case CymruRouting.globally_routed?(ip4) do
+      case NodeANR.routed_peer?(ip4) do
         true -> true
         false ->
           NodeANR.delete(pk)
@@ -109,6 +109,7 @@ defmodule NodeGen do
         started = Application.fetch_env!(:ama, :node_started_time)
         if (:os.system_time(1000) - started) > 30_000 do
           NodeANR.clear_verified_offline()
+          #NodeANR.clear_verified_unrouted()
         end
 
         broadcast_check_unverified_anr()
