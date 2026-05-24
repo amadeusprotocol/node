@@ -4,6 +4,7 @@ defmodule NodeANR do
   """
 
   @max_anr_size 390
+  @shared_secret_cache_ttl_ms 60_000*60
   @keys [:ip4, :pk, :pop, :port, :signature, :ts, :version, :anr_name, :anr_desc]
   @keys_for_signature @keys -- [:signature]
 
@@ -63,6 +64,7 @@ defmodule NodeANR do
   def delete(pk) do
     MnesiaKV.delete(NODEANR, pk)
     :ets.delete(NODEANRHOT, pk)
+    :ets.delete(SharedSecretCache, pk)
   end
 
   def pack(anr) do
@@ -100,6 +102,7 @@ defmodule NodeANR do
   end
 
   def insert_new(anr) do
+    :ets.delete(SharedSecretCache, anr.pk)
     anr = Map.put(anr, :handshaked, false)
     anr = Map.put(anr, :error, nil)
     anr = Map.put(anr, :error_tries, 0)
@@ -133,15 +136,33 @@ defmodule NodeANR do
   end
 
   def get_shared_secret(pk) do
-    shared_secret = :ets.lookup_element(SharedSecretCache, pk, 2, nil)
-    if shared_secret do shared_secret else
-      shared_secret = BlsEx.get_shared_secret!(pk, Application.fetch_env!(:ama, :trainer_sk))
-      :ets.insert_new(SharedSecretCache, {pk, shared_secret})
-      shared_secret
+    now = :os.system_time(1000)
+    case :ets.lookup(SharedSecretCache, pk) do
+      [{^pk, shared_secret, _last_used}] ->
+        if handshaked(pk) do
+          :ets.update_element(SharedSecretCache, pk, [{3, now}])
+        else
+          :ets.delete(SharedSecretCache, pk)
+        end
+        shared_secret
+
+      [{^pk, shared_secret}] ->
+        :ets.delete(SharedSecretCache, pk)
+        shared_secret
+
+      _ ->
+        shared_secret = BlsEx.get_shared_secret!(pk, Application.fetch_env!(:ama, :trainer_sk))
+        if handshaked(pk) do
+          :ets.insert(SharedSecretCache, {pk, shared_secret, now})
+        end
+        shared_secret
     end
   end
 
   def set_handshaked(pk, flag \\ true) do
+    if !flag do
+      :ets.delete(SharedSecretCache, pk)
+    end
     MnesiaKV.merge(NODEANR, pk, %{handshaked: flag})
   end
 
@@ -246,6 +267,18 @@ defmodule NodeANR do
     |> Enum.each(fn %{pk: pk, ip4: ip4}->
       if !routed_peer?(ip4) do
         delete(pk)
+      end
+    end)
+  end
+
+  def prune_shared_secret_cache() do
+    cutoff = :os.system_time(1000) - @shared_secret_cache_ttl_ms
+    :ets.select_delete(SharedSecretCache, [{{:"$1", :_, :"$2"}, [{:<, :"$2", cutoff}], [true]}])
+
+    :ets.select(SharedSecretCache, [{{:"$1", :_, :_}, [], [:"$1"]}, {{:"$1", :_}, [], [:"$1"]}])
+    |> Enum.each(fn pk ->
+      if !handshaked(pk) do
+        :ets.delete(SharedSecretCache, pk)
       end
     end)
   end

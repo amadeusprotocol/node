@@ -110,6 +110,7 @@ defmodule NodeGen do
         if (:os.system_time(1000) - started) > 30_000 do
           NodeANR.clear_verified_offline()
           #NodeANR.clear_verified_unrouted()
+          NodeANR.prune_shared_secret_cache()
         end
 
         broadcast_check_unverified_anr()
