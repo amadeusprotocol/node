@@ -2,8 +2,10 @@ use bls12_381::*;
 use group::Curve;
 
 // we use blst for signing/verification (hash_to_curve with DST) and serialization
+use blst::min_pk::{
+    PublicKey as BlsPublicKey, SecretKey as BlsSecretKey, Signature as BlsSignature,
+};
 use blst::BLST_ERROR;
-use blst::min_pk::{PublicKey as BlsPublicKey, SecretKey as BlsSecretKey, Signature as BlsSignature};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -59,7 +61,11 @@ fn parse_public_key(bytes: &[u8]) -> Result<G1Projective, Error> {
     match Option::<G1Affine>::from(G1Affine::from_compressed(&res)) {
         Some(affine) => {
             let projective = G1Projective::from(affine);
-            if g1_projective_is_valid(&projective) { Ok(projective) } else { Err(Error::InvalidPoint) }
+            if g1_projective_is_valid(&projective) {
+                Ok(projective)
+            } else {
+                Err(Error::InvalidPoint)
+            }
         }
         None => Err(Error::InvalidPoint),
     }
@@ -143,7 +149,11 @@ pub fn verify(pk_bytes: &[u8], sig_bytes: &[u8], msg: &[u8], dst: &[u8]) -> Resu
         true, // validate pk ∈ G1
     );
 
-    if err == BLST_ERROR::BLST_SUCCESS { Ok(()) } else { Err(Error::VerificationFailed) }
+    if err == BLST_ERROR::BLST_SUCCESS {
+        Ok(())
+    } else {
+        Err(Error::VerificationFailed)
+    }
 }
 
 /// Aggregate multiple compressed G1 public keys into one compressed G1 public key (48 bytes)
@@ -206,7 +216,7 @@ pub fn get_shared_secret(public_key: &[u8], sk_bytes: &[u8]) -> Result<[u8; 48],
 pub fn validate_public_key(public_key: &[u8]) -> bool {
     match parse_public_key(public_key).map(|_| ()) {
         Err(_) => false,
-        Ok(_) => true
+        Ok(_) => true,
     }
 }
 
@@ -287,7 +297,10 @@ mod tests {
         assert_ne!(agg_pk, pk2);
 
         // zero-sized input should fail
-        assert!(matches!(aggregate_public_keys::<[&[u8]; 0]>([]), Err(Error::ZeroSizedInput)));
+        assert!(matches!(
+            aggregate_public_keys::<[&[u8]; 0]>([]),
+            Err(Error::ZeroSizedInput)
+        ));
 
         // test signature aggregation
         let dst = b"DST";
@@ -307,10 +320,14 @@ mod tests {
         assert_ne!(agg_sig, sig2);
 
         // zero-sized signature input should fail
-        assert!(matches!(aggregate_signatures::<[&[u8]; 0]>([]), Err(Error::ZeroSizedInput)));
+        assert!(matches!(
+            aggregate_signatures::<[&[u8]; 0]>([]),
+            Err(Error::ZeroSizedInput)
+        ));
 
         // test that aggregated signature verifies against aggregated public key
-        verify(&agg_pk, &agg_sig, msg, dst).expect("aggregated signature should verify against aggregated public key");
+        verify(&agg_pk, &agg_sig, msg, dst)
+            .expect("aggregated signature should verify against aggregated public key");
 
         // test that individual signatures don't verify against aggregated public key
         assert!(verify(&agg_pk, &sig1, msg, dst).is_err());
@@ -325,9 +342,11 @@ mod tests {
     fn elixir_key_compatibility_test() {
         const SK_B58: &str = "QPHHRpzuJ8nBKnrY9hcT8DuaWX8ev42QWHMPtpWtg11Rkbq37cpE5BGD8RTBe6NrfQqboKusvz119rUMDjoMXQ2";
         const PK_B58: &str = "7HBdTuiVETYS9bWgZt2ZQ2edrmUYVW9gMPJuVRA2PEFXUvTt62ZxP1juPbHpUS8M1k";
-        const OTHER_PK_B58: &str = "7KUntjPCFEmTtG9NBLNjqaaXourYDjBASwLtXFcPr1DmDNPCLVKRznppysMMyAcVa7";
+        const OTHER_PK_B58: &str =
+            "7KUntjPCFEmTtG9NBLNjqaaXourYDjBASwLtXFcPr1DmDNPCLVKRznppysMMyAcVa7";
         const EXPECTED_SIG_B58: &str = "nDmcy3orsbusmMA9ugTXYyCXuCpdeuar5TonQqZquGbfLGGpCkawaStX9vCxm4nnjF9CXtwVUxjbvyU5KRP6nd24niXu7oLRhvGkkiSqgnxenAgjnUJwvahfDz94t7LyBmY";
-        const EXPECTED_SHARED_SECRET_B58: &str = "69m86NjrftmWr8in6dbDBYiYrsiJjeKAvkM8WzLWk4Feub5p3YC2oDa8FbSyhS3f9d";
+        const EXPECTED_SHARED_SECRET_B58: &str =
+            "69m86NjrftmWr8in6dbDBYiYrsiJjeKAvkM8WzLWk4Feub5p3YC2oDa8FbSyhS3f9d";
 
         // Skip test if values not filled in
         if SK_B58.contains("PASTE_") {
@@ -340,9 +359,15 @@ mod tests {
         // Decode Base58 values
         let sk_bytes = bs58::decode(SK_B58).into_vec().expect("decode sk");
         let expected_pk = bs58::decode(PK_B58).into_vec().expect("decode pk");
-        let other_pk = bs58::decode(OTHER_PK_B58).into_vec().expect("decode other pk");
-        let expected_sig = bs58::decode(EXPECTED_SIG_B58).into_vec().expect("decode sig");
-        let expected_shared_secret = bs58::decode(EXPECTED_SHARED_SECRET_B58).into_vec().expect("decode shared secret");
+        let other_pk = bs58::decode(OTHER_PK_B58)
+            .into_vec()
+            .expect("decode other pk");
+        let expected_sig = bs58::decode(EXPECTED_SIG_B58)
+            .into_vec()
+            .expect("decode sig");
+        let expected_shared_secret = bs58::decode(EXPECTED_SHARED_SECRET_B58)
+            .into_vec()
+            .expect("decode shared secret");
 
         println!("SK length: {}", sk_bytes.len());
         println!("Expected PK length: {}", expected_pk.len());
@@ -434,7 +459,8 @@ mod tests {
     fn elixir_signature_compatibility_test() {
         const SK_B58: &str = "559mzNeU7itDyHs2yUzZurTvoaLHi3nJeGjCQSi44PwcJzdqBVymRdh9G25Hg6u9pi59avrqcPpeq6DBQQVEqPxV";
         const PK_B58: &str = "7gX58gLTX7WUGUq3PQTNYcbwfH18b3SeRTgfJ6mM5badEvbhjRXxNEBYSyfH6RjnoP";
-        const TEST_DATA_1_B58: &str = "89YouX2vBz5FKYQZueX6744sBPHjZ8AgFAmN1ySS61KebyrhdkcUk5jY2vqsqgZ8XatbkL";
+        const TEST_DATA_1_B58: &str =
+            "89YouX2vBz5FKYQZueX6744sBPHjZ8AgFAmN1ySS61KebyrhdkcUk5jY2vqsqgZ8XatbkL";
         const ELIXIR_SIG_1_B58: &str = "riqRrRupu5KuaimWbSjS8NKfV8eMYTVKt5xhTkKo9FVDzP7kKhQLmT2VJu15r9GDbkZTk1N78uMGYa6yG7NzboEHet7Xv9wtf7cn86is5GH2PzvH95Kt8RbtqC9iRr13fAZ";
         const TEST_DATA_2_B58: &str =
             "2moGA7MbJet3qHLaSA9kN9eFy5fTr7TdHqJGoaq5hEbt5kGEVnFxCKkC8kNE2nfrnhWtVTtaVoUWeP1GEmKs";
@@ -451,10 +477,18 @@ mod tests {
         // Decode Base58 values
         let sk_bytes = bs58::decode(SK_B58).into_vec().expect("decode sk");
         let expected_pk = bs58::decode(PK_B58).into_vec().expect("decode pk");
-        let test_data_1 = bs58::decode(TEST_DATA_1_B58).into_vec().expect("decode test data 1");
-        let elixir_sig_1 = bs58::decode(ELIXIR_SIG_1_B58).into_vec().expect("decode elixir sig 1");
-        let test_data_2 = bs58::decode(TEST_DATA_2_B58).into_vec().expect("decode test data 2");
-        let elixir_sig_2 = bs58::decode(ELIXIR_SIG_2_B58).into_vec().expect("decode elixir sig 2");
+        let test_data_1 = bs58::decode(TEST_DATA_1_B58)
+            .into_vec()
+            .expect("decode test data 1");
+        let elixir_sig_1 = bs58::decode(ELIXIR_SIG_1_B58)
+            .into_vec()
+            .expect("decode elixir sig 1");
+        let test_data_2 = bs58::decode(TEST_DATA_2_B58)
+            .into_vec()
+            .expect("decode test data 2");
+        let elixir_sig_2 = bs58::decode(ELIXIR_SIG_2_B58)
+            .into_vec()
+            .expect("decode elixir sig 2");
 
         let dst = b"AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_ANRCHALLENGE_";
 
@@ -528,9 +562,9 @@ mod tests {
     fn elixir_public_key_signature_verification() {
         // Elixir-generated public key
         let elixir_pk = vec![
-            169, 61, 121, 32, 15, 191, 174, 241, 143, 231, 124, 53, 186, 69, 28, 212, 233, 130, 22, 18, 34, 244, 13,
-            106, 212, 255, 255, 47, 184, 178, 49, 111, 90, 90, 184, 84, 230, 115, 5, 143, 205, 208, 136, 138, 2, 252,
-            27, 222,
+            169, 61, 121, 32, 15, 191, 174, 241, 143, 231, 124, 53, 186, 69, 28, 212, 233, 130, 22,
+            18, 34, 244, 13, 106, 212, 255, 255, 47, 184, 178, 49, 111, 90, 90, 184, 84, 230, 115,
+            5, 143, 205, 208, 136, 138, 2, 252, 27, 222,
         ];
 
         // Test cases with Elixir signatures and corresponding data
@@ -538,49 +572,53 @@ mod tests {
             (
                 // data
                 vec![
-                    169, 61, 121, 32, 15, 191, 174, 241, 143, 231, 124, 53, 186, 69, 28, 212, 233, 130, 22, 18, 34,
-                    244, 13, 106, 212, 255, 255, 47, 184, 178, 49, 111, 90, 90, 184, 84, 230, 115, 5, 143, 205, 208,
-                    136, 138, 2, 252, 27, 222, 49,
+                    169, 61, 121, 32, 15, 191, 174, 241, 143, 231, 124, 53, 186, 69, 28, 212, 233,
+                    130, 22, 18, 34, 244, 13, 106, 212, 255, 255, 47, 184, 178, 49, 111, 90, 90,
+                    184, 84, 230, 115, 5, 143, 205, 208, 136, 138, 2, 252, 27, 222, 49,
                 ],
                 // elixir signature
                 vec![
-                    166, 193, 20, 132, 125, 87, 40, 182, 101, 225, 125, 220, 97, 93, 13, 2, 89, 220, 166, 6, 106, 203,
-                    96, 63, 122, 16, 226, 117, 143, 219, 5, 105, 180, 229, 65, 58, 238, 93, 230, 253, 208, 110, 35,
-                    219, 222, 176, 82, 112, 15, 149, 72, 148, 54, 88, 2, 94, 219, 26, 235, 98, 77, 202, 1, 83, 6, 38,
-                    39, 150, 236, 176, 141, 222, 93, 133, 66, 154, 226, 55, 214, 100, 183, 179, 167, 140, 140, 77, 117,
-                    11, 167, 219, 140, 144, 144, 160, 143, 128,
+                    166, 193, 20, 132, 125, 87, 40, 182, 101, 225, 125, 220, 97, 93, 13, 2, 89,
+                    220, 166, 6, 106, 203, 96, 63, 122, 16, 226, 117, 143, 219, 5, 105, 180, 229,
+                    65, 58, 238, 93, 230, 253, 208, 110, 35, 219, 222, 176, 82, 112, 15, 149, 72,
+                    148, 54, 88, 2, 94, 219, 26, 235, 98, 77, 202, 1, 83, 6, 38, 39, 150, 236, 176,
+                    141, 222, 93, 133, 66, 154, 226, 55, 214, 100, 183, 179, 167, 140, 140, 77,
+                    117, 11, 167, 219, 140, 144, 144, 160, 143, 128,
                 ],
             ),
             (
                 // data with "255" suffix
                 vec![
-                    169, 61, 121, 32, 15, 191, 174, 241, 143, 231, 124, 53, 186, 69, 28, 212, 233, 130, 22, 18, 34,
-                    244, 13, 106, 212, 255, 255, 47, 184, 178, 49, 111, 90, 90, 184, 84, 230, 115, 5, 143, 205, 208,
-                    136, 138, 2, 252, 27, 222, 50, 53, 53,
+                    169, 61, 121, 32, 15, 191, 174, 241, 143, 231, 124, 53, 186, 69, 28, 212, 233,
+                    130, 22, 18, 34, 244, 13, 106, 212, 255, 255, 47, 184, 178, 49, 111, 90, 90,
+                    184, 84, 230, 115, 5, 143, 205, 208, 136, 138, 2, 252, 27, 222, 50, 53, 53,
                 ],
                 // elixir signature
                 vec![
-                    141, 6, 181, 106, 49, 117, 193, 12, 249, 102, 71, 237, 125, 55, 25, 3, 14, 199, 113, 157, 49, 168,
-                    205, 89, 106, 76, 3, 37, 170, 124, 149, 45, 234, 206, 44, 177, 90, 0, 14, 111, 30, 9, 197, 189,
-                    201, 43, 86, 139, 22, 145, 182, 32, 77, 220, 35, 186, 5, 251, 37, 173, 187, 243, 110, 33, 57, 23,
-                    67, 58, 166, 74, 200, 145, 232, 5, 151, 244, 62, 216, 159, 43, 131, 43, 179, 105, 154, 33, 91, 88,
+                    141, 6, 181, 106, 49, 117, 193, 12, 249, 102, 71, 237, 125, 55, 25, 3, 14, 199,
+                    113, 157, 49, 168, 205, 89, 106, 76, 3, 37, 170, 124, 149, 45, 234, 206, 44,
+                    177, 90, 0, 14, 111, 30, 9, 197, 189, 201, 43, 86, 139, 22, 145, 182, 32, 77,
+                    220, 35, 186, 5, 251, 37, 173, 187, 243, 110, 33, 57, 23, 67, 58, 166, 74, 200,
+                    145, 232, 5, 151, 244, 62, 216, 159, 43, 131, 43, 179, 105, 154, 33, 91, 88,
                     143, 91, 40, 147, 129, 228, 37, 98,
                 ],
             ),
             (
                 // data with timestamp "1640995200"
                 vec![
-                    169, 61, 121, 32, 15, 191, 174, 241, 143, 231, 124, 53, 186, 69, 28, 212, 233, 130, 22, 18, 34,
-                    244, 13, 106, 212, 255, 255, 47, 184, 178, 49, 111, 90, 90, 184, 84, 230, 115, 5, 143, 205, 208,
-                    136, 138, 2, 252, 27, 222, 49, 54, 52, 48, 57, 57, 53, 50, 48, 48,
+                    169, 61, 121, 32, 15, 191, 174, 241, 143, 231, 124, 53, 186, 69, 28, 212, 233,
+                    130, 22, 18, 34, 244, 13, 106, 212, 255, 255, 47, 184, 178, 49, 111, 90, 90,
+                    184, 84, 230, 115, 5, 143, 205, 208, 136, 138, 2, 252, 27, 222, 49, 54, 52, 48,
+                    57, 57, 53, 50, 48, 48,
                 ],
                 // elixir signature
                 vec![
-                    137, 145, 8, 245, 3, 166, 187, 110, 172, 28, 115, 177, 226, 179, 239, 201, 245, 173, 213, 25, 211,
-                    84, 225, 194, 82, 30, 133, 105, 197, 97, 55, 185, 157, 83, 140, 89, 2, 3, 57, 7, 84, 242, 51, 161,
-                    247, 238, 16, 126, 18, 69, 208, 108, 184, 132, 63, 67, 219, 144, 108, 54, 50, 176, 128, 138, 121,
-                    191, 181, 168, 198, 229, 76, 246, 29, 36, 130, 95, 146, 213, 222, 230, 192, 179, 179, 198, 99, 209,
-                    120, 134, 194, 181, 239, 187, 42, 46, 136, 93,
+                    137, 145, 8, 245, 3, 166, 187, 110, 172, 28, 115, 177, 226, 179, 239, 201, 245,
+                    173, 213, 25, 211, 84, 225, 194, 82, 30, 133, 105, 197, 97, 55, 185, 157, 83,
+                    140, 89, 2, 3, 57, 7, 84, 242, 51, 161, 247, 238, 16, 126, 18, 69, 208, 108,
+                    184, 132, 63, 67, 219, 144, 108, 54, 50, 176, 128, 138, 121, 191, 181, 168,
+                    198, 229, 76, 246, 29, 36, 130, 95, 146, 213, 222, 230, 192, 179, 179, 198, 99,
+                    209, 120, 134, 194, 181, 239, 187, 42, 46, 136, 93,
                 ],
             ),
         ];
@@ -592,13 +630,24 @@ mod tests {
         println!("Elixir public key: {:?}", elixir_pk);
 
         for (i, (data, elixir_sig)) in test_cases.iter().enumerate() {
-            println!("\nTesting case {}: data_len={}, sig_len={}", i, data.len(), elixir_sig.len());
+            println!(
+                "\nTesting case {}: data_len={}, sig_len={}",
+                i,
+                data.len(),
+                elixir_sig.len()
+            );
 
             // Try to verify the Elixir signature with the Elixir public key
             match verify(&elixir_pk, elixir_sig, data, dst) {
-                Ok(_) => println!("Case {}: ✓ Elixir signature verifies with Elixir public key", i),
+                Ok(_) => println!(
+                    "Case {}: ✓ Elixir signature verifies with Elixir public key",
+                    i
+                ),
                 Err(e) => {
-                    println!("Case {}: ✗ Elixir signature failed verification: {:?}", i, e);
+                    println!(
+                        "Case {}: ✗ Elixir signature failed verification: {:?}",
+                        i, e
+                    );
                     println!("Case {}: This indicates potential issues with Elixir test data or DST mismatch", i);
                 }
             }

@@ -1,11 +1,10 @@
-use rust_rocksdb::{DBRawIteratorWithThreadMode, TransactionDB, MultiThreaded};
+use rust_rocksdb::{DBRawIteratorWithThreadMode, MultiThreaded, TransactionDB};
 use std::cmp::{min, Ordering};
 use std::convert::TryInto;
 
 use crate::consensus::bintree::{
-    compute_namespace_path, leaf_hash, lcp_be, prefix_match_be,
-    get_bit_be, set_bit_be, mask_after_be,
-    Proof, ProofNode, NodeKey, Hash, Path, ZERO_HASH
+    compute_namespace_path, get_bit_be, lcp_be, leaf_hash, mask_after_be, prefix_match_be,
+    set_bit_be, Hash, NodeKey, Path, Proof, ProofNode, ZERO_HASH,
 };
 
 // ============================================================================
@@ -37,11 +36,7 @@ pub type Iter<'a> = DBRawIteratorWithThreadMode<'a, TransactionDB<MultiThreaded>
 pub struct RocksHubtProveViaIterator;
 
 impl RocksHubtProveViaIterator {
-    pub fn prove(
-        iter: &mut Iter,
-        ns: Option<Vec<u8>>,
-        k: &[u8]
-    ) -> Proof {
+    pub fn prove(iter: &mut Iter, ns: Option<Vec<u8>>, k: &[u8]) -> Proof {
         let target_path = compute_namespace_path(ns.as_deref(), k);
         let root_hash = Self::get_root(iter);
 
@@ -52,7 +47,7 @@ impl RocksHubtProveViaIterator {
                     root: ZERO_HASH,
                     nodes: vec![],
                     path: ZERO_HASH,
-                    hash: ZERO_HASH
+                    hash: ZERO_HASH,
                 };
             }
         };
@@ -83,11 +78,16 @@ impl RocksHubtProveViaIterator {
 
             let first_key = deserialize_key(iter.key().unwrap());
             iter.seek_to_last();
-            if !iter.valid() { return ZERO_HASH; } // Should be valid if first was
+            if !iter.valid() {
+                return ZERO_HASH;
+            } // Should be valid if first was
             let last_key = deserialize_key(iter.key().unwrap());
 
             let (lcp_path, len) = lcp_be(&first_key.path, &last_key.path);
-            let root_key = NodeKey { path: lcp_path, len };
+            let root_key = NodeKey {
+                path: lcp_path,
+                len,
+            };
 
             // Get the actual root hash
             if let Some(h) = Self::get_exact(iter, &root_key) {
@@ -97,15 +97,15 @@ impl RocksHubtProveViaIterator {
         ZERO_HASH
     }
 
-    fn find_longest_prefix_node(
-        iter: &mut Iter,
-        target: &Path
-    ) -> Option<(NodeKey, Hash)> {
+    fn find_longest_prefix_node(iter: &mut Iter, target: &Path) -> Option<(NodeKey, Hash)> {
         // We want to find the node closest to target.
         // Hubt2 checks `leaves.get(target)` first.
         // Then checks `prev` and `next`.
 
-        let target_key_leaf = NodeKey { path: *target, len: 256 };
+        let target_key_leaf = NodeKey {
+            path: *target,
+            len: 256,
+        };
 
         // 1. Exact Match Check
         if let Some(h) = Self::get_exact(iter, &target_key_leaf) {
@@ -134,11 +134,7 @@ impl RocksHubtProveViaIterator {
         }
     }
 
-    fn generate_proof_nodes(
-        iter: &mut Iter,
-        path: Path,
-        len: u16
-    ) -> Vec<ProofNode> {
+    fn generate_proof_nodes(iter: &mut Iter, path: Path, len: u16) -> Vec<ProofNode> {
         let mut ancestors = Vec::new();
         let mut cursor = NodeKey { path, len: 256 };
 
@@ -148,11 +144,16 @@ impl RocksHubtProveViaIterator {
                 Some((k, _)) => {
                     let is_same = k == cursor;
                     if prefix_match_be(&path, &k.path, k.len) {
-                        if k.len < len { ancestors.push(k); }
+                        if k.len < len {
+                            ancestors.push(k);
+                        }
                         cursor = k;
                     } else {
                         let (lcp_p, lcp_l) = lcp_be(&path, &k.path);
-                        let jump = NodeKey { path: lcp_p, len: lcp_l + 1 };
+                        let jump = NodeKey {
+                            path: lcp_p,
+                            len: lcp_l + 1,
+                        };
                         cursor = if jump < k { jump } else { k };
                     }
                 }
@@ -160,7 +161,10 @@ impl RocksHubtProveViaIterator {
         }
 
         if !ancestors.iter().any(|k| k.len == 0) {
-            let root_key = NodeKey { path: ZERO_HASH, len: 0 };
+            let root_key = NodeKey {
+                path: ZERO_HASH,
+                len: 0,
+            };
             if Self::get_exact(iter, &root_key).is_some() {
                 ancestors.push(root_key);
             }
@@ -188,7 +192,10 @@ impl RocksHubtProveViaIterator {
         set_bit_be(&mut target_path, p_len, dir);
         mask_after_be(&mut target_path, p_len + 1);
 
-        let target_key = NodeKey { path: target_path, len: p_len + 1 };
+        let target_key = NodeKey {
+            path: target_path,
+            len: p_len + 1,
+        };
 
         // Seek >= target_key
         if let Some((f_key, hash)) = Self::seek_next_inclusive(iter, &target_key) {

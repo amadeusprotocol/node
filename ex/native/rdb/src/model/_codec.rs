@@ -1,4 +1,4 @@
-use vecpak::{Term, encode_term};
+use vecpak::{encode_term, Term};
 
 pub trait EncodeToTerm {
     fn to_term(&self) -> Result<Term, &'static str>;
@@ -73,21 +73,21 @@ pub fn pl_get_list<'a>(pairs: &'a [(Term, Term)], key: &[u8]) -> &'a [Term] {
 #[inline]
 pub fn pl_get_list_of_bytes(pairs: &[(Term, Term)], key: &[u8]) -> Vec<Vec<u8>> {
     match pl_find(pairs, key) {
-        Term::List(list) => {
-            list.iter().map(|item| {
-                match item {
-                    Term::Binary(b) => b.clone(),
-                    _ => unreachable!(),
-                }
-            }).collect()
-        },
+        Term::List(list) => list
+            .iter()
+            .map(|item| match item {
+                Term::Binary(b) => b.clone(),
+                _ => unreachable!(),
+            })
+            .collect(),
         _ => unreachable!(),
     }
 }
 
 #[inline]
 pub fn pl_find_opt<'a>(pairs: &'a [(Term, Term)], key: &[u8]) -> Option<&'a Term> {
-    pairs.iter()
+    pairs
+        .iter()
         .find(|(k, _)| matches!(k, Term::Binary(b) if b.as_slice() == key))
         .map(|(_, v)| v)
 }

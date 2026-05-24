@@ -1,5 +1,10 @@
-use std::{cell::RefCell, mem, mem::{size_of, MaybeUninit}, ptr, slice};
 use std::arch::x86_64::*;
+use std::{
+    cell::RefCell,
+    mem,
+    mem::{size_of, MaybeUninit},
+    ptr, slice,
+};
 
 //#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
 //compile_error!("freivalds requires AVX2; build with -C target-feature=+avx2");
@@ -46,9 +51,8 @@ fn borrow_scratch() -> ScratchGuard {
         let mut slot = tls.borrow_mut();
         let buf = slot.take().unwrap_or_else(|| {
             // First time on this thread: allocate **uninitialised** memory.
-            let boxed_uninit: Box<MaybeUninit<AMAMatMul>> =
-                Box::new_uninit(); // ≈ zero cost for the OS here
-            // SAFETY: we promise to fully overwrite every byte before reading.
+            let boxed_uninit: Box<MaybeUninit<AMAMatMul>> = Box::new_uninit(); // ≈ zero cost for the OS here
+                                                                               // SAFETY: we promise to fully overwrite every byte before reading.
             unsafe { boxed_uninit.assume_init() }
         });
         ScratchGuard { buf: Some(buf) }
@@ -56,7 +60,9 @@ fn borrow_scratch() -> ScratchGuard {
 }
 
 pub fn freivalds(tensor: &[u8], vr_b3: &[u8]) -> bool {
-    if tensor.len() < crate::consensus::bic::sol::SOL_SIZE { return false; }
+    if tensor.len() < crate::consensus::bic::sol::SOL_SIZE {
+        return false;
+    }
 
     let mut scratch = borrow_scratch();
 
@@ -70,13 +76,11 @@ pub fn freivalds(tensor: &[u8], vr_b3: &[u8]) -> bool {
 
     let ab_bytes = 16 * 50_240           // A
                    + 50_240 * 16         // B
-                   + 16 * 64;            // B2
+                   + 16 * 64; // B2
 
     unsafe {
-        let dest = ptr::slice_from_raw_parts_mut(
-            (&mut scratch.A) as *mut _ as *mut u8,
-            ab_bytes,
-        ) as *mut [u8];
+        let dest = ptr::slice_from_raw_parts_mut((&mut scratch.A) as *mut _ as *mut u8, ab_bytes)
+            as *mut [u8];
         xof.fill(&mut *dest);
     }
 
@@ -103,9 +107,9 @@ pub fn freivalds(tensor: &[u8], vr_b3: &[u8]) -> bool {
 
 pub fn freivalds_inner(
     Rs: &[[i8; 16]; 3],
-    A:  &[[u8; 50_240]; 16],
-    B:  &[[i8; 16]; 50_240],
-    C:  &[[i32; 16]; 16],
+    A: &[[u8; 50_240]; 16],
+    B: &[[i8; 16]; 50_240],
+    C: &[[i32; 16]; 16],
 ) -> bool {
     if std::is_x86_feature_detected!("avx2") {
         unsafe { freivalds_inner_avx2(Rs, A, B, C) }
@@ -119,9 +123,9 @@ unsafe fn hsum256_epi32(v: __m256i) -> i32 {
     // Reduce 8 × i32 → scalar
     let hi = _mm256_extracti128_si256(v, 1);
     let lo = _mm256_castsi256_si128(v);
-    let sum128 = _mm_add_epi32(lo, hi);               // 4 lanes
-    let sum64  = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
-    let sum32  = _mm_add_epi32(sum64 , _mm_srli_si128(sum64 , 4));
+    let sum128 = _mm_add_epi32(lo, hi); // 4 lanes
+    let sum64 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
+    let sum32 = _mm_add_epi32(sum64, _mm_srli_si128(sum64, 4));
     _mm_cvtsi128_si32(sum32)
 }
 
@@ -136,7 +140,7 @@ struct I32x16 {
 unsafe fn load_i8x16_as_i32(ptr: *const i8) -> I32x16 {
     // load 16 bytes
     let v = _mm_loadu_si128(ptr as *const __m128i);
-    let lo = _mm256_cvtepi8_epi32(v);                // first 8
+    let lo = _mm256_cvtepi8_epi32(v); // first 8
     let hi = _mm256_cvtepi8_epi32(_mm_srli_si128(v, 8));
     I32x16 { lo, hi }
 }
@@ -204,8 +208,7 @@ pub unsafe fn freivalds_inner_avx2(
         let mut acc2 = _mm256_setzero_si256();
 
         for k in (0..N).step_by(8) {
-            let a_i32 = _mm256_cvtepu8_epi32(
-                _mm_loadl_epi64(A[i].as_ptr().add(k) as *const _));
+            let a_i32 = _mm256_cvtepu8_epi32(_mm_loadl_epi64(A[i].as_ptr().add(k) as *const _));
             let p0 = _mm256_loadu_si256(P0.as_ptr().add(k) as *const _);
             let p1 = _mm256_loadu_si256(P1.as_ptr().add(k) as *const _);
             let p2 = _mm256_loadu_si256(P2.as_ptr().add(k) as *const _);
@@ -216,15 +219,21 @@ pub unsafe fn freivalds_inner_avx2(
         }
 
         if hsum256_epi32(acc0) != U[0][i]
-        || hsum256_epi32(acc1) != U[1][i]
-        || hsum256_epi32(acc2) != U[2][i] {
+            || hsum256_epi32(acc1) != U[1][i]
+            || hsum256_epi32(acc2) != U[2][i]
+        {
             return false;
         }
     }
     true
 }
 
-fn freivalds_inner_scalar(Rs: &[[i8; 16]; 3], A: &[[u8; 50_240]; 16], B: &[[i8; 16]; 50_240], C: &[[i32; 16]; 16]) -> bool {
+fn freivalds_inner_scalar(
+    Rs: &[[i8; 16]; 3],
+    A: &[[u8; 50_240]; 16],
+    B: &[[i8; 16]; 50_240],
+    C: &[[i32; 16]; 16],
+) -> bool {
     let mut U = [[0i32; 16]; 3];
     for r in 0..3 {
         for i in 0..16 {

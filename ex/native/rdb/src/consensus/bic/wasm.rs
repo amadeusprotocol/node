@@ -1,22 +1,24 @@
 use crate::consensus::bic::protocol;
-use crate::consensus::consensus_apply::{ApplyEnv};
-use crate::consensus::consensus_kv::{kv_get, kv_get_prev, kv_get_next, kv_put, kv_exists, kv_delete, kv_set_bit, kv_increment, kv_get_prev_or_first};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
-use std::panic::panic_any;
-use std::time::Instant;
+use crate::consensus::consensus_apply::ApplyEnv;
+use crate::consensus::consensus_kv::{
+    kv_delete, kv_exists, kv_get, kv_get_next, kv_get_prev, kv_get_prev_or_first, kv_increment,
+    kv_put, kv_set_bit,
+};
 use lazy_static::lazy_static;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::panic::panic_any;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
+use std::time::{Duration, SystemTime};
 use wasmparser::{DataKind, Operator as ParserOperator, Parser, Payload};
 
 use wasmer::{
     imports,
+    sys::{CompilerConfig as _, EngineBuilder, Features},
     wasmparser::Operator as WasmerOperator,
-    sys::{EngineBuilder, Features, CompilerConfig as _},
-    AsStoreMut, Function, FunctionEnv, FunctionEnvMut, FunctionType, Global, Instance, Memory, MemoryType, Engine,
-    MemoryView, Module, Pages, Store, Type, Value,
-    RuntimeError
+    AsStoreMut, Engine, Function, FunctionEnv, FunctionEnvMut, FunctionType, Global, Instance,
+    Memory, MemoryType, MemoryView, Module, Pages, RuntimeError, Store, Type, Value,
 };
 use wasmer_compiler_singlepass::Singlepass;
 use wasmer_middlewares::{
@@ -58,7 +60,11 @@ struct ArtifactCache {
 
 impl ArtifactCache {
     fn new() -> Self {
-        Self { map: HashMap::new(), bytes: 0, tick: 0 }
+        Self {
+            map: HashMap::new(),
+            bytes: 0,
+            tick: 0,
+        }
     }
 
     fn next_tick(&mut self) -> u64 {
@@ -83,7 +89,9 @@ impl ArtifactCache {
         }
         // Evict least-recently-used entries until the new artifact fits.
         while self.bytes + value.len() > ARTIFACT_CACHE_MAX_BYTES {
-            let lru_key = self.map.iter()
+            let lru_key = self
+                .map
+                .iter()
                 .min_by_key(|(_, e)| e.last_used)
                 .map(|(k, _)| k.clone());
             match lru_key {
@@ -97,7 +105,13 @@ impl ArtifactCache {
         }
         let tick = self.next_tick();
         self.bytes += value.len();
-        self.map.insert(key, ArtifactEntry { value, last_used: tick });
+        self.map.insert(
+            key,
+            ArtifactEntry {
+                value,
+                last_used: tick,
+            },
+        );
     }
 
     fn remove(&mut self, key: &[u8]) {
@@ -137,8 +151,8 @@ fn artifact_cache_remove(cache_key: &[u8]) {
 }
 
 fn compile_and_cache_module(store: &Store, wasm_bytes: &[u8], cache_key: Vec<u8>) -> Module {
-    let new_module = Module::new(store, wasm_bytes)
-        .unwrap_or_else(|_| panic_any("exec_invalid_module"));
+    let new_module =
+        Module::new(store, wasm_bytes).unwrap_or_else(|_| panic_any("exec_invalid_module"));
     // If serialize fails, skip caching but still return a working module --
     // the next call will simply recompile.
     if let Ok(artifact) = new_module.serialize() {
@@ -166,7 +180,10 @@ fn budget_sync_in(store: &mut impl AsStoreMut, instance: &Instance, applyenv: &m
 
 fn import_log_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i32) {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
     let len = len as usize;
@@ -178,19 +195,30 @@ fn import_log_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i3
         panic_any("exec_ptr_term_too_long")
     }
 
-    crate::consensus::consensus_kv::storage_budget_decr(applyenv, protocol::COST_PER_BYTE_HISTORICAL * len as i128);
+    crate::consensus::consensus_kv::storage_budget_decr(
+        applyenv,
+        protocol::COST_PER_BYTE_HISTORICAL * len as i128,
+    );
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
     let view = data.memory.clone().view(&store);
 
     let mut buffer = vec![0u8; len as usize];
-    view.read(ptr as u64, &mut buffer).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
+    view.read(ptr as u64, &mut buffer)
+        .unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
     log_line(applyenv, buffer.to_vec())
 }
 
-fn import_return_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i32) -> Result<(), RuntimeError> {
+fn import_return_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    ptr: i32,
+    len: i32,
+) -> Result<(), RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
     let len = len as usize;
@@ -199,20 +227,31 @@ fn import_return_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len:
         panic_any("exec_ptr_term_too_long")
     }
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_BYTE_HISTORICAL * len as i128);
+    crate::consensus::consensus_kv::exec_budget_decr(
+        applyenv,
+        protocol::COST_PER_BYTE_HISTORICAL * len as i128,
+    );
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
     let view = data.memory.clone().view(&store);
 
     let mut buffer = vec![0u8; len as usize];
-    view.read(ptr as u64, &mut buffer).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
+    view.read(ptr as u64, &mut buffer)
+        .unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
     set_return_value(applyenv, buffer.to_vec());
     Err(RuntimeError::new("EXIT_IMPORT_RETURN"))
 }
 
-fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, extra_table_ptr: i32) -> Result<i32, RuntimeError> {
+fn import_call_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    table_ptr: i32,
+    extra_table_ptr: i32,
+) -> Result<i32, RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -222,20 +261,26 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
         // First pass: read tables (cheap — only ptr/len pairs), validate per-arg cap,
         // and sum total marshalled bytes. NO allocation/copy yet.
         let mut count_buf = [0u8; 4];
-        view.read(table_ptr as u64, &mut count_buf).unwrap_or_else(|_| panic_any("exec_call_table_invalid_ptr"));
+        view.read(table_ptr as u64, &mut count_buf)
+            .unwrap_or_else(|_| panic_any("exec_call_table_invalid_ptr"));
         let arg_count = i32::from_le_bytes(count_buf) as usize;
-        if arg_count > 16 { panic_any("exec_call_too_many_args") }
+        if arg_count > 16 {
+            panic_any("exec_call_too_many_args")
+        }
 
         let mut main_table: Vec<(i32, i32)> = Vec::with_capacity(arg_count);
         let mut total_bytes: usize = 0;
         for i in 0..arg_count {
             let offset = (table_ptr as u64) + 4 + (i as u64 * 8);
             let mut row_buf = [0u8; 8];
-            view.read(offset, &mut row_buf).unwrap_or_else(|_| panic_any("exec_read_call_table_error"));
+            view.read(offset, &mut row_buf)
+                .unwrap_or_else(|_| panic_any("exec_read_call_table_error"));
             let arg_ptr = i32::from_le_bytes(row_buf[0..4].try_into().unwrap());
             let arg_len = i32::from_le_bytes(row_buf[4..8].try_into().unwrap());
 
-            if arg_len < 0 || arg_len as usize > protocol::WASM_MAX_PTR_LEN { panic_any("exec_call_ptr_term_too_long") }
+            if arg_len < 0 || arg_len as usize > protocol::WASM_MAX_PTR_LEN {
+                panic_any("exec_call_ptr_term_too_long")
+            }
 
             total_bytes = total_bytes.saturating_add(arg_len as usize);
             main_table.push((arg_ptr, arg_len));
@@ -243,25 +288,33 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
 
         let mut extra_table: Vec<(i32, i32)> = Vec::new();
         if extra_table_ptr != 0 {
-            view.read(extra_table_ptr as u64, &mut count_buf).unwrap_or_else(|_| panic_any("exec_call_extra_invalid"));
+            view.read(extra_table_ptr as u64, &mut count_buf)
+                .unwrap_or_else(|_| panic_any("exec_call_extra_invalid"));
             let extra_count = i32::from_le_bytes(count_buf) as usize;
-            if extra_count > 16 { panic_any("exec_call_extra_too_many") }
+            if extra_count > 16 {
+                panic_any("exec_call_extra_too_many")
+            }
 
             for i in 0..extra_count {
                 let offset = (extra_table_ptr as u64) + 4 + (i as u64 * 8);
                 let mut row_buf = [0u8; 8];
-                view.read(offset, &mut row_buf).unwrap_or_else(|_| panic_any("exec_read_extra_row"));
+                view.read(offset, &mut row_buf)
+                    .unwrap_or_else(|_| panic_any("exec_read_extra_row"));
                 let arg_ptr = i32::from_le_bytes(row_buf[0..4].try_into().unwrap());
                 let arg_len = i32::from_le_bytes(row_buf[4..8].try_into().unwrap());
 
-                if arg_len < 0 || arg_len as usize > protocol::WASM_MAX_PTR_LEN { panic_any("exec_call_extra_ptr_term_too_long") }
+                if arg_len < 0 || arg_len as usize > protocol::WASM_MAX_PTR_LEN {
+                    panic_any("exec_call_extra_ptr_term_too_long")
+                }
 
                 total_bytes = total_bytes.saturating_add(arg_len as usize);
                 extra_table.push((arg_ptr, arg_len));
             }
         }
 
-        if total_bytes > protocol::WASM_MAX_CALL_ARGS_TOTAL { panic_any("exec_call_total_args_too_long") }
+        if total_bytes > protocol::WASM_MAX_CALL_ARGS_TOTAL {
+            panic_any("exec_call_total_args_too_long")
+        }
 
         crate::consensus::consensus_kv::exec_budget_decr(
             applyenv,
@@ -272,24 +325,31 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
         let mut final_args: Vec<Vec<u8>> = Vec::with_capacity(main_table.len());
         for (arg_ptr, arg_len) in &main_table {
             let mut arg_data = vec![0u8; *arg_len as usize];
-            view.read(*arg_ptr as u64, &mut arg_data).unwrap_or_else(|_| panic_any("exec_read_call_table_data_error"));
+            view.read(*arg_ptr as u64, &mut arg_data)
+                .unwrap_or_else(|_| panic_any("exec_read_call_table_data_error"));
             final_args.push(arg_data);
         }
         let mut final_args_extra: Vec<Vec<u8>> = Vec::with_capacity(extra_table.len());
         for (arg_ptr, arg_len) in &extra_table {
             let mut arg_data = vec![0u8; *arg_len as usize];
-            view.read(*arg_ptr as u64, &mut arg_data).unwrap_or_else(|_| panic_any("exec_read_extra_data"));
+            view.read(*arg_ptr as u64, &mut arg_data)
+                .unwrap_or_else(|_| panic_any("exec_read_extra_data"));
             final_args_extra.push(arg_data);
         }
 
         // Process Arguments
-        if final_args.len() < 2 { panic_any("exec_call_missing_args"); }
+        if final_args.len() < 2 {
+            panic_any("exec_call_missing_args");
+        }
         let contract = final_args[0].clone();
         let function = final_args[1].clone();
         let args = final_args[2..].to_vec();
 
         let (attached_symbol, attached_amount) = if final_args_extra.len() == 2 {
-            (Some(final_args_extra[0].clone()), Some(final_args_extra[1].clone()))
+            (
+                Some(final_args_extra[0].clone()),
+                Some(final_args_extra[1].clone()),
+            )
         } else {
             (None, None)
         };
@@ -310,12 +370,24 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
 
     let result = match crate::consensus::bls12_381::validate_public_key(contract.as_slice()) {
         false => {
-            crate::consensus::consensus_apply::call_bic(applyenv, contract, function, args, attached_symbol, attached_amount);
+            crate::consensus::consensus_apply::call_bic(
+                applyenv,
+                contract,
+                function,
+                args,
+                attached_symbol,
+                attached_amount,
+            );
             b"ok".to_vec()
         }
-        true => {
-            crate::consensus::consensus_apply::call_wasmvm(applyenv, contract, function, args, attached_symbol, attached_amount)
-        }
+        true => crate::consensus::consensus_apply::call_wasmvm(
+            applyenv,
+            contract,
+            function,
+            args,
+            attached_symbol,
+            attached_amount,
+        ),
     };
 
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
@@ -324,22 +396,39 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
     applyenv.caller_env.account_current = og_account_current;
 
     let view = data.memory.clone().view(&store);
-    view.write(10_000, &(result.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-    view.write(10_004, &result).unwrap_or_else(|_| panic_any("exec_memwrite"));
+    view.write(10_000, &(result.len() as u32).to_le_bytes())
+        .unwrap_or_else(|_| panic_any("exec_memwrite"));
+    view.write(10_004, &result)
+        .unwrap_or_else(|_| panic_any("exec_memwrite"));
 
     Ok(10_000)
 }
 
 fn build_prefixed_key(applyenv: &mut ApplyEnv, view: &MemoryView, ptr: i32, len: i32) -> Vec<u8> {
     let mut key = vec![0u8; len as usize];
-    view.read(ptr as u64, &mut key).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
+    view.read(ptr as u64, &mut key)
+        .unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
 
-    crate::bcat(&[&b"account:"[..], &applyenv.caller_env.account_current, &b":storage:"[..], &key])
+    crate::bcat(&[
+        &b"account:"[..],
+        &applyenv.caller_env.account_current,
+        &b":storage:"[..],
+        &key,
+    ])
 }
 
-fn import_storage_kv_put_implementation(mut env: FunctionEnvMut<HostEnv>, key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> Result<(), RuntimeError> {
+fn import_storage_kv_put_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    key_ptr: i32,
+    key_len: i32,
+    val_ptr: i32,
+    val_len: i32,
+) -> Result<(), RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -353,16 +442,26 @@ fn import_storage_kv_put_implementation(mut env: FunctionEnvMut<HostEnv>, key_pt
     let view = data.memory.clone().view(&store);
     let key = build_prefixed_key(applyenv, &view, key_ptr, key_len);
     let mut value = vec![0u8; val_len as usize];
-    view.read(val_ptr as u64, &mut value).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
+    view.read(val_ptr as u64, &mut value)
+        .unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
 
     kv_put(applyenv, &key, &value);
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     Ok(())
 }
 
-fn import_storage_kv_increment_implementation(mut env: FunctionEnvMut<HostEnv>, key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> Result<i32, RuntimeError> {
+fn import_storage_kv_increment_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    key_ptr: i32,
+    key_len: i32,
+    val_ptr: i32,
+    val_len: i32,
+) -> Result<i32, RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -376,22 +475,35 @@ fn import_storage_kv_increment_implementation(mut env: FunctionEnvMut<HostEnv>, 
     let view = data.memory.clone().view(&store);
     let key = build_prefixed_key(applyenv, &view, key_ptr, key_len);
     let mut value = vec![0u8; val_len as usize];
-    view.read(val_ptr as u64, &mut value).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
+    view.read(val_ptr as u64, &mut value)
+        .unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
 
-    let value_int128 = std::str::from_utf8(&value).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_integer"));
+    let value_int128 = std::str::from_utf8(&value)
+        .ok()
+        .and_then(|s| s.parse::<i128>().ok())
+        .unwrap_or_else(|| panic_any("invalid_integer"));
     let new_value = kv_increment(applyenv, &key, value_int128).to_string();
     let new_value = new_value.as_bytes();
 
-    view.write(10_000, &(new_value.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-    view.write(10_004, &new_value).unwrap_or_else(|_| panic_any("exec_memwrite"));
+    view.write(10_000, &(new_value.len() as u32).to_le_bytes())
+        .unwrap_or_else(|_| panic_any("exec_memwrite"));
+    view.write(10_004, &new_value)
+        .unwrap_or_else(|_| panic_any("exec_memwrite"));
 
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     Ok(10_000)
 }
 
-fn import_storage_kv_delete_implementation(mut env: FunctionEnvMut<HostEnv>, key_ptr: i32, key_len: i32) -> Result<(), RuntimeError> {
+fn import_storage_kv_delete_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    key_ptr: i32,
+    key_len: i32,
+) -> Result<(), RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -408,9 +520,16 @@ fn import_storage_kv_delete_implementation(mut env: FunctionEnvMut<HostEnv>, key
     Ok(())
 }
 
-fn import_storage_kv_get_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i32) -> Result<i32, RuntimeError> {
+fn import_storage_kv_get_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    ptr: i32,
+    len: i32,
+) -> Result<i32, RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -422,20 +541,32 @@ fn import_storage_kv_get_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i
     let key = build_prefixed_key(applyenv, &view, ptr, len);
     match kv_get(applyenv, &key) {
         None => {
-            view.write(10_000, &(-1i32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-        },
+            view.write(10_000, &(-1i32).to_le_bytes())
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
+        }
         Some(value) => {
-            view.write(10_000, &(value.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-            view.write(10_004, &value).unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(10_000, &(value.len() as u32).to_le_bytes())
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(10_004, &value)
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
         }
     }
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     Ok(10_000)
 }
 
-fn import_storage_kv_get_prev_implementation(mut env: FunctionEnvMut<HostEnv>, prefix_ptr: i32, prefix_len: i32, key_ptr: i32, key_len: i32) -> Result<i32, RuntimeError> {
+fn import_storage_kv_get_prev_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    prefix_ptr: i32,
+    prefix_len: i32,
+    key_ptr: i32,
+    key_len: i32,
+) -> Result<i32, RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -449,27 +580,45 @@ fn import_storage_kv_get_prev_implementation(mut env: FunctionEnvMut<HostEnv>, p
     let view = data.memory.clone().view(&store);
     let prefix = build_prefixed_key(applyenv, &view, prefix_ptr, prefix_len);
     let mut key = vec![0u8; key_len as usize];
-    view.read(key_ptr as u64, &mut key).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
+    view.read(key_ptr as u64, &mut key)
+        .unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
 
     match kv_get_prev(applyenv, &prefix, &key) {
         None => {
-            view.write(10_000, &(-1i32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-        },
+            view.write(10_000, &(-1i32).to_le_bytes())
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
+        }
         Some((prev_key, value)) => {
-            view.write(10_000, &(prev_key.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-            view.write(10_000 + 4, &prev_key).unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(10_000, &(prev_key.len() as u32).to_le_bytes())
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(10_000 + 4, &prev_key)
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
 
-            view.write(10_000 + 4 + prev_key.len() as u64, &(value.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-            view.write(10_000 + 4 + prev_key.len() as u64 + 4, &value).unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(
+                10_000 + 4 + prev_key.len() as u64,
+                &(value.len() as u32).to_le_bytes(),
+            )
+            .unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(10_000 + 4 + prev_key.len() as u64 + 4, &value)
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
         }
     }
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     Ok(10_000)
 }
 
-fn import_storage_kv_get_next_implementation(mut env: FunctionEnvMut<HostEnv>, prefix_ptr: i32, prefix_len: i32, key_ptr: i32, key_len: i32) -> Result<i32, RuntimeError> {
+fn import_storage_kv_get_next_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    prefix_ptr: i32,
+    prefix_len: i32,
+    key_ptr: i32,
+    key_len: i32,
+) -> Result<i32, RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -483,27 +632,43 @@ fn import_storage_kv_get_next_implementation(mut env: FunctionEnvMut<HostEnv>, p
     let view = data.memory.clone().view(&store);
     let prefix = build_prefixed_key(applyenv, &view, prefix_ptr, prefix_len);
     let mut key = vec![0u8; key_len as usize];
-    view.read(key_ptr as u64, &mut key).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
+    view.read(key_ptr as u64, &mut key)
+        .unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
 
     match kv_get_next(applyenv, &prefix, &key) {
         None => {
-            view.write(10_000, &(-1i32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-        },
+            view.write(10_000, &(-1i32).to_le_bytes())
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
+        }
         Some((next_key, value)) => {
-            view.write(10_000, &(next_key.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-            view.write(10_000 + 4, &next_key).unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(10_000, &(next_key.len() as u32).to_le_bytes())
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(10_000 + 4, &next_key)
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
 
-            view.write(10_000 + 4 + next_key.len() as u64, &(value.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
-            view.write(10_000 + 4 + next_key.len() as u64 + 4, &value).unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(
+                10_000 + 4 + next_key.len() as u64,
+                &(value.len() as u32).to_le_bytes(),
+            )
+            .unwrap_or_else(|_| panic_any("exec_memwrite"));
+            view.write(10_000 + 4 + next_key.len() as u64 + 4, &value)
+                .unwrap_or_else(|_| panic_any("exec_memwrite"));
         }
     }
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     Ok(10_000)
 }
 
-fn import_storage_kv_exists_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i32) -> Result<i32, RuntimeError> {
+fn import_storage_kv_exists_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    ptr: i32,
+    len: i32,
+) -> Result<i32, RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -518,13 +683,15 @@ fn import_storage_kv_exists_implementation(mut env: FunctionEnvMut<HostEnv>, ptr
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
     match result {
         true => Ok(1),
-        false => Ok(0)
+        false => Ok(0),
     }
 }
 
 //AssemblyScript specific
 fn as_read_string(view: &MemoryView, ptr: i32) -> String {
-    if ptr == 0 { return "null".to_string(); }
+    if ptr == 0 {
+        return "null".to_string();
+    }
 
     let ptr = ptr as u64;
 
@@ -561,9 +728,18 @@ fn as_read_string(view: &MemoryView, ptr: i32) -> String {
     String::from_utf16_lossy(&u16_vec)
 }
 
-fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filename_ptr: i32, line: i32, column: i32) -> Result<(), RuntimeError> {
+fn as_abort_implementation(
+    mut env: FunctionEnvMut<HostEnv>,
+    msg_ptr: i32,
+    filename_ptr: i32,
+    line: i32,
+    column: i32,
+) -> Result<(), RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
     let view = data.memory.clone().view(&store);
@@ -573,11 +749,12 @@ fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filen
     let msg = as_read_string(&view, msg_ptr);
     let filename = as_read_string(&view, filename_ptr);
 
-    let full_error_msg = format!("as_abort: '{}' at {}:{}:{}",
-        msg, filename, line, column
-    );
+    let full_error_msg = format!("as_abort: '{}' at {}:{}:{}", msg, filename, line, column);
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_BYTE_HISTORICAL * full_error_msg.len() as i128);
+    crate::consensus::consensus_kv::exec_budget_decr(
+        applyenv,
+        protocol::COST_PER_BYTE_HISTORICAL * full_error_msg.len() as i128,
+    );
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
     log_line(applyenv, full_error_msg.as_bytes().to_vec());
@@ -590,7 +767,10 @@ fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filen
 
 fn as_seed_implementation(mut env: FunctionEnvMut<HostEnv>) -> Result<f64, RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
-    let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
+    let instance = data
+        .instance
+        .clone()
+        .unwrap_or_else(|| panic_any("exec_instance_not_injected"));
     let applyenv = unsafe { data.applyenv_ptr.as_mut() };
     budget_sync_in(&mut store, &instance, applyenv);
 
@@ -628,30 +808,30 @@ pub fn check_module_limits(wasm_bytes: &[u8]) -> Result<(), &'static str> {
                 if count > protocol::WASM_MAX_FUNCTIONS {
                     return Err("wasmparser_function_count_exceeds_limit");
                 }
-            },
+            }
             Payload::GlobalSection(reader) => {
                 let count = reader.count();
                 if count > protocol::WASM_MAX_GLOBALS {
                     return Err("wasmparser_global_count_exceeds_limit");
                 }
-            },
+            }
             Payload::ExportSection(reader) => {
                 let count = reader.count();
                 if count > protocol::WASM_MAX_EXPORTS {
                     return Err("wasmparser_export_count_exceeds_limit");
                 }
-            },
+            }
             Payload::ImportSection(reader) => {
                 let count = reader.count();
                 if count > protocol::WASM_MAX_IMPORTS {
                     return Err("wasmparser_import_count_exceeds_limit");
                 }
-            },
+            }
             Payload::CodeSectionStart { count, .. } => {
                 if count > protocol::WASM_MAX_FUNCTIONS {
                     return Err("wasmparser_code_body_count_exceeds_limit");
                 }
-            },
+            }
             Payload::DataSection(reader) => {
                 for data in reader {
                     let d = data.map_err(|_| "wasmparser_data_section_error")?;
@@ -682,7 +862,8 @@ pub fn validate_contract(env: &mut ApplyEnv, wasm_bytes: &[u8]) {
     let engine = make_engine(env.exec_left.max(0) as u64);
     let mut store = Store::new(engine);
 
-    let module = Module::new(&store, wasm_bytes).unwrap_or_else(|_| panic_any("exec_invalid_module"));
+    let module =
+        Module::new(&store, wasm_bytes).unwrap_or_else(|_| panic_any("exec_invalid_module"));
 
     setup_wasm_instance(env, &module, &mut store, true, &[]);
 }
@@ -704,8 +885,7 @@ fn cost_function(operator: &WasmerOperator) -> u64 {
         | WasmerOperator::F32Store { .. }
         | WasmerOperator::F64Store { .. } => 10,
 
-        WasmerOperator::Call { .. }
-        | WasmerOperator::CallIndirect { .. } => 10,
+        WasmerOperator::Call { .. } | WasmerOperator::CallIndirect { .. } => 10,
 
         // Static upper-bound: wasmer's metering middleware can't see the size
         // operand on the wasm stack, so per-byte metering needs a custom middleware.
@@ -714,8 +894,7 @@ fn cost_function(operator: &WasmerOperator) -> u64 {
         // (64KB) so a similar flat cost is reasonable.
         // TODO: replace with custom middleware that injects size-aware gas
         // decrement before each MemoryCopy/Fill/Grow (reads operand off stack).
-        WasmerOperator::MemoryCopy { .. }
-        | WasmerOperator::MemoryFill { .. } => 100_000,
+        WasmerOperator::MemoryCopy { .. } | WasmerOperator::MemoryFill { .. } => 100_000,
         WasmerOperator::MemoryGrow { .. } => 100_000,
 
         WasmerOperator::If { .. }
@@ -769,19 +948,38 @@ fn stub_two_void(_env: FunctionEnvMut<HostEnv>, _: i32, _: i32) -> Result<(), Ru
 fn stub_two_i32(_env: FunctionEnvMut<HostEnv>, _: i32, _: i32) -> Result<i32, RuntimeError> {
     stub_panic_validation();
 }
-fn stub_four_void(_env: FunctionEnvMut<HostEnv>, _: i32, _: i32, _: i32, _: i32) -> Result<(), RuntimeError> {
+fn stub_four_void(
+    _env: FunctionEnvMut<HostEnv>,
+    _: i32,
+    _: i32,
+    _: i32,
+    _: i32,
+) -> Result<(), RuntimeError> {
     stub_panic_validation();
 }
-fn stub_four_i32(_env: FunctionEnvMut<HostEnv>, _: i32, _: i32, _: i32, _: i32) -> Result<i32, RuntimeError> {
+fn stub_four_i32(
+    _env: FunctionEnvMut<HostEnv>,
+    _: i32,
+    _: i32,
+    _: i32,
+    _: i32,
+) -> Result<i32, RuntimeError> {
     stub_panic_validation();
 }
 fn stub_seed(_env: FunctionEnvMut<HostEnv>) -> Result<f64, RuntimeError> {
     stub_panic_validation();
 }
 
-pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Store, validation_only: bool, function_args: &[Vec<u8>]) -> (Instance, Vec<Value>) {
+pub fn setup_wasm_instance(
+    env: &mut ApplyEnv,
+    module: &Module,
+    store: &mut Store,
+    validation_only: bool,
+    function_args: &[Vec<u8>],
+) -> (Instance, Vec<Value>) {
     // Setup Memory
-    let memory = Memory::new(store, MemoryType::new(Pages(2), Some(Pages(30)), false)).unwrap_or_else(|_| panic_any("exec_memory_alloc"));
+    let memory = Memory::new(store, MemoryType::new(Pages(2), Some(Pages(30)), false))
+        .unwrap_or_else(|_| panic_any("exec_memory_alloc"));
 
     let mut wasm_arg_ptrs: Vec<Value> = Vec::new();
     {
@@ -791,8 +989,10 @@ pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Stor
         for arg_bytes in function_args {
             // Write the length + bytes
             let len = arg_bytes.len() as i32;
-            view.write(current_offset, &len.to_le_bytes()).unwrap_or_else(|_| panic_any("exec_arg_len_write"));
-            view.write(current_offset + 4, arg_bytes).unwrap_or_else(|_| panic_any("exec_arg_write"));
+            view.write(current_offset, &len.to_le_bytes())
+                .unwrap_or_else(|_| panic_any("exec_arg_len_write"));
+            view.write(current_offset + 4, arg_bytes)
+                .unwrap_or_else(|_| panic_any("exec_arg_write"));
             // Save the POINTER (i32) to pass to the function call later
             wasm_arg_ptrs.push(Value::I32(current_offset as i32));
             // Advance offset
@@ -866,7 +1066,8 @@ pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Stor
 
 fn inject_env_data(view: &MemoryView, env: &ApplyEnv) {
     let mut w = |offset: u64, data: &[u8]| {
-        view.write(offset, data).unwrap_or_else(|_| panic_any("exec_init_memwrite"))
+        view.write(offset, data)
+            .unwrap_or_else(|_| panic_any("exec_init_memwrite"))
     };
 
     //Reserve first 1024 bytes
@@ -879,9 +1080,15 @@ fn inject_env_data(view: &MemoryView, env: &ApplyEnv) {
     w(2_010, &env.caller_env.entry_height.to_le_bytes());
     w(2_020, &env.caller_env.entry_epoch.to_le_bytes());
     //
-    w(2_100, &(env.caller_env.entry_signer.len() as u32).to_le_bytes());
+    w(
+        2_100,
+        &(env.caller_env.entry_signer.len() as u32).to_le_bytes(),
+    );
     w(2_104, &env.caller_env.entry_signer);
-    w(2_200, &(env.caller_env.entry_prev_hash.len() as u32).to_le_bytes());
+    w(
+        2_200,
+        &(env.caller_env.entry_prev_hash.len() as u32).to_le_bytes(),
+    );
     w(2_204, &env.caller_env.entry_prev_hash);
     w(2_300, &(env.caller_env.entry_vr.len() as u32).to_le_bytes());
     w(2_304, &env.caller_env.entry_vr);
@@ -891,25 +1098,48 @@ fn inject_env_data(view: &MemoryView, env: &ApplyEnv) {
     // TX
     w(3_000, &env.caller_env.tx_nonce.to_le_bytes());
     //
-    w(3_100, &(env.caller_env.tx_signer.len() as u32).to_le_bytes());
+    w(
+        3_100,
+        &(env.caller_env.tx_signer.len() as u32).to_le_bytes(),
+    );
     w(3_104, &env.caller_env.tx_signer);
 
     // Accounts
-    w(4_000, &(env.caller_env.account_current.len() as u32).to_le_bytes());
+    w(
+        4_000,
+        &(env.caller_env.account_current.len() as u32).to_le_bytes(),
+    );
     w(4_004, &env.caller_env.account_current);
-    w(4_100, &(env.caller_env.account_caller.len() as u32).to_le_bytes());
+    w(
+        4_100,
+        &(env.caller_env.account_caller.len() as u32).to_le_bytes(),
+    );
     w(4_104, &env.caller_env.account_caller);
-    w(4_200, &(env.caller_env.account_origin.len() as u32).to_le_bytes());
+    w(
+        4_200,
+        &(env.caller_env.account_origin.len() as u32).to_le_bytes(),
+    );
     w(4_204, &env.caller_env.account_origin);
 
     // Assets
-    w(5_000, &(env.caller_env.attached_symbol.len() as u32).to_le_bytes());
+    w(
+        5_000,
+        &(env.caller_env.attached_symbol.len() as u32).to_le_bytes(),
+    );
     w(5_004, &env.caller_env.attached_symbol);
-    w(5_100, &(env.caller_env.attached_amount.len() as u32).to_le_bytes());
+    w(
+        5_100,
+        &(env.caller_env.attached_amount.len() as u32).to_le_bytes(),
+    );
     w(5_104, &env.caller_env.attached_amount);
 }
 
-pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: String, function_args: Vec<Vec<u8>>) -> Vec<u8> {
+pub fn call_contract(
+    env: &mut ApplyEnv,
+    wasm_bytes: &[u8],
+    function_name: String,
+    function_args: Vec<Vec<u8>>,
+) -> Vec<u8> {
     env.caller_env.call_return_value = Vec::new();
 
     let engine = make_engine(env.exec_left.max(0) as u64);
@@ -928,12 +1158,16 @@ pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: Strin
         None => compile_and_cache_module(&store, wasm_bytes, cache_key),
     };
 
-    let (instance, wasm_args) = setup_wasm_instance(env, &module, &mut store, false, &function_args);
+    let (instance, wasm_args) =
+        setup_wasm_instance(env, &module, &mut store, false, &function_args);
 
-    let entry_to_call = instance.exports.get_function(&function_name).unwrap_or_else(|e| {
-        log_line(env, e.to_string().into_bytes());
-        panic_any("exec_function_not_found")
-    });
+    let entry_to_call = instance
+        .exports
+        .get_function(&function_name)
+        .unwrap_or_else(|e| {
+            log_line(env, e.to_string().into_bytes());
+            panic_any("exec_function_not_found")
+        });
     let start = Instant::now();
     let call_result = entry_to_call.call(&mut store, &wasm_args);
     let duration = start.elapsed();
@@ -944,13 +1178,15 @@ pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: Strin
         MeteringPoints::Exhausted => {
             env.exec_left = 0;
             panic_any("exec_insufficient_exec_budget")
-        },
+        }
     };
     env.exec_left = remaining as i128;
 
     match call_result {
         Ok(_) => env.caller_env.call_return_value.clone(),
-        Err(ref e) if e.message() == "EXIT_IMPORT_RETURN" => env.caller_env.call_return_value.clone(),
+        Err(ref e) if e.message() == "EXIT_IMPORT_RETURN" => {
+            env.caller_env.call_return_value.clone()
+        }
         Err(err) => {
             log_line(env, err.message().into_bytes());
             panic_any("exec_error");

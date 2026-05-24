@@ -13,9 +13,9 @@ pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
 }
 
 pub const AMA_1_DOLLAR: i128 = 1_000_000_000;
-pub const AMA_10_CENT: i128 =    100_000_000;
-pub const AMA_1_CENT: i128 =      10_000_000;
-pub const AMA_01_CENT: i128 =      1_000_000;
+pub const AMA_10_CENT: i128 = 100_000_000;
+pub const AMA_1_CENT: i128 = 10_000_000;
+pub const AMA_01_CENT: i128 = 1_000_000;
 
 pub const RESERVE_AMA_PER_TX_EXEC: i128 = AMA_10_CENT; //reserved for exec balance (refunded at end of TX execution)
 pub const RESERVE_AMA_PER_TX_STORAGE: i128 = AMA_1_DOLLAR; //reserved for storage writes
@@ -57,7 +57,7 @@ pub const LOG_MSG_SIZE: usize = 4096; //max log line length
 pub const LOG_TOTAL_SIZE: usize = 16384; //max log total size
 pub const LOG_TOTAL_ELEMENTS: usize = 32; //max elements in list
 pub const WASM_MAX_PTR_LEN: usize = 1048576; //largest term passable from inside WASM to HOST
-//pub const WASM_MAX_PTR_LEN: usize = 32768; //dont smash passed first page
+                                             //pub const WASM_MAX_PTR_LEN: usize = 32768; //dont smash passed first page
 pub const WASM_MAX_PANIC_MSG_SIZE: usize = 128;
 
 pub const MAX_DB_KEY_SIZE: usize = 512;
@@ -76,17 +76,29 @@ pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i12
     if cost < 0 {
         std::panic::panic_any("pay_cost_negative")
     }
-    consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]), -cost);
+    consensus_kv::kv_increment(
+        env,
+        &crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]),
+        -cost,
+    );
     // Increment validator / burn
-    consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.entry_signer, b":balance:AMA"]), cost/2);
-    consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &coin::BURN_ADDRESS, b":balance:AMA"]), cost/2);
+    consensus_kv::kv_increment(
+        env,
+        &crate::bcat(&[b"account:", &env.caller_env.entry_signer, b":balance:AMA"]),
+        cost / 2,
+    );
+    consensus_kv::kv_increment(
+        env,
+        &crate::bcat(&[b"account:", &coin::BURN_ADDRESS, b":balance:AMA"]),
+        cost / 2,
+    );
 }
 
 pub fn tx_historical_cost(txu: &crate::model::tx::TXU) -> i128 {
     let tx_bytes = crate::model::tx::to_bytes_tx(&txu.tx)
         .unwrap_or_else(|_| std::panic::panic_any("invalid_tx_serialization"));
     std::cmp::max(
-            AMA_1_CENT,
-            COST_PER_BYTE_HISTORICAL * tx_bytes.len() as i128,
-        )
+        AMA_1_CENT,
+        COST_PER_BYTE_HISTORICAL * tx_bytes.len() as i128,
+    )
 }

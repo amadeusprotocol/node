@@ -32,7 +32,11 @@ fn ceil_log2_ratio(a: u64, b: u64) -> u32 {
         return 0;
     }
     let d0 = ilog2_floor(a) - ilog2_floor(b);
-    if b << d0 >= a { d0 } else { d0 + 1 }
+    if b << d0 >= a {
+        d0
+    } else {
+        d0 + 1
+    }
 }
 
 pub fn next(prev_bits: u32, sols: u64) -> u32 {
@@ -45,7 +49,10 @@ pub fn next(prev_bits: u32, sols: u64) -> u32 {
         clamp_bits(prev_bits.saturating_sub(min(MAX_STEP_DOWN, 3)))
     } else if sols > hi {
         let raw = ceil_log2_ratio(sols, target);
-        let delta = max(1, min(MAX_STEP_UP, ceil_div(raw as u64, UP_SLOWDOWN as u64) as u32));
+        let delta = max(
+            1,
+            min(MAX_STEP_UP, ceil_div(raw as u64, UP_SLOWDOWN as u64) as u32),
+        );
         clamp_bits(prev_bits + delta)
     } else if sols < lo {
         let delta = max(1, min(MAX_STEP_DOWN, ceil_log2_ratio(target, max(sols, 1))));

@@ -1,8 +1,10 @@
-pub use rust_rocksdb::{TransactionDB, MultiThreaded, TransactionDBOptions, Options,
-    Transaction, TransactionOptions, WriteOptions, CompactOptions, BottommostLevelCompaction,
-    DBRawIteratorWithThreadMode, BoundColumnFamily, ReadOptions, SliceTransform,
-    Cache, LruCacheOptions, BlockBasedOptions, DBCompressionType, BlockBasedIndexType,
-    ColumnFamilyDescriptor, AsColumnFamilyRef};
+pub use rust_rocksdb::{
+    AsColumnFamilyRef, BlockBasedIndexType, BlockBasedOptions, BottommostLevelCompaction,
+    BoundColumnFamily, Cache, ColumnFamilyDescriptor, CompactOptions, DBCompressionType,
+    DBRawIteratorWithThreadMode, LruCacheOptions, MultiThreaded, Options, ReadOptions,
+    SliceTransform, Transaction, TransactionDB, TransactionDBOptions, TransactionOptions,
+    WriteOptions,
+};
 
 use rustler::{Atom, Binary, Env, Error, NewBinary, NifResult, Term};
 
@@ -29,11 +31,13 @@ pub fn create_filter_key(parts: &[&[u8]]) -> [u8; 16] {
     output
 }
 
-pub fn build_tx_hashfilters<'a>(env: Env<'a>, txus: Vec<Term<'a>>) -> NifResult<Vec<(Binary<'a>, Binary<'a>)>> {
+pub fn build_tx_hashfilters<'a>(
+    env: Env<'a>,
+    txus: Vec<Term<'a>>,
+) -> NifResult<Vec<(Binary<'a>, Binary<'a>)>> {
     let mut all_filters = Vec::with_capacity(txus.len() * 8);
 
     for txu in txus {
-
         let full_tx_hash: Binary = txu.map_get(hash())?.decode()?;
         let full_hash_slice = full_tx_hash.as_slice();
 
@@ -90,7 +94,7 @@ pub fn build_tx_hashfilters<'a>(env: Env<'a>, txus: Vec<Term<'a>>) -> NifResult<
                 push_key(&[signer, ZERO, contract, func]);
                 push_key(&[ZERO, ZERO, contract, ZERO]);
                 push_key(&[ZERO, ZERO, contract, func]);
-            },
+            }
             _ => {
                 push_key(&[signer, ZERO, ZERO, ZERO]);
                 push_key(&[ZERO, arg0, ZERO, ZERO]);
@@ -109,9 +113,17 @@ pub fn build_tx_hashfilters<'a>(env: Env<'a>, txus: Vec<Term<'a>>) -> NifResult<
     Ok(all_filters)
 }
 
-pub fn query_tx_hashfilter<'a, 'db>(env: Env<'a>, db: &'db TransactionDB<MultiThreaded>, signer: &[u8], arg0: &[u8], contract: &[u8], function: &[u8],
-    limit: usize, sort: bool, cursor: Option<&[u8]>) -> NifResult<(Option<Binary<'a>>, Vec<Binary<'a>>)>
-{
+pub fn query_tx_hashfilter<'a, 'db>(
+    env: Env<'a>,
+    db: &'db TransactionDB<MultiThreaded>,
+    signer: &[u8],
+    arg0: &[u8],
+    contract: &[u8],
+    function: &[u8],
+    limit: usize,
+    sort: bool,
+    cursor: Option<&[u8]>,
+) -> NifResult<(Option<Binary<'a>>, Vec<Binary<'a>>)> {
     let cf_txfilter = &db.cf_handle("tx_filter").unwrap();
     let cf_tx = &db.cf_handle("tx").unwrap();
 
@@ -156,7 +168,11 @@ pub fn query_tx_hashfilter<'a, 'db>(env: Env<'a>, db: &'db TransactionDB<MultiTh
     if cursor.is_some() && iter_txfilter.valid() {
         if let Some(k) = iter_txfilter.key() {
             if k == &start_key {
-                if is_desc { iter_txfilter.prev(); } else { iter_txfilter.next(); }
+                if is_desc {
+                    iter_txfilter.prev();
+                } else {
+                    iter_txfilter.next();
+                }
             }
         }
     }
@@ -168,7 +184,7 @@ pub fn query_tx_hashfilter<'a, 'db>(env: Env<'a>, db: &'db TransactionDB<MultiTh
         match iter_txfilter.key() {
             Some(k) if k.len() >= 16 && &k[0..16] == prefix => {
                 // Key is valid, get the value (Tx Prefix)
-            },
+            }
             _ => break, // Exit loop if prefix mismatches or key invalid
         }
 
@@ -190,14 +206,18 @@ pub fn query_tx_hashfilter<'a, 'db>(env: Env<'a>, db: &'db TransactionDB<MultiTh
                         let cursor_bin = make_cursor_bin(env, last_cursor_bytes);
                         return Ok((cursor_bin, results));
                     }
-                },
+                }
                 _ => break, // Stop inner loop
             }
             iter_tx.next();
         }
 
         // Advance Outer Iterator
-        if is_desc { iter_txfilter.prev(); } else { iter_txfilter.next(); }
+        if is_desc {
+            iter_txfilter.prev();
+        } else {
+            iter_txfilter.next();
+        }
     }
 
     let cursor_bin = make_cursor_bin(env, last_cursor_bytes);
@@ -210,7 +230,7 @@ fn make_cursor_bin<'a>(env: Env<'a>, bytes: Option<Vec<u8>>) -> Option<Binary<'a
             let mut bin = rustler::NewBinary::new(env, v.len());
             bin.as_mut_slice().copy_from_slice(&v);
             Some(bin.into())
-        },
-        None => None
+        }
+        None => None,
     }
 }

@@ -1,15 +1,14 @@
+use crate::consensus::bintree::{
+    compute_namespace_path, get_bit_be, lcp_be, leaf_hash, mask_after_be, node_hash,
+    prefix_match_be, set_bit_be, sha256, Hash, NodeKey, Op, Path, Proof, ProofNode, VerifyStatus,
+    ZERO_HASH,
+};
+use crate::consensus::consensus_kv::{kv_delete, kv_put};
 use crate::consensus::{self, consensus_apply};
 use consensus_apply::ApplyEnv;
-use crate::consensus::consensus_kv::{kv_put, kv_delete};
-use crate::consensus::bintree::{
-    get_bit_be, set_bit_be, mask_after_be, lcp_be, prefix_match_be, sha256,
-    node_hash, leaf_hash,
-    compute_namespace_path, Op, Proof, ProofNode, NodeKey, VerifyStatus,
-    ZERO_HASH, Path, Hash
-};
 
-use sha2::{Digest, Sha256};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::cmp::{min, Ordering};
 use std::collections::BTreeSet;
 use std::convert::TryInto;
@@ -56,11 +55,14 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
                     return fv;
                 }
                 let (lcp_path, len) = lcp_be(&fk.path, &lk.path);
-                if let Some(h) = self.get_exact(&NodeKey { path: lcp_path, len }) {
+                if let Some(h) = self.get_exact(&NodeKey {
+                    path: lcp_path,
+                    len,
+                }) {
                     return h;
                 }
                 ZERO_HASH
-            },
+            }
             _ => ZERO_HASH,
         }
     }
@@ -69,23 +71,22 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
     // BATCH UPDATE (Same logic as before, verified)
     // ========================================================================
     pub fn batch_update(&mut self, ops: Vec<Op>) {
-        let mut prepared: Vec<(bool, Path, Hash)> = ops.into_par_iter().map(|op| {
-            match op {
+        let mut prepared: Vec<(bool, Path, Hash)> = ops
+            .into_par_iter()
+            .map(|op| match op {
                 Op::Insert(ns, k, v) => {
                     let path = compute_namespace_path(ns.as_deref(), &k);
                     (true, path, leaf_hash(&path, &k, &v))
-                },
+                }
                 Op::Delete(ns, k) => {
                     let path = compute_namespace_path(ns.as_deref(), &k);
                     (false, path, ZERO_HASH)
                 }
-            }
-        }).collect();
-        prepared.par_sort_unstable_by(|a, b| {
-            match a.1.cmp(&b.1) {
-                Ordering::Equal => a.0.cmp(&b.0),
-                other => other,
-            }
+            })
+            .collect();
+        prepared.par_sort_unstable_by(|a, b| match a.1.cmp(&b.1) {
+            Ordering::Equal => a.0.cmp(&b.0),
+            other => other,
         });
 
         let mut dirty_leaf_paths = BTreeSet::new();
@@ -107,10 +108,14 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
                     // seek_prev(key) gives the one before.
                     // seek(key) gives the one after (since key is now deleted).
                     if let Some((prev_k, _)) = self.seek_prev_inclusive(&key) {
-                        if prev_k.len == 256 { dirty_leaf_paths.insert(prev_k.path); }
+                        if prev_k.len == 256 {
+                            dirty_leaf_paths.insert(prev_k.path);
+                        }
                     }
                     if let Some((next_k, _)) = self.seek_next(&key) {
-                        if next_k.len == 256 { dirty_leaf_paths.insert(next_k.path); }
+                        if next_k.len == 256 {
+                            dirty_leaf_paths.insert(next_k.path);
+                        }
                     }
                 }
             }
@@ -119,8 +124,8 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
         let mut dirty_internal_nodes = BTreeSet::new();
 
         for p in &dirty_leaf_paths {
-            if let Some(leaf_hash) = self.get_exact(&NodeKey{path: *p, len: 256}) {
-                 self.ensure_split_points(*p, leaf_hash, &mut dirty_internal_nodes);
+            if let Some(leaf_hash) = self.get_exact(&NodeKey { path: *p, len: 256 }) {
+                self.ensure_split_points(*p, leaf_hash, &mut dirty_internal_nodes);
             }
         }
         for p in &dirty_leaf_paths {
@@ -138,21 +143,29 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
 
         // Check Previous Neighbor
         // Since we are iterating known existing leaves, we look for neighbors in the DB
-        if let Some((n_key, n_leaf)) = self.seek_prev_db(&key) { // seek_prev_db excludes self
-             if n_key.len == 256 {
-                 self.check_neighbor(path, leaf, n_key.path, n_leaf, dirty);
-             }
+        if let Some((n_key, n_leaf)) = self.seek_prev_db(&key) {
+            // seek_prev_db excludes self
+            if n_key.len == 256 {
+                self.check_neighbor(path, leaf, n_key.path, n_leaf, dirty);
+            }
         }
 
         // Check Next Neighbor
         if let Some((n_key, n_leaf)) = self.seek_next(&key) {
-             if n_key.len == 256 {
-                 self.check_neighbor(path, leaf, n_key.path, n_leaf, dirty);
-             }
+            if n_key.len == 256 {
+                self.check_neighbor(path, leaf, n_key.path, n_leaf, dirty);
+            }
         }
     }
 
-    fn check_neighbor(&mut self, path: Path, leaf: Hash, n_path: Path, n_leaf: Hash, dirty: &mut BTreeSet<NodeKey>) {
+    fn check_neighbor(
+        &mut self,
+        path: Path,
+        leaf: Hash,
+        n_path: Path,
+        n_leaf: Hash,
+        dirty: &mut BTreeSet<NodeKey>,
+    ) {
         let (lcp_path, len) = lcp_be(&path, &n_path);
         let dir = get_bit_be(&path, len);
         let temp_val = if dir == 0 {
@@ -161,14 +174,20 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
             node_hash(&lcp_path, len, &n_leaf, &leaf)
         };
 
-        let node_key = NodeKey { path: lcp_path, len };
+        let node_key = NodeKey {
+            path: lcp_path,
+            len,
+        };
         // Insert node if not exists or if it needs update (we just overwrite, it's safer)
         self.insert_raw(node_key, temp_val);
         dirty.insert(node_key);
     }
 
     fn collect_dirty_ancestors(&self, target_path: Path, acc: &mut BTreeSet<NodeKey>) {
-        let mut cursor = NodeKey { path: target_path, len: 256 };
+        let mut cursor = NodeKey {
+            path: target_path,
+            len: 256,
+        };
         loop {
             // seek_prev_inclusive behaves like range(..cursor).next_back() PLUS checking exact cursor.
             // But we want ancestors, which have len < cursor.len.
@@ -180,10 +199,13 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
                     // Prevent infinite loop if we find ourselves
                     if k == cursor {
                         if k.len > 0 {
-                             cursor = NodeKey { path: k.path, len: k.len - 1 };
-                             continue;
+                            cursor = NodeKey {
+                                path: k.path,
+                                len: k.len - 1,
+                            };
+                            continue;
                         } else {
-                             break;
+                            break;
                         }
                     }
 
@@ -193,7 +215,10 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
                     } else {
                         // Sibling jump
                         let (lcp_p, lcp_l) = lcp_be(&target_path, &k.path);
-                        let jump = NodeKey{ path: lcp_p, len: lcp_l + 1 };
+                        let jump = NodeKey {
+                            path: lcp_p,
+                            len: lcp_l + 1,
+                        };
                         cursor = if jump < k { jump } else { k };
                     }
                 }
@@ -207,7 +232,9 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
         sorted_nodes.sort_unstable_by(|a, b| b.len.cmp(&a.len));
 
         for node in sorted_nodes {
-            if node.len == 256 { continue; }
+            if node.len == 256 {
+                continue;
+            }
 
             // Get children hashes.
             // This unifies the logic: check for direct child node OR descendant leaf/node.
@@ -229,7 +256,10 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
         mask_after_be(&mut target_path, p_len + 1);
         let child_len = p_len + 1;
 
-        let target_key = NodeKey { path: target_path, len: child_len };
+        let target_key = NodeKey {
+            path: target_path,
+            len: child_len,
+        };
 
         // We seek to the location of the child.
         // If the child exists (Internal or Leaf at that exact path), we get it.
@@ -267,7 +297,7 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
         let k = serialize_key(key);
         match self.env.txn.get_cf(&self.env.cf, k) {
             Ok(Some(v)) => Some(v.try_into().unwrap()),
-            _ => None
+            _ => None,
         }
     }
 
@@ -279,7 +309,10 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
         let mut iter = self.env.txn.raw_iterator_cf(&self.env.cf);
         iter.seek_to_first();
         if iter.valid() {
-            Some((deserialize_key(iter.key().unwrap()), iter.value().unwrap().try_into().unwrap()))
+            Some((
+                deserialize_key(iter.key().unwrap()),
+                iter.value().unwrap().try_into().unwrap(),
+            ))
         } else {
             None
         }
@@ -289,7 +322,10 @@ impl<'env, 'a> RocksHubt<'env, 'a> {
         let mut iter = self.env.txn.raw_iterator_cf(&self.env.cf);
         iter.seek_to_last();
         if iter.valid() {
-            Some((deserialize_key(iter.key().unwrap()), iter.value().unwrap().try_into().unwrap()))
+            Some((
+                deserialize_key(iter.key().unwrap()),
+                iter.value().unwrap().try_into().unwrap(),
+            ))
         } else {
             None
         }
