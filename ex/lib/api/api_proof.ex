@@ -39,7 +39,7 @@ defmodule API.Proof do
       }
     }
     if !value do map else
-      result = RDB.bintree_root_verify(proof, namespace, key, value)
+      result = RDB.bintree_root_verify(proof.root, proof, namespace, key, value)
       Map.merge(map, %{value: Base58.encode(value), result: result})
     end
   end

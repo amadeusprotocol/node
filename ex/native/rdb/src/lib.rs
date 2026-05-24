@@ -980,10 +980,14 @@ fn term_to_proof(term: Term) -> Result<bintree::Proof, Error> {
 }
 
 #[rustler::nif]
-fn bintree_root_verify<'a>(env: Env<'a>, proof_ex: Term<'a>, ns: Option<Binary<'a>>, key: Binary<'a>, value: Binary<'a>) -> Term<'a> {
+fn bintree_root_verify<'a>(env: Env<'a>, expected_root: Binary<'a>, proof_ex: Term<'a>, ns: Option<Binary<'a>>, key: Binary<'a>, value: Binary<'a>) -> Term<'a> {
     let proof = term_to_proof(proof_ex).unwrap();
     let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
-    let result = bintree::Hubt::verify(&proof, ns_vec, key.to_vec(), value.to_vec());
+    let expected_root_arr: bintree::Hash = match expected_root.as_slice().try_into() {
+        Ok(arr) => arr,
+        Err(_) => return (atoms::invalid()).encode(env),
+    };
+    let result = bintree::Hubt::verify(&expected_root_arr, &proof, ns_vec, key.to_vec(), value.to_vec());
     match result {
         bintree::VerifyStatus::Invalid => (atoms::invalid()).encode(env),
         bintree::VerifyStatus::Included => (atoms::included()).encode(env),
