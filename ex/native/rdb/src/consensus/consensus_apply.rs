@@ -193,7 +193,7 @@ pub fn make_apply_env<'db>(
 fn sol_verify_pool() -> &'static rayon::ThreadPool {
     SOL_VERIFY_POOL.get_or_init(|| {
         let threads = std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(1))
+            .map(|n| ((n.get() * 3) / 4).max(1))
             .unwrap_or(1);
 
         rayon::ThreadPoolBuilder::new()
