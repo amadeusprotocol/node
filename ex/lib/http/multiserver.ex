@@ -280,6 +280,11 @@ defmodule Ama.MultiServer do
                 balances = API.Wallet.balance_all(pk)
                 quick_reply(state, json_fix_floats(%{error: :ok, balances: balances}))
 
+            r.method == "GET" and r.path == "/api/wallet/malicious_address" ->
+                list = ["7XnWYc4RT6ujKhVb8MgWJfks9ECR8iQsPjZwzpJM1UFJWhQhazsSXAZP42E1o37qGR",
+                "5wcwqPYHUGLrPECGiJsAn3XeLXUtuyMSRedJTAYiK4GwNrM2jksU5TxAh4TWPwV3sU"]
+                quick_reply(state, %{error: :ok, list: list})
+
             r.method == "POST" and r.path == "/api/tx/submit" ->
                 {r, tx_packed} = Photon.HTTP.read_body_all(state.socket, r)
                 tx_packed = if Base58.likely(tx_packed) do Base58.decode(tx_packed |> String.trim()) else tx_packed end
