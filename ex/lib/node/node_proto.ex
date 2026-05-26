@@ -4,7 +4,7 @@ defmodule NodeProto do
     %{op: :new_phone_who_dis}
   end
   def new_phone_who_dis_reply() do
-    anr = NodeANR.build()
+    anr = NodeANR.get_or_build()
     %{op: :new_phone_who_dis_reply, anr: anr}
   end
 

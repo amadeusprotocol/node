@@ -29,7 +29,7 @@ defmodule NodeANR do
     if ts_m < Application.fetch_env!(:ama, :anr_next_refresh) do anr else
       anr = build()
       Application.put_env(:ama, :anr, anr)
-      Application.put_env(:ama, :anr_next_refresh, ts_m + 60_000*60)
+      Application.put_env(:ama, :anr_next_refresh, ts_m + 60_000*10)
       anr
     end
   end

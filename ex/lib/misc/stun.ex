@@ -35,13 +35,21 @@ defmodule STUN do
     end
   end
   defp get_current_ip4_2(iface) do
-    IO.puts "trying to get ip4 via STUN.."
+    iface_str = iface || Application.fetch_env!(:ama, :udp_ipv4_tuple)
+    iface_str = Tuple.to_list(iface_str) |> Enum.join(".")
+    IO.puts "trying to get my ip4 via STUN off interface #{iface_str}"
     ip4 = try do get_my_public_ipv4(iface) catch _,_ -> nil end
-    if ip4 do ip4 else
-      IO.puts "trying to get ip4 via HTTP.."
+    if ip4 do
+      IO.puts "got my ip4 it is #{ip4}"
+      ip4
+    else
+      IO.puts "trying to get my ip4 via HTTP off interface #{iface_str}"
       ip4 = try do get_my_public_ipv4_http(iface) catch _,_ -> nil end
-      if ip4 do ip4 else
-        IO.put "failed to find your nodes public ip. Hardcode it via PUBLIC_UDP_IPV4="
+      if ip4 do
+        IO.puts "got my ip4 it is #{ip4}"
+        ip4
+      else
+        IO.puts "failed to find your nodes public ip. Hardcode it via PUBLIC_UDP_IPV4="
       end
     end
   end
