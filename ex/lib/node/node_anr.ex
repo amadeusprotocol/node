@@ -91,7 +91,7 @@ defmodule NodeANR do
       goodDelta = (ts - anr.ts) > -3600 #60 minutes max into future
 
       # Parseable IPv4 address
-      goodIp4 = is_binary(anr.ip4) and match?({:ok, {_,_,_,_}}, :inet.parse_address(~c'#{anr.ip4}'))
+      goodIp4 = valid_ip4?(anr.ip4)
 
       # Not too big
       bin = RDB.vecpak_encode(anr)
@@ -120,20 +120,28 @@ defmodule NodeANR do
     !Application.fetch_env!(:ama, :check_routed_peer) or CymruRouting.globally_routed?(ip4)
   end
 
+  def valid_ip4?(ip4) do
+    is_binary(ip4) and match?({:ok, {_,_,_,_}}, :inet.parse_address(~c'#{ip4}'))
+  end
+
   def insert(anr) do
-    anr = Map.put(anr, :hasChainPop, !!DB.Chain.pop(anr.pk))
-    old_anr = MnesiaKV.get(NODEANR, anr.pk)
-    if !routed_peer?(anr.ip4) do
-      if !old_anr or old_anr[:ip4] == anr.ip4 or !old_anr[:ts] or anr.ts > old_anr.ts do
-        delete(anr.pk)
-      end
+    if !valid_ip4?(anr[:ip4]) do
       nil
     else
-      cond do
-        !old_anr or !old_anr[:ts] -> insert_new(anr)
-        anr.ts <= old_anr.ts -> nil
-        old_anr.ip4 == anr.ip4 and old_anr.port == anr.port -> MnesiaKV.merge(NODEANR, anr.pk, anr)
-        true -> insert_new(anr)
+      anr = Map.put(anr, :hasChainPop, !!DB.Chain.pop(anr.pk))
+      old_anr = MnesiaKV.get(NODEANR, anr.pk)
+      if !routed_peer?(anr.ip4) do
+        if !old_anr or old_anr[:ip4] == anr.ip4 or !old_anr[:ts] or anr.ts > old_anr.ts do
+          delete(anr.pk)
+        end
+        nil
+      else
+        cond do
+          !old_anr or !old_anr[:ts] -> insert_new(anr)
+          anr.ts <= old_anr.ts -> nil
+          old_anr.ip4 == anr.ip4 and old_anr.port == anr.port -> MnesiaKV.merge(NODEANR, anr.pk, anr)
+          true -> insert_new(anr)
+        end
       end
     end
   end
@@ -166,7 +174,9 @@ defmodule NodeANR do
     if !flag do
       :ets.delete(SharedSecretCache, pk)
     end
-    MnesiaKV.merge(NODEANR, pk, %{handshaked: flag})
+    if MnesiaKV.get(NODEANR, pk) do
+      MnesiaKV.merge(NODEANR, pk, %{handshaked: flag})
+    end
   end
 
   def not_handshaked_pk_ip4() do
