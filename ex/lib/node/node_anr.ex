@@ -90,10 +90,13 @@ defmodule NodeANR do
       ts = :os.system_time(1)
       goodDelta = (ts - anr.ts) > -3600 #60 minutes max into future
 
+      # Parseable IPv4 address
+      goodIp4 = is_binary(anr.ip4) and match?({:ok, {_,_,_,_}}, :inet.parse_address(~c'#{anr.ip4}'))
+
       # Not too big
       bin = RDB.vecpak_encode(anr)
       anr = Map.take(anr, @keys)
-      if byte_size(bin) <= @max_anr_size and goodDelta and verify_signature(anr) do
+      if byte_size(bin) <= @max_anr_size and goodDelta and goodIp4 and verify_signature(anr) do
         anr
       end
     catch
