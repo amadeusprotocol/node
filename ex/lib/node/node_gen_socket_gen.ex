@@ -78,10 +78,8 @@ defmodule NodeGenSocketGen do
         !hasPeerANR and msg.op in [:new_phone_who_dis, :new_phone_who_dis_reply] ->
           NodeState.handle(msg.op, %{peer: peer}, msg)
         !hasPeerANR ->
-          #request ANR
-          if !NodeGenNetguard.op_ok(peer_ip, :new_phone_who_dis) do
-            IO.inspect {:dropping_outgoing_due_to_op_flood, peer_ip, msg.op}
-          else
+          #request ANR — at most once per cooldown per peer, regardless of how chatty they are
+          if NodeGenNetguard.handshake_attempt_ok(peer_ip) do
             send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer_ip, pk: pk}], NodeProto.new_phone_who_dis()})
           end
         hasPeerANR ->

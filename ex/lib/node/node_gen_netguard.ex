@@ -34,6 +34,17 @@ defmodule NodeGenNetguard do
     end
   end
 
+  @handshake_attempt_cooldown_ms 3000
+  def handshake_attempt_ok(peer_ip) do
+    now = :os.system_time(1000)
+    case :ets.lookup(NODEHandshakeAttempt, peer_ip) do
+      [{^peer_ip, last}] when now - last < @handshake_attempt_cooldown_ms -> false
+      _ ->
+        :ets.insert(NODEHandshakeAttempt, {peer_ip, now})
+        true
+    end
+  end
+
   def decrement_buckets(idx) do
     step = trunc(@max_frames_per_6_sec / 2)
     :ets.foldl(fn({peer_ip, _}, _)->

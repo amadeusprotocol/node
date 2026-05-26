@@ -125,6 +125,8 @@ defmodule Ama do
       :ets.new(:"NODENetGuardPer6Seconds#{idx}", [:ordered_set, :named_table, :public,
         {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
     end)
+    :ets.new(NODEHandshakeAttempt, [:set, :named_table, :public,
+      {:write_concurrency, true}, {:read_concurrency, true}])
     Enum.each(0..7, fn(idx)->
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor,
         %{id: :"NodeGenSocketGen#{idx}", start: {NodeGenSocketGen, :start_link, [ip4, port, idx]}, restart: :permanent})
