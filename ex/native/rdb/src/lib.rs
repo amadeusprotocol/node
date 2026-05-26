@@ -112,41 +112,26 @@ fn to_nif_err(err: Atom) -> Error {
 #[rustler::nif]
 fn open_transaction_db<'a>(env: Env<'a>, path: String, cf_names: Vec<String>) -> NifResult<Term<'a>> {
     let mut lru_opts = LruCacheOptions::default();
-    lru_opts.set_capacity(4 * 1024 * 1024 * 1024); //4GB
-    lru_opts.set_num_shard_bits(8);
+    lru_opts.set_capacity(512 * 1024 * 1024); // 512MB row cache (hot accounts)
+    lru_opts.set_num_shard_bits(6);
     let row_cache = Cache::new_lru_cache_opts(&lru_opts);
 
-    let block_cache = Cache::new_lru_cache(4 * 1024 * 1024 * 1024); //4GB
+    let block_cache = Cache::new_lru_cache(3 * 1024 * 1024 * 1024); // 3GB block cache (shared)
 
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
-    db_opts.set_max_open_files(30000);
-    //more threads
-    db_opts.increase_parallelism(2);
-    db_opts.set_max_background_jobs(2);
+    db_opts.set_max_open_files(10000);
+    db_opts.increase_parallelism(4);
+    db_opts.set_max_background_jobs(4);
 
-    db_opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2GB
-    db_opts.set_target_file_size_base(8 * 1024 * 1024 * 1024);
-    //db_opts.set_target_file_size_base(2 * 1024 * 1024 * 1024);
-    //db_opts.set_target_file_size_multiplier(2);
-    db_opts.set_max_compaction_bytes(20 * 1024 * 1024 * 1024);
+    db_opts.set_max_total_wal_size(512 * 1024 * 1024); // 512MB
 
+    /*
     db_opts.enable_statistics();
     db_opts.set_statistics_level(rust_rocksdb::statistics::StatsLevel::All);
     db_opts.set_skip_stats_update_on_db_open(true);
-
-    // Bigger L0 flushes
-    db_opts.set_write_buffer_size(512 * 1024 * 1024);
-    db_opts.set_max_write_buffer_number(6);
-    db_opts.set_min_write_buffer_number_to_merge(2);
-    // L0 thresholds
-    db_opts.set_level_zero_file_num_compaction_trigger(8);
-    db_opts.set_level_zero_slowdown_writes_trigger(30);
-    db_opts.set_level_zero_stop_writes_trigger(100);
-    db_opts.set_max_subcompactions(1);
-
-    //db_opts.set_level_compaction_dynamic_level_bytes(false);
+    */
 
     let mut txn_db_opts = TransactionDBOptions::default();
     txn_db_opts.set_default_lock_timeout(3000);
@@ -182,28 +167,21 @@ fn open_transaction_db<'a>(env: Env<'a>, path: String, cf_names: Vec<String>) ->
     cf_opts.set_compression_type(DBCompressionType::Zstd);
     cf_opts.set_compression_options(-14, 2, 0, dict_bytes);
     cf_opts.set_zstd_max_train_bytes(100 * dict_bytes);
-    /*
-        cf_opts.set_bottommost_compression_type(DBCompressionType::Zstd);
-        cf_opts.set_bottommost_compression_options(-14, 2, 0, dict_bytes, true);
-        cf_opts.set_bottommost_zstd_max_train_bytes(100 * dict_bytes, true);
-    */
 
-    cf_opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2GB
-    cf_opts.set_target_file_size_base(8 * 1024 * 1024 * 1024);
-    //cf_opts.set_target_file_size_base(2 * 1024 * 1024 * 1024);
-    //cf_opts.set_target_file_size_multiplier(2);
-    cf_opts.set_max_compaction_bytes(20 * 1024 * 1024 * 1024);
+    // SST sizing: 256MB base, doubling per level — L1=256MB, L2=512MB, L3=1GB, L4=2GB, L5+=4GB
+    cf_opts.set_target_file_size_base(256 * 1024 * 1024);
+    cf_opts.set_target_file_size_multiplier(2);
+    cf_opts.set_max_compaction_bytes(2 * 1024 * 1024 * 1024); // 2GB
 
-    // Bigger L0 flushes
-    cf_opts.set_write_buffer_size(512 * 1024 * 1024);
-    cf_opts.set_max_write_buffer_number(6);
-    cf_opts.set_min_write_buffer_number_to_merge(2);
-    // L0 thresholds
-    cf_opts.set_level_zero_file_num_compaction_trigger(20);
-    cf_opts.set_level_zero_slowdown_writes_trigger(40);
-    cf_opts.set_level_zero_stop_writes_trigger(100);
-    cf_opts.set_max_subcompactions(1);
-    //cf_opts.set_periodic_compaction_seconds(0);
+    // Memtable: 128MB × 3 per CF, flush as soon as one is full
+    cf_opts.set_write_buffer_size(128 * 1024 * 1024);
+    cf_opts.set_max_write_buffer_number(3);
+    cf_opts.set_min_write_buffer_number_to_merge(1);
+    // L0 thresholds — back to sane defaults now that compactions actually work
+    cf_opts.set_level_zero_file_num_compaction_trigger(4);
+    cf_opts.set_level_zero_slowdown_writes_trigger(20);
+    cf_opts.set_level_zero_stop_writes_trigger(36);
+    cf_opts.set_max_subcompactions(2);
 
     //cf_opts.set_level_compaction_dynamic_level_bytes(false);
 
