@@ -121,12 +121,6 @@ defmodule DB.Entry do
             tx_ptr = %{entry_hash: entry.hash, receipt: receipt, index_start: index_start, index_size: index_size}
             |> RDB.vecpak_encode()
             RocksDB.put(txu.hash, tx_ptr, db_handle(db_opts, :tx, %{}))
-            nonce_padded = pad_integer_20(txu.tx.nonce)
-            RocksDB.put("#{txu.tx.signer}:#{nonce_padded}", txu.hash, db_handle(db_opts, :tx_account_nonce, %{}))
-            TX.known_receivers(txu)
-            |> Enum.each(fn(receiver)->
-                RocksDB.put("#{receiver}:#{nonce_padded}", txu.hash, db_handle(db_opts, :tx_receiver_nonce, %{}))
-            end)
         end
     end)
   end
@@ -178,13 +172,6 @@ defmodule DB.Entry do
 
     Enum.each(entry.txs, fn(txu)->
         RocksDB.delete(txu.hash, db_handle(db_opts, :tx, %{}))
-
-        nonce_padded = pad_integer_20(txu.tx.nonce)
-        RocksDB.delete("#{txu.tx.signer}:#{nonce_padded}", db_handle(db_opts, :tx_account_nonce, %{}))
-        TX.known_receivers(txu)
-        |> Enum.each(fn(receiver)->
-            RocksDB.delete("#{receiver}:#{nonce_padded}", db_handle(db_opts, :tx_receiver_nonce, %{}))
-        end)
     end)
   end
 

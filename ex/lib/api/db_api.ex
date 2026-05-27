@@ -33,17 +33,17 @@ defmodule DB.API do
       "sysconf",
       "entry", "entry_meta",
       "attestation",
-      "tx", "tx_account_nonce", "tx_receiver_nonce", "tx_filter",
+      "tx", "tx_filter",
       "contractstate", "contractstate_tree"
     ]
     try do
-      {:ok, db_ref, cf_ref_list} = RDB.open_transaction_db(path, cfs)
+      {db_ref, cf_ref_list} = open_with_migration(path, cfs)
       [
         default_cf,
         sysconf_cf,
         entry_cf, entry_meta_cf,
         attestation_cf,
-        tx_cf, tx_account_nonce_cf, tx_receiver_nonce_cf, tx_filter_cf,
+        tx_cf, tx_filter_cf,
         contractstate_cf, contractstate_tree_cf,
       ] = cf_ref_list
       cf = %{
@@ -51,7 +51,7 @@ defmodule DB.API do
         sysconf: sysconf_cf,
         entry: entry_cf, entry_meta: entry_meta_cf,
         attestation: attestation_cf,
-        tx: tx_cf, tx_account_nonce: tx_account_nonce_cf, tx_receiver_nonce: tx_receiver_nonce_cf, tx_filter: tx_filter_cf,
+        tx: tx_cf, tx_filter: tx_filter_cf,
         contractstate: contractstate_cf, contractstate_tree: contractstate_tree_cf
       }
       :persistent_term.put({:rocksdb, Fabric}, %{db: db_ref, cf_list: cf_ref_list, cf: cf, path: path})
@@ -60,6 +60,33 @@ defmodule DB.API do
         IO.inspect {e, r}
         IO.inspect {:using_old_db, "migrate"}
         :erlang.halt()
+    end
+  end
+
+  defp open_with_migration(path, cfs) do
+    case RDB.open_transaction_db(path, cfs) do
+      {:ok, db, refs} ->
+        {db, refs}
+      {:error, msg} ->
+        case Regex.run(~r/Column families not opened:\s*([^\n]+)/, msg) do
+          [_, extras_str] ->
+            obsolete =
+              extras_str
+              |> String.split(",")
+              |> Enum.map(&String.trim/1)
+              |> Enum.reject(& &1 == "")
+            IO.puts "DB migrate: dropping obsolete CFs: #{Enum.join(obsolete, ", ")}"
+            {:ok, db, all_refs} = RDB.open_transaction_db(path, cfs ++ obsolete)
+            Enum.each(obsolete, fn name ->
+              case RDB.drop_cf(db, name) do
+                :ok -> :ok
+                other -> IO.inspect({:drop_cf_warn, name, other})
+              end
+            end)
+            {db, Enum.take(all_refs, length(cfs))}
+          _ ->
+            throw({:rocksdb_open_failed, msg})
+        end
     end
   end
 

@@ -41,95 +41,41 @@ defmodule API.TX do
     def get_by_address(pk, filters) do
         {_, txs_sent} = get_by_address_sent(pk, filters)
         {_, txs_recv} = get_by_address_recv(pk, filters)
-        txs = txs_sent ++ txs_recv
-
-        txs = Enum.sort_by(txs, & &1.tx.nonce, filters.sort)
-        txs = Enum.take(txs, filters.limit)
-
-        cursor = case List.last(txs) do
-            nil -> nil
-            last_tx ->
-                last_tx.tx.nonce
-                |> Integer.to_string()
-                |> String.pad_leading(20, "0")
-        end
-
-        {cursor, txs}
+        txs = (txs_sent ++ txs_recv)
+        |> Enum.sort_by(& &1.tx.nonce, filters.sort)
+        |> Enum.take(filters.limit)
+        {nil, txs}
     end
 
-    def get_by_address_sent(pk, filters) do
-        pk = API.maybe_b58(48, pk)
+    def get_by_address_sent(pk, filters), do: get_by_address_via_filter(pk, filters, :sent)
+    def get_by_address_recv(pk, filters), do: get_by_address_via_filter(pk, filters, :recv)
 
-        {grep_func, start_key} = case filters.sort do
-            :desc -> {&RocksDB.get_prev/3, (filters[:cursor] || :binary.copy("9", 20)) |> String.pad_leading(20, "0")}
-            _ -> {&RocksDB.get_next/3, ""}
+    defp get_by_address_via_filter(pk, filters, type) do
+        pk = API.maybe_b58(48, pk)
+        contract = filters[:contract] || <<0>>
+        function = filters[:function] || <<0>>
+        {signer, arg0} = case type do
+            :sent -> {pk, <<0>>}
+            :recv -> {<<0>>, pk}
         end
 
-        %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-        Enum.reduce_while(0..9_999_999, {nil, []}, fn(idx, {next_key, acc}) ->
-            #TODO: fix filter indexes
-            if idx >= 1_000, do: throw(%{error: :timeout})
+        %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+        sort_desc = filters.sort == :desc
+        cursor = filters[:cursor]
 
-            {next_key, value} = if idx == 0 do
-                grep_func.("#{pk}:", start_key, %{db: db, cf: cf.tx_account_nonce, offset: filters.offset})
-            else
-                grep_func.("#{pk}:", next_key, %{db: db, cf: cf.tx_account_nonce})
-            end
+        {next_cursor, tx_maps} = RDB.query_tx_hashfilter(db, signer, arg0, contract, function,
+            filters.limit, sort_desc, cursor)
 
-            if !next_key do {:halt, {next_key, acc}} else
-                txu = API.TX.get(value)
-                |> put_in([:metadata, :tx_event], :sent)
-                action = TX.action(txu)
-                cond do
-                    !!filters[:contract] and filters.contract != action.contract -> {:cont, {next_key, acc}}
-                    !!filters[:function] and filters.function != action.function -> {:cont, {next_key, acc}}
-                    true ->
-                        acc = acc ++ [txu]
-                        if length(acc) >= filters.limit do
-                            {:halt, {next_key, acc}}
-                        else
-                            {:cont, {next_key, acc}}
-                        end
-                end
+        txs = tx_maps
+        |> Enum.map(fn tm ->
+            case DB.Chain.tx_from_map(tm) do
+                nil -> nil
+                txu -> txu |> put_in([:metadata, :tx_event], type) |> format_tx_for_client()
             end
         end)
-    end
+        |> Enum.reject(&is_nil/1)
 
-    def get_by_address_recv(pk, filters) do
-        pk = API.maybe_b58(48, pk)
-
-        {grep_func, start_key} = case filters.sort do
-            :desc -> {&RocksDB.get_prev/3, (filters[:cursor] || :binary.copy("9", 20)) |> String.pad_leading(20, "0")}
-            _ -> {&RocksDB.get_next/3, ""}
-        end
-
-        %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-        Enum.reduce_while(0..9_999_999, {nil, []}, fn(idx, {next_key, acc}) ->
-            #TODO: fix filter indexes
-            if idx >= 1_000, do: throw(%{error: :timeout})
-
-            {next_key, value} = if idx == 0 do
-                grep_func.("#{pk}:", start_key, %{db: db, cf: cf.tx_receiver_nonce, offset: filters.offset})
-            else
-                grep_func.("#{pk}:", next_key, %{db: db, cf: cf.tx_receiver_nonce})
-            end
-            if !next_key do {:halt, {next_key, acc}} else
-                txu = API.TX.get(value)
-                |> put_in([:metadata, :tx_event], :recv)
-                action = TX.action(txu)
-                cond do
-                    !!filters[:contract] and filters.contract != action.contract -> {:cont, {next_key, acc}}
-                    !!filters[:function] and filters.function != action.function -> {:cont, {next_key, acc}}
-                    true ->
-                        acc = acc ++ [txu]
-                        if length(acc) >= filters.limit do
-                            {:halt, {next_key, acc}}
-                        else
-                            {:cont, {next_key, acc}}
-                        end
-                end
-            end
-        end)
+        {next_cursor && Base58.encode(next_cursor), txs}
     end
 
     def submit(tx_packed) do

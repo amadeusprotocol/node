@@ -225,10 +225,9 @@ defmodule Ama.MultiServer do
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tx_events_by_account/") ->
                 query = r.query && Photon.HTTP.parse_query(r.query)
                 account = String.replace(r.path, "/api/chain/tx_events_by_account/", "")
-                filters = %{limit: query[:limit] || "100", offset: query[:offset] || "0", sort: query[:sort] || "asc"}
+                filters = %{limit: query[:limit] || "100", sort: query[:sort] || "asc"}
                 filters = %{
                     limit: :erlang.binary_to_integer(filters.limit),
-                    offset: :erlang.binary_to_integer(filters.offset),
                     sort: case filters.sort do "desc" -> :desc; _ -> :asc end,
                     cursor: if query[:cursor_b58] do Base58.decode(query.cursor_b58) else query[:cursor] end,
                     contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
