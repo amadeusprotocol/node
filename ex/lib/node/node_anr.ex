@@ -296,44 +296,49 @@ defmodule NodeANR do
     end)
   end
 
+  # ETS schema: {pk, last_message, version, latency, rooted, temporal, pruned_below_height}
+  # `pruned_below_height` (slot 7) is the lowest height the peer can still
+  # serve — 0 means full history. peers_w_min_height/2 filters by this.
   def set_last_message(pk) do
     ts_m = :os.system_time(1000)
-    :ets.update_element(NODEANRHOT, pk, [{2, ts_m}], {pk, ts_m, "", 0, %{}, %{}})
+    :ets.update_element(NODEANRHOT, pk, [{2, ts_m}], {pk, ts_m, "", 0, %{}, %{}, 0})
   end
 
   def set_version(pk, version) do
     ts_m = :os.system_time(1000)
-    :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {3, version}], {pk, ts_m, version, 0, %{}, %{}})
+    :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {3, version}], {pk, ts_m, version, 0, %{}, %{}, 0})
   end
 
   def set_version_latency(pk, version, latency) do
     ts_m = :os.system_time(1000)
-    :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {3, version}, {4, latency}], {pk, ts_m, version, latency, %{}, %{}})
+    :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {3, version}, {4, latency}], {pk, ts_m, version, latency, %{}, %{}, 0})
   end
 
-  def set_tips(pk, rooted, temporal) do
+  def set_tips(pk, rooted, temporal, pruned_below \\ 0) do
     ts_m = :os.system_time(1000)
     if !rooted do
-      :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {6, temporal}], {pk, ts_m, "", 0, %{}, %{}})
+      :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {6, temporal}, {7, pruned_below}], {pk, ts_m, "", 0, %{}, %{}, 0})
     else
-      :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {5, rooted}, {6, temporal}], {pk, ts_m, "", 0, %{}, %{}})
+      :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {5, rooted}, {6, temporal}, {7, pruned_below}], {pk, ts_m, "", 0, %{}, %{}, 0})
     end
   end
 
   def get_last_message(pk) do :ets.lookup_element(NODEANRHOT, pk, 2, 0) end
   def get_version(pk) do :ets.lookup_element(NODEANRHOT, pk, 3, "") end
   def get_latency(pk) do :ets.lookup_element(NODEANRHOT, pk, 4, 0) end
+  def get_pruned_below_height(pk) do :ets.lookup_element(NODEANRHOT, pk, 7, 0) end
   def get_peer_hotdata(pk) do
     case :ets.lookup(NODEANRHOT, pk) do
       [] -> nil
-      [{_pk, last_message, version, latency, rooted, temporal}] ->
+      [{_pk, last_message, version, latency, rooted, temporal, pruned_below}] ->
         %{
           pk: pk,
           last_message: last_message,
           version: version,
           latency: latency,
           rooted: rooted,
-          temporal: temporal
+          temporal: temporal,
+          pruned_below_height: pruned_below
         }
     end
   end
@@ -390,8 +395,14 @@ defmodule NodeANR do
     total = Enum.map(total, fn(%{ip4: ip4, pk: pk})->
       height_root = :ets.lookup_element(NODEANRHOT, pk, 5, nil)[:header][:height] || 0
       height_temp = :ets.lookup_element(NODEANRHOT, pk, 6, nil)[:header][:height] || 0
-      %{pk: pk, ip4: ip4, height_root: height_root, height_temp: height_temp}
+      pruned_below = :ets.lookup_element(NODEANRHOT, pk, 7, 0)
+      %{pk: pk, ip4: ip4, height_root: height_root, height_temp: height_temp, pruned_below: pruned_below}
     end)
-    {Enum.filter(total, & &1.height_root >= height), Enum.filter(total, & &1.height_temp >= height)}
+    # Peer must have the requested height in its retained window:
+    # (tip ≥ height) AND (pruned floor ≤ height).
+    {
+      Enum.filter(total, & &1.height_root >= height and &1.pruned_below <= height),
+      Enum.filter(total, & &1.height_temp >= height and &1.pruned_below <= height)
+    }
   end
 end

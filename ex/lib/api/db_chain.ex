@@ -60,10 +60,19 @@ defmodule DB.Chain do
       map && tx_from_map(map, db_opts)
   end
 
+  def pruned_below_height(db_opts \\ %{}) do
+    RocksDB.get("pruned_below_height", db_handle(db_opts, :sysconf, %{to_integer: true})) || 0
+  end
+
+  def set_pruned_below_height(height, db_opts \\ %{}) do
+    RocksDB.put("pruned_below_height", :erlang.integer_to_binary(height), db_handle(db_opts, :sysconf, %{}))
+  end
+
   def tx_from_map(map, db_opts \\ %{}) do
     map = map |> RDB.vecpak_decode()
     entry_bytes = RocksDB.get(map.entry_hash, db_handle(db_opts, :entry, %{}))
-    entry = DB.Entry.by_hash(map.entry_hash, db_opts)
+    if !entry_bytes, do: throw(%{error: :tx_entry_missing, entry_hash: map.entry_hash})
+    entry = Entry.unpack_from_db(entry_bytes)
     tx_bytes = binary_part(entry_bytes, map.index_start, map.index_size)
 
     receipt = if map[:result] do map.result else map.receipt end
@@ -71,7 +80,6 @@ defmodule DB.Chain do
     status = cond do
       rooted_height() >= entry.header.height -> :finalized
       true -> :committed
-      #pending
     end
     TX.unpack(tx_bytes)
     |> Map.put(:receipt, receipt)

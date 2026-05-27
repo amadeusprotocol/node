@@ -79,7 +79,8 @@ defmodule NodeState do
     %{error: err_r, hash: hash_r} = Entry.validate_signature(rooted)
     rooted = Map.merge(rooted, %{hash: hash_r, sig_error: err_r})
 
-    NodeANR.set_tips(istate.peer.pk, rooted, temporal)
+    pruned_below = term[:pruned_below_height] || 0
+    NodeANR.set_tips(istate.peer.pk, rooted, temporal, pruned_below)
   end
 
   def handle(:event_tx, istate, term) do

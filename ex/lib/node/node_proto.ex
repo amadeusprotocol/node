@@ -27,7 +27,9 @@ defmodule NodeProto do
     tip = DB.Chain.tip_entry()
     temporal = tip |> Map.take([:header, :signature, :mask, :mask_size, :mask_set_size])
     rooted = DB.Chain.rooted_tip_entry() |> Map.take([:header, :signature, :mask, :mask_size, :mask_set_size])
-    %{op: :event_tip, temporal: temporal, rooted: rooted, ts_m: :os.system_time(1000)}
+    %{op: :event_tip, temporal: temporal, rooted: rooted,
+      pruned_below_height: DB.Chain.pruned_below_height(),
+      ts_m: :os.system_time(1000)}
   end
 
   def event_tx(tx) when is_map(tx) do event_tx([tx]) end
