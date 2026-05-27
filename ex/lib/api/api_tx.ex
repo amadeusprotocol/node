@@ -28,9 +28,22 @@ defmodule API.TX do
       limit = filters[:limit] || 100
       if limit > 1000, do: throw(%{error: :limit_exceeded})
       sort = filters[:sort] || :asc
+      sort_desc = sort == :desc
+
+      cursor = case filters[:start_nonce] do
+        nil -> filters[:cursor]
+        n when is_integer(n) ->
+          prefix16 = RDB.build_tx_hashfilter(signer, arg0, contract, function)
+          shifted = if sort_desc, do: n + 1, else: n - 1
+          cond do
+            shifted < 0 -> nil
+            shifted > 0xFFFF_FFFF_FFFF_FFFF -> nil
+            true -> prefix16 <> <<shifted::64-big>>
+          end
+      end
 
       %{db: db} = :persistent_term.get({:rocksdb, Fabric})
-      {cursor, tx_maps} = RDB.query_tx_hashfilter(db, signer, arg0, contract, function, limit, sort == :desc, filters[:cursor])
+      {cursor, tx_maps} = RDB.query_tx_hashfilter(db, signer, arg0, contract, function, limit, sort_desc, cursor)
       txus = Enum.map(tx_maps, fn(tx_map)->
         DB.Chain.tx_from_map(tx_map) |> format_tx_for_client()
       end)
@@ -61,7 +74,18 @@ defmodule API.TX do
 
         %{db: db} = :persistent_term.get({:rocksdb, Fabric})
         sort_desc = filters.sort == :desc
-        cursor = filters[:cursor]
+
+        cursor = case filters[:start_nonce] do
+          nil -> filters[:cursor]
+          n when is_integer(n) ->
+            prefix16 = RDB.build_tx_hashfilter(signer, arg0, contract, function)
+            shifted = if sort_desc, do: n + 1, else: n - 1
+            cond do
+              shifted < 0 -> nil
+              shifted > 0xFFFF_FFFF_FFFF_FFFF -> nil
+              true -> prefix16 <> <<shifted::64-big>>
+            end
+        end
 
         {next_cursor, tx_maps} = RDB.query_tx_hashfilter(db, signer, arg0, contract, function,
             filters.limit, sort_desc, cursor)

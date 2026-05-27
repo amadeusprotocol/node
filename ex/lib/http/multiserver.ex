@@ -230,6 +230,7 @@ defmodule Ama.MultiServer do
                     limit: :erlang.binary_to_integer(filters.limit),
                     sort: case filters.sort do "desc" -> :desc; _ -> :asc end,
                     cursor: if query[:cursor_b58] do Base58.decode(query.cursor_b58) else query[:cursor] end,
+                    start_nonce: query[:start_nonce] && :erlang.binary_to_integer(query.start_nonce),
                     contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
                     function: query[:function],
                 }
@@ -256,6 +257,7 @@ defmodule Ama.MultiServer do
                     limit: :erlang.binary_to_integer(query[:limit] || "100"),
                     sort: case query[:sort] do "desc" -> :desc; _ -> :asc end,
                     cursor: query[:cursor] && Base58.decode(query.cursor),
+                    start_nonce: query[:start_nonce] && :erlang.binary_to_integer(query.start_nonce),
                 }
                 {cursor, txs} = API.TX.get_by_filter(filters)
                 result = %{cursor: cursor, txs: txs}
