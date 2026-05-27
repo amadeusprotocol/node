@@ -48,6 +48,62 @@ defmodule Ama.MultiServer do
         state
     end
 
+    defp empty_response?(nil), do: true
+    defp empty_response?(%{error: :not_found}), do: true
+    defp empty_response?(%{entries: []}), do: true
+    defp empty_response?(%{txs: nil}), do: true
+    defp empty_response?(%{txs: []}), do: true
+    defp empty_response?(_), do: false
+
+    defp proxy_get(state, r) do
+        path = r.path <> (if r.query, do: "?" <> r.query, else: "")
+        try do
+            case RPC.API.get_raw(path) do
+                {:ok, %{status_code: code, body: body}} ->
+                    :ok = :gen_tcp.send(state.socket, Photon.HTTP.Response.build_cors(state.request, code, %{}, body))
+                    state
+                _ -> quick_reply(state, %{error: :not_found}, 404)
+            end
+        catch
+            _, _ -> quick_reply(state, %{error: :not_found}, 404)
+        end
+    end
+
+    defp reply_or_proxy(state, r, result) do
+        if empty_response?(result) do
+            proxy_get(state, r)
+        else
+            quick_reply(state, result)
+        end
+    end
+
+    # Streams a (cached) contractstate snapshot file to the client via zero-copy
+    # sendfile. Headers are built manually because Photon's build_cors inlines
+    # the body — we don't want to slurp a potentially-100GB file into BEAM
+    # memory. The file is owned by the cache (see cached_state_snapshot/0), so
+    # it's NOT deleted after the send.
+    defp send_state_snapshot_file(state, out_path) do
+        size = File.stat!(out_path).size
+        headers =
+            %{}
+            |> Photon.HTTP.Headers.add_cors()
+            |> Photon.HTTP.Headers.add_date()
+            |> Photon.HTTP.Headers.add_connection(state.request)
+            |> Map.put("Content-Type", "application/zstd")
+            |> Map.put("Content-Encoding", "zstd")
+            |> Map.put("Content-Length", "#{size}")
+        header_bin = "HTTP/1.1 200 OK\r\n" <> Photon.HTTP.Headers.build(headers) <> "\r\n"
+        :ok = :gen_tcp.send(state.socket, header_bin)
+        {:ok, fd} = :file.open(out_path, [:read, :binary, :raw])
+        try do
+            {:ok, _sent} = :file.sendfile(fd, state.socket)
+        after
+            :file.close(fd)
+        end
+        state
+    end
+
+
     defp client_ip(socket) do
         case :inet.peername(socket) do
             {:ok, {ip, _port}} -> ip
@@ -160,22 +216,24 @@ defmodule Ama.MultiServer do
                 query = r.query && Photon.HTTP.parse_query(r.query)
                 filter_on_function = query[:filter_on_function]
                 result = API.Chain.entry(hash, filter_on_function)
-                quick_reply(state, result)
+                reply_or_proxy(state, r, result)
 
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/height/") ->
                 height = String.replace(r.path, "/api/chain/height/", "")
                 |> :erlang.binary_to_integer()
                 result = API.Chain.by_height(height)
-                quick_reply(state, result)
+                reply_or_proxy(state, r, result)
+
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/height_with_txs/") ->
                 height = String.replace(r.path, "/api/chain/height_with_txs/", "")
                 |> :erlang.binary_to_integer()
                 result = API.Chain.by_height_with_txs(height)
-                quick_reply(state, result)
+                reply_or_proxy(state, r, result)
+
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tx/") ->
                 txid = String.replace(r.path, "/api/chain/tx/", "")
                 result = API.TX.get(txid)
-                quick_reply(state, JSX.encode!(result))
+                reply_or_proxy(state, r, result)
 
             r.method == "GET" and String.starts_with?(r.path, "/api/epoch/score") ->
                 pk = String.replace(r.path, "/api/epoch/score/", "")
@@ -223,50 +281,61 @@ defmodule Ama.MultiServer do
                 quick_reply(state, json_fix_floats(%{error: :ok, richlist: richlist}))
 
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tx_events_by_account/") ->
-                query = r.query && Photon.HTTP.parse_query(r.query)
-                account = String.replace(r.path, "/api/chain/tx_events_by_account/", "")
-                filters = %{limit: query[:limit] || "100", sort: query[:sort] || "asc"}
-                filters = %{
-                    limit: :erlang.binary_to_integer(filters.limit),
-                    sort: case filters.sort do "desc" -> :desc; _ -> :asc end,
-                    cursor: if query[:cursor_b58] do Base58.decode(query.cursor_b58) else query[:cursor] end,
-                    start_nonce: query[:start_nonce] && :erlang.binary_to_integer(query.start_nonce),
-                    contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
-                    function: query[:function],
-                }
-                {cursor, txs} = cond do
-                    query[:type] == "sent" -> API.TX.get_by_address_sent(account, filters)
-                    query[:type] == "recv" -> API.TX.get_by_address_recv(account, filters)
-                    true -> API.TX.get_by_address(account, filters)
+                if Application.fetch_env!(:ama, :pruner_enabled) do
+                    proxy_get(state, r)
+                else
+                    query = r.query && Photon.HTTP.parse_query(r.query)
+                    account = String.replace(r.path, "/api/chain/tx_events_by_account/", "")
+                    filters = %{limit: query[:limit] || "100", sort: query[:sort] || "asc"}
+                    filters = %{
+                        contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
+                        function: query[:function],
+                        
+                        limit: :erlang.binary_to_integer(filters.limit),
+                        sort: case filters.sort do "desc" -> :desc; _ -> :asc end,
+                        cursor: if query[:cursor_b58] do Base58.decode(query.cursor_b58) else query[:cursor] end,
+
+                        start_nonce: query[:start_nonce] && :erlang.binary_to_integer(query.start_nonce),
+                    }
+                    {cursor, txs} = cond do
+                        query[:type] == "sent" -> API.TX.get_by_address_sent(account, filters)
+                        query[:type] == "recv" -> API.TX.get_by_address_recv(account, filters)
+                        true -> API.TX.get_by_address(account, filters)
+                    end
+                    result = %{cursor: cursor, txs: txs}
+                    quick_reply(state, result)
                 end
-                result = %{cursor: cursor, txs: txs}
-                quick_reply(state, result)
 
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tx_by_filter") ->
-                query = r.query && Photon.HTTP.parse_query(r.query)
+                if Application.fetch_env!(:ama, :pruner_enabled) do
+                    proxy_get(state, r)
+                else
+                    query = r.query && Photon.HTTP.parse_query(r.query)
 
-                signer = query[:signer] || query[:sender] || query[:pk]
-                arg0 = query[:arg0] || query[:receiver]
+                    signer = query[:signer] || query[:sender] || query[:pk]
+                    arg0 = query[:arg0] || query[:receiver]
 
-                filters = %{
-                    signer: signer && Base58.decode(signer),
-                    arg0: arg0 && Base58.decode(arg0),
-                    contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
-                    function: query[:function],
+                    filters = %{
+                        signer: signer && Base58.decode(signer),
+                        arg0: arg0 && Base58.decode(arg0),
+                        contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
+                        function: query[:function],
 
-                    limit: :erlang.binary_to_integer(query[:limit] || "100"),
-                    sort: case query[:sort] do "desc" -> :desc; _ -> :asc end,
-                    cursor: query[:cursor] && Base58.decode(query.cursor),
-                    start_nonce: query[:start_nonce] && :erlang.binary_to_integer(query.start_nonce),
-                }
-                {cursor, txs} = API.TX.get_by_filter(filters)
-                result = %{cursor: cursor, txs: txs}
-                quick_reply(state, result)
+                        limit: :erlang.binary_to_integer(query[:limit] || "100"),
+                        sort: case query[:sort] do "desc" -> :desc; _ -> :asc end,
+                        cursor: query[:cursor] && Base58.decode(query.cursor),
+
+                        start_nonce: query[:start_nonce] && :erlang.binary_to_integer(query.start_nonce),
+                    }
+                    {cursor, txs} = API.TX.get_by_filter(filters)
+                    result = %{cursor: cursor, txs: txs}
+                    quick_reply(state, result)
+                end
 
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/txs_in_entry/") ->
                 entry_hash = String.replace(r.path, "/api/chain/txs_in_entry/", "")
                 result = API.TX.get_by_entry(entry_hash)
-                quick_reply(state, %{error: :ok, txs: result})
+                reply_or_proxy(state, r, %{error: :ok, txs: result})
 
             r.method == "GET" and String.starts_with?(r.path, "/api/wallet/balance/") ->
                 pk = String.replace(r.path, "/api/wallet/balance/", "")
@@ -308,6 +377,17 @@ defmodule Ama.MultiServer do
                 wait_finalized = !!query[:finalized] or !!query[:wait_finalized]
                 result = API.TX.submit_and_wait(Base58.decode(tx_packed), wait_finalized)
                 quick_reply(state, result)
+
+            r.method == "GET" and r.path == "/api/sync/contractstate" ->
+                cond do
+                    not Application.fetch_env!(:ama, :statepeerdownload) ->
+                        quick_reply(state, %{error: :not_providing_contractstate_snapshot}, 503)
+                    true ->
+                        case FabricSnapshot.latest_statepeerdownload() do
+                            %{path: path, height: _h} -> send_state_snapshot_file(state, path)
+                            _ -> quick_reply(state, %{error: :snapshot_not_ready}, 503)
+                        end
+                end
 
             r.method == "GET" and String.starts_with?(r.path, "/api/proof/validators/") ->
                 entry_hash = String.replace(r.path, "/api/proof/validators/", "")

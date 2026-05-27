@@ -1,9 +1,24 @@
 defmodule RPC.API do
+  defp http_opts(url) do
+    %{ssl_options: [{:server_name_indication, ~c"#{URI.parse(url).host}"}, {:verify, :verify_none}]}
+  end
+
+  # JSON-decoded GET; raises if upstream is not 200. For success-path RPC calls.
   def get(path) do
     url = Application.fetch_env!(:ama, :rpc_url)
-    {:ok, %{status_code: 200, body: body}} = :comsat_http.get(url <> path, %{},
-      %{ssl_options: [{:server_name_indication, ~c"#{URI.parse(url).host}"}, {:verify, :verify_none}]})
+    {:ok, %{status_code: 200, body: body}} = :comsat_http.get(url <> path, %{}, http_opts(url))
     JSX.decode!(body, labels: :attempt_atom)
+  end
+
+  # Raw GET — returns {:ok, response} for any status code, {:error, _} on
+  # transport failure. Body is not decoded. Used by the multiserver proxy
+  # so it can forward status + body verbatim without a JSON round-trip.
+  def get_raw(path) do
+    url = Application.fetch_env!(:ama, :rpc_url)
+    case :comsat_http.get(url <> path, %{}, http_opts(url)) do
+      {:ok, resp} -> {:ok, resp}
+      err -> {:error, err}
+    end
   end
 
   defmodule Wallet do

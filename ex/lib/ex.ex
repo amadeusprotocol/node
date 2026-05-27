@@ -13,6 +13,14 @@ defmodule Ama do
     IO.puts "config folder is #{Application.fetch_env!(:ama, :work_folder)}"
     IO.puts "version: #{Application.fetch_env!(:ama, :version)}"
     IO.puts "pk: #{Application.fetch_env!(:ama, :trainer_pk) |> Base58.encode()}"
+    cond do
+      Application.fetch_env!(:ama, :archival_node) ->
+        IO.puts "history: archival node — full history retained"
+      Application.fetch_env!(:ama, :pruner_enabled) ->
+        IO.puts "history: pruning enabled — keeping last #{Application.fetch_env!(:ama, :history_keep_epochs)} epochs"
+      true ->
+        IO.puts "history: pruning disabled (HISTORY_KEEP_EPOCHS=0) — full history retained"
+    end
 
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: PG, start: {:pg, :start_link, []}})
 
@@ -80,14 +88,34 @@ defmodule Ama do
 
   def full_node() do
     rooted_height = DB.Chain.tip() && DB.Chain.rooted_height()
-    if rooted_height == nil or rooted_height < Application.fetch_env!(:ama, :snapshot_height) do
-      IO.inspect {"tip - snapshot_height", rooted_height, Application.fetch_env!(:ama, :snapshot_height)}
-      padded_height = String.pad_leading("#{Application.fetch_env!(:ama, :snapshot_height)}", 12, "0")
-      IO.inspect {"or download manually | aria2c -x 4 https://snapshots.amadeus.bot/#{padded_height}.zip"}
-      DB.API.close()
-      FabricSnapshot.download_latest()
-      DB.API.init()
+    needs_bootstrap =
+      rooted_height == nil or rooted_height < Application.fetch_env!(:ama, :snapshot_height)
+
+    if needs_bootstrap do
+      if Application.fetch_env!(:ama, :archival_node) do
+        # Archival nodes need the full history zip from snapshots.amadeus.bot.
+        IO.inspect {"tip - snapshot_height (archival)", rooted_height, Application.fetch_env!(:ama, :snapshot_height)}
+        padded_height = String.pad_leading("#{Application.fetch_env!(:ama, :snapshot_height)}", 12, "0")
+        IO.inspect {"or download manually | aria2c -x 4 https://snapshots.amadeus.bot/#{padded_height}.zip"}
+        DB.API.close()
+        FabricSnapshot.download_latest()
+        DB.API.init()
+      else
+        IO.puts "non-archival node — fetching state bundle from RPC (no chain state local)"
+        FabricSnapshot.download_and_import_bundle()
+      end
     end
+
+    FabricSnapshot.check_or_build_statepeerdownload()
+
+    if Application.fetch_env!(:ama, :pruner_enabled) do
+      rooted = DB.Chain.rooted_height()
+      if is_integer(rooted) and rooted > 0 and DB.Chain.pruned_below_height() == 0 do
+        DB.Chain.set_pruned_below_height(rooted)
+        IO.puts "seeded pruned_below_height = #{rooted} (lowest block we serve)"
+      end
+    end
+
     run_node_services()
   end
 
@@ -101,6 +129,9 @@ defmodule Ama do
 
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: ComputorGen, start: {ComputorGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: LoggerGen, start: {LoggerGen, :start_link, []}})
+    if Application.fetch_env!(:ama, :pruner_enabled) do
+      {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: DB.Pruner, start: {DB.Pruner, :start_link, []}})
+    end
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricGen, start: {FabricGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricCoordinatorGen, start: {FabricCoordinatorGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricEventGen, start: {FabricEventGen, :start_link, []}})

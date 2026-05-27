@@ -42,10 +42,78 @@ defmodule FabricGen do
 
     proc_consensus()
     proc_entries()
+    maybe_produce_state_bundle()
     tick_slot(state)
 
     :persistent_term.get(FabricSyncing) |> :atomics.put(1, 0)
     state
+  end
+
+  # Produces a state-peer-download bundle inline (synchronously). Triggers:
+  #   * BOOTSTRAP    — no bundle exists at all yet. Fires once for the
+  #                    current rooted_height, regardless of validator role.
+  #   * VALIDATOR    — this node holds a key in the current epoch's
+  #                    validator set: fire when the rooted_tip entry was
+  #                    SIGNED by one of our keys. We have ~one validator
+  #                    round of slack before our next slot, so the dump
+  #                    happens between rooting our block and producing
+  #                    the next one.
+  #   * NON-VALIDATOR — fall back to `rem(rooted, 100_000) == 1000`.
+  #
+  # In all cases, only one bundle per epoch is produced (subsequent ticks
+  # see the persistent_term cache pointing at this epoch's height and skip).
+  defp maybe_produce_state_bundle() do
+    if Application.fetch_env!(:ama, :statepeerdownload) do
+      rooted = DB.Chain.rooted_height() || 0
+      cond do
+        rooted == 0 -> :ok
+        already_have_bundle_for_epoch?(rooted) -> :ok
+        true ->
+          latest = :persistent_term.get(FabricSnapshot.bundle_latest_key(), nil)
+          cond do
+            # Bootstrap: no bundle anywhere.
+            is_nil(latest) -> produce_bundle_inline(rooted)
+            # Validator: produce bundle right after block
+            in_current_validator_set?(rooted) and my_key_signed_rooted_tip?() -> produce_bundle_inline(rooted)
+            # Non-validator fallback: rem(rooted, 100_000) == 1000.
+            FabricSnapshot.is_bundle_target?(rooted) -> produce_bundle_inline(rooted)
+            true -> :ok
+          end
+      end
+    end
+  end
+
+  defp already_have_bundle_for_epoch?(rooted) do
+    case :persistent_term.get(FabricSnapshot.bundle_latest_key(), nil) do
+      %{height: h} -> div(h, 100_000) == div(rooted, 100_000)
+      _ -> false
+    end
+  end
+
+  defp in_current_validator_set?(height) do
+    validators = DB.Chain.validators_for_height(height) || []
+    my_pks = Application.fetch_env!(:ama, :keys_all_pks) || []
+    !!Enum.any?(my_pks, &(&1 in validators))
+  end
+
+  defp my_key_signed_rooted_tip?() do
+    case DB.Chain.rooted_tip_entry() do
+      %{header: %{signer: signer}} ->
+        signer in (Application.fetch_env!(:ama, :keys_all_pks) || [])
+      _ -> false
+    end
+  end
+
+  defp produce_bundle_inline(height) do
+    %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+    case RDB.transaction_with_snapshot(db) do
+      {:ok, rtx} ->
+        FabricSnapshot.write_statepeerdownload_bundle(rtx, height)
+        IO.inspect {:bundle_produced_at, height}
+      err ->
+        IO.inspect {:bundle_snapshot_open_failed, height, err}
+        :error
+    end
   end
 
   def tick_slot(state) do

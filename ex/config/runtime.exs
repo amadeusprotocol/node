@@ -79,7 +79,12 @@ config :ama, :trainer_pop, first_key.pop
 config :ama, :seed64, (case System.get_env("SEED64") do nil -> nil; seed64 -> Base58.decode(seed64) end)
 
 
-config :ama, :archival_node, System.get_env("ARCHIVALNODE") in ["true", "y", "yes"]
+archival_node = System.get_env("ARCHIVALNODE") in ["true", "y", "yes"]
+history_keep_epochs = (System.get_env("HISTORY_KEEP_EPOCHS") || "10") |> :erlang.binary_to_integer()
+config :ama, :archival_node, archival_node
+config :ama, :history_keep_epochs, history_keep_epochs
+config :ama, :pruner_enabled, not archival_node and history_keep_epochs > 0
+config :ama, :statepeerdownload, System.get_env("STATEPEERDOWNLOAD") in ["true", "y", "yes"]
 config :ama, :autoupdate, System.get_env("AUTOUPDATE") in ["true", "y", "yes"]
 config :ama, :computor_type, (case System.get_env("COMPUTOR") do nil -> nil; "trainer" -> :trainer; _ -> :default end)
 
