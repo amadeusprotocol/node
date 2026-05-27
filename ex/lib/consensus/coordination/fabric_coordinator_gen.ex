@@ -1,6 +1,13 @@
 defmodule FabricCoordinatorGen do
   use GenServer
 
+  # AttestationCache holds attestations whose parent entry hasn't arrived yet
+  # — that's the cache's whole point, so we don't drop on :entry_dne. We do
+  # periodically purge entries older than the TTL so unmatched ones (entries
+  # we'll never see) don't accumulate.
+  @attestation_cache_ttl_ms 30_000
+  @attestation_cache_sweep_ms 30_000
+
   def isSyncing() do
     case :persistent_term.get(FabricCoordinatorSyncing, nil) do
       nil -> false
@@ -16,6 +23,7 @@ defmodule FabricCoordinatorGen do
     :persistent_term.put(FabricCoordinatorSyncing, :atomics.new(1, []))
 
     :erlang.send_after(1000, self(), :tick)
+    :erlang.send_after(@attestation_cache_sweep_ms, self(), :sweep_attestation_cache)
     {:ok, state}
   end
 
@@ -37,6 +45,17 @@ defmodule FabricCoordinatorGen do
     {:noreply, state}
   end
 
+  def handle_info(:sweep_attestation_cache, state) do
+    cutoff = :os.system_time(1000) - @attestation_cache_ttl_ms
+    # Value shape: {attestation, ts_m_inserted}. Drop everything older than cutoff.
+    n = :ets.select_delete(AttestationCache, [
+      {{{:_, :_}, {:_, :"$1"}}, [{:<, :"$1", cutoff}], [true]}
+    ])
+    if n > 0, do: IO.puts("AttestationCache sweep: dropped #{n} stale entries")
+    :erlang.send_after(@attestation_cache_sweep_ms, self(), :sweep_attestation_cache)
+    {:noreply, state}
+  end
+
   def handle_info({:insert_consensus, consensus}, state) do
     calc_syncing(true)
     DB.Attestation.set_consensus(consensus)
@@ -49,24 +68,15 @@ defmodule FabricCoordinatorGen do
 
     aggregate_attestation(attestation)
 
-    #proc cached attestations
-    ts_m = :os.system_time(1000)
+    # Drain any cached attestations for this entry_hash now that the entry
+    # has arrived (or was already in main chain). Periodic sweep in
+    # handle_info(:sweep_attestation_cache) handles stale evictions.
     cached = :ets.select(AttestationCache, [{{{attestation.entry_hash, :_}, {:"$1", :_}}, [], [:"$1"]}])
     Enum.each(cached, fn(attestation)->
       aggregate_attestation(attestation)
     end)
     if cached != [] do
       :ets.select_delete(AttestationCache, [{{{attestation.entry_hash, :_}, :_}, [], [true]}])
-    end
-
-    #clear stales
-    case :ets.first_lookup(AttestationCache) do
-      :"$end_of_table" -> nil
-      {key, [{_, {_, ts_m_old}}]} ->
-        delta = ts_m - ts_m_old
-        if delta >= 10_000 do
-          :ets.delete(AttestationCache, key)
-        end
     end
 
     calc_syncing(false)
