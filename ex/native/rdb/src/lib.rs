@@ -401,6 +401,18 @@ fn transaction<'a>(env: Env<'a>, db: ResourceArc<DbResource>) -> NifResult<Term<
 }
 
 #[rustler::nif]
+fn transaction_with_snapshot<'a>(env: Env<'a>, db: ResourceArc<DbResource>) -> NifResult<Term<'a>> {
+    let wopts = WriteOptions::default();
+    let mut topts = TransactionOptions::default();
+    topts.set_snapshot(true);
+
+    let tx_local: Tx<'_> = db.db.transaction_opt(&wopts, &topts);
+    let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(tx_local) };
+
+    Ok((atoms::ok(), ResourceArc::new(TxResource { _db: db, tx: Mutex::new(Some(tx_static)) })).encode(env))
+}
+
+#[rustler::nif]
 fn transaction_commit(tx: ResourceArc<TxResource>) -> NifResult<Atom> {
     let mut guard = tx.tx.lock().unwrap();
     let txn = guard.take().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;

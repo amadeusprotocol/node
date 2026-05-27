@@ -29,6 +29,7 @@ defmodule RDB do
   def iterator_cf(_cf), do: :erlang.nif_error(:nif_not_loaded)
   def iterator_move(_it, _action), do: :erlang.nif_error(:nif_not_loaded)
   def transaction(_db), do: :erlang.nif_error(:nif_not_loaded)
+  def transaction_with_snapshot(_db), do: :erlang.nif_error(:nif_not_loaded)
   def transaction_commit(_tx), do: :erlang.nif_error(:nif_not_loaded)
   def transaction_rollback(_tx), do: :erlang.nif_error(:nif_not_loaded)
   def transaction_set_savepoint(_tx), do: :erlang.nif_error(:nif_not_loaded)
