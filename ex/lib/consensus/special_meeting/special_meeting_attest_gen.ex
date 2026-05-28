@@ -103,7 +103,7 @@ defmodule SpecialMeetingAttestGen do
     next_slot_trainer = DB.Chain.validator_for_height(next_height)
 
     ts_m = :os.system_time(1000)
-    seen_time = DB.Entry.seentime(entry.hash)
+    seen_time = DB.Entry.seentime(entry.hash) || ts_m
     delta = ts_m - seen_time
 
     nextSlotStalled = :persistent_term.get({SpecialMeeting, :nextSlotStalled}, nil)

@@ -23,16 +23,10 @@ defmodule FabricSnapshot do
     def bundle_path(height), do: @bundle_path_prefix <> Integer.to_string(height) <> @bundle_path_suffix
     defp bundle_tmp_path(height), do: bundle_path(height) <> ".tmp"
 
-    # True when `rooted_height` is exactly on a bundle-production target
-    # (offset 1000 into any epoch). FabricGen calls this each tick to decide
-    # whether to fire a new bundle.
     def is_bundle_target?(rooted_height) do
-      rem(rooted_height, @bundle_epoch_size) == @bundle_target_offset
+      rem(rooted_height, @bundle_epoch_size) >= @bundle_target_offset
     end
 
-    # The most recently READY bundle as %{height, path} or nil. HTTP reads
-    # this; in-progress writes (.tmp files) are NOT visible here — the writer
-    # promotes only after the rename succeeds.
     def latest_statepeerdownload(), do: :persistent_term.get(@bundle_latest_key, nil)
 
     # Boot-time setup. Called from Ex.run_node_services after bootstrap so
@@ -70,18 +64,43 @@ defmodule FabricSnapshot do
             end
             :ok
 
-          # We have a chain but no current-epoch bundle. Build one
-          # synchronously at boot so HTTP is hot when run_node_services starts.
+          # We have a chain but no current-epoch bundle. Try to build one
+          # at boot. Same alignment guard as the FabricGen tick path: only
+          # snapshot when temporal_tip == rooted_tip inside the frozen rtx
+          # (otherwise contractstate reflects entries above rooted and the
+          # bundle would be self-inconsistent). If the guard skips here, the
+          # FabricGen tick will retry until alignment is reached.
           true ->
             cond do
               existing_h == nil ->
-                IO.puts "FabricSnapshot: no state bundle on disk, building one at boot (height #{rooted}).."
+                IO.puts "FabricSnapshot: no state bundle on disk, attempting boot build (rooted #{rooted}).."
               true ->
-                IO.puts "FabricSnapshot: bundle at height #{existing_h} (epoch #{existing_epoch}) is behind current epoch #{cur_epoch}, rebuilding at height #{rooted}.."
+                IO.puts "FabricSnapshot: bundle at height #{existing_h} (epoch #{existing_epoch}) is behind current epoch #{cur_epoch}, attempting rebuild (rooted #{rooted}).."
             end
-            %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+            %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
             case RDB.transaction_with_snapshot(db) do
-              {:ok, rtx} -> write_statepeerdownload_bundle(rtx, rooted)
+              {:ok, rtx} ->
+                r = RocksDB.get("rooted_tip",   %{rtx: rtx, cf: cf.sysconf})
+                t = RocksDB.get("temporal_tip", %{rtx: rtx, cf: cf.sysconf})
+                cond do
+                  !is_binary(r) or !is_binary(t) ->
+                    RDB.transaction_rollback(rtx)
+                    IO.puts "FabricSnapshot: boot bundle skipped — sysconf incomplete; FabricGen will retry"
+                  r != t ->
+                    RDB.transaction_rollback(rtx)
+                    IO.puts "FabricSnapshot: boot bundle skipped — temporal_tip ahead of rooted_tip; FabricGen will retry"
+                  true ->
+                    case RDB.transaction_get_cf(rtx, cf.entry, r) do
+                      {:ok, entry_blob} when is_binary(entry_blob) ->
+                        entry = Entry.unpack_from_db(entry_blob)
+                        height = entry.header.height
+                        write_statepeerdownload_bundle(rtx, height)
+                        IO.puts "FabricSnapshot: quicksync bundle built at height #{height}"
+                      _ ->
+                        RDB.transaction_rollback(rtx)
+                        IO.puts "FabricSnapshot: boot bundle skipped — rooted entry blob missing"
+                    end
+                end
               err ->
                 IO.inspect {:boot_bundle_snapshot_failed, err}
                 :error
@@ -107,36 +126,33 @@ defmodule FabricSnapshot do
         {:ok, fd} = :file.open(tmp_path, [:write, :binary, :raw])
         {:ok, zctx} = :zstd.context(:compress, %{})
         try do
-          # Bulk CFs — all read through the same snapshot, so mutually consistent.
+          # Bulk CFs — full state, read through the same snapshot for mutual consistency.
           stream_cf(rtx, "contractstate",      cf.contractstate,      fd, zctx)
           stream_cf(rtx, "contractstate_tree", cf.contractstate_tree, fd, zctx)
-          stream_cf(rtx, "sysconf",            cf.sysconf,            fd, zctx)
 
-          # Rooted-tip entry + its entry_meta keys. Importer uses these to
-          # bootstrap the chain at `height` and resume applying from height+1.
-          rooted_hash = read_value(rtx, cf.sysconf, "rooted_tip")
+          rooted_hash = RocksDB.get("rooted_tip", %{rtx: rtx, cf: cf.sysconf})
           if is_binary(rooted_hash) do
-            case read_value(rtx, cf.entry, rooted_hash) do
-              blob when is_binary(blob) ->
-                write_record(fd, zctx, "entry", rooted_hash, blob)
-              _ -> :ok
-            end
+            write_record(fd, zctx, "sysconf", "rooted_tip",      rooted_hash)
+            write_record(fd, zctx, "sysconf", "temporal_tip",    rooted_hash)
+            write_record(fd, zctx, "sysconf", "temporal_height", Integer.to_string(height))
 
             height_padded = String.pad_leading(Integer.to_string(height), 12, "0")
-            meta_keys = [
-              "by_height_in_main_chain:#{height_padded}",
-              "entry:#{rooted_hash}:in_chain",
-              "entry:#{rooted_hash}:muts_hash",
-              "entry:#{rooted_hash}:root_receipts",
-              "entry:#{rooted_hash}:root_contractstate",
-              "entry:#{rooted_hash}:prev",
-              "entry:#{rooted_hash}:next"
-            ]
-            for k <- meta_keys do
-              case read_value(rtx, cf.entry_meta, k) do
-                v when is_binary(v) -> write_record(fd, zctx, "entry_meta", k, v)
-                _ -> :ok
-              end
+            stream_cf_prefix(rtx, "attestation", cf.attestation, "consensus:#{rooted_hash}:", fd, zctx)
+            stream_cf_prefix(rtx, "attestation", cf.attestation, "attestation:#{height_padded}:#{rooted_hash}:", fd, zctx)
+
+            # Sidecar control record: the rooted entry + the inputs that
+            # apply_into_main_chain needs. Importer reconstructs every per-entry
+            # key (entry blob, by_height*, entry:<hash>:*, tx_filter, cf.tx
+            # pointers) by replaying that function — so this stays in sync
+            # automatically if apply_into_main_chain grows new writes.
+            case build_apply_payload(rtx, cf, rooted_hash) do
+              {:ok, payload} ->
+                # Wire reuses the normal record format; the importer keys off
+                # cfname == "__apply__" to route it through finalize_import
+                # instead of a CF put.
+                write_record(fd, zctx, "__apply__", "rooted", payload)
+              :error ->
+                raise "rooted-tip apply payload incomplete on source"
             end
           end
 
@@ -207,8 +223,7 @@ defmodule FabricSnapshot do
         "contractstate"      => cf.contractstate,
         "contractstate_tree" => cf.contractstate_tree,
         "sysconf"            => cf.sysconf,
-        "entry"              => cf.entry,
-        "entry_meta"         => cf.entry_meta,
+        "attestation"        => cf.attestation,
       }
 
       {:ok, fd} = :file.open(file_path, [:read, :binary, :raw])
@@ -217,8 +232,8 @@ defmodule FabricSnapshot do
 
       result =
         try do
-          count = import_loop(fd, zctx, rtx, cf_by_name, <<>>, 0)
-          finalize_import(rtx, cf)
+          {count, apply_payload} = import_loop(fd, zctx, rtx, cf_by_name, <<>>, 0, nil)
+          finalize_import(rtx, cf, apply_payload)
           :ok = RocksDB.transaction_commit(rtx)
           {:ok, count}
         catch
@@ -232,23 +247,23 @@ defmodule FabricSnapshot do
       result
     end
 
-    defp import_loop(fd, zctx, rtx, cf_by_name, buffer, count) do
+    defp import_loop(fd, zctx, rtx, cf_by_name, buffer, count, apply_payload) do
       # Drain whatever full records we already have buffered.
-      {written, buffer} = drain_buffer_to_db(rtx, cf_by_name, buffer, 0)
+      {written, buffer, apply_payload} = drain_buffer_to_db(rtx, cf_by_name, buffer, 0, apply_payload)
       count = count + written
 
       case :file.read(fd, 1024 * 1024) do
         :eof ->
           {:done, tail} = :zstd.finish(zctx, <<>>)
           buffer = buffer <> IO.iodata_to_binary(tail)
-          {n, leftover} = drain_buffer_to_db(rtx, cf_by_name, buffer, 0)
+          {n, leftover, apply_payload} = drain_buffer_to_db(rtx, cf_by_name, buffer, 0, apply_payload)
           if leftover != <<>>,
             do: raise {:bundle_truncated, byte_size(leftover)}
-          count + n
+          {count + n, apply_payload}
 
         {:ok, chunk} ->
           buffer = buffer <> feed_decompress(zctx, chunk)
-          import_loop(fd, zctx, rtx, cf_by_name, buffer, count)
+          import_loop(fd, zctx, rtx, cf_by_name, buffer, count, apply_payload)
       end
     end
 
@@ -261,49 +276,54 @@ defmodule FabricSnapshot do
       end
     end
 
-    defp drain_buffer_to_db(rtx, cf_by_name, buffer, count) do
+    defp drain_buffer_to_db(rtx, cf_by_name, buffer, count, apply_payload) do
       case buffer do
         <<cfname_len::32-big, cfname::binary-size(cfname_len),
           term_len::32-big, term::binary-size(term_len), rest::binary>> ->
           %{k: k, v: v} = RDB.vecpak_decode(term)
-          case Map.fetch(cf_by_name, cfname) do
-            {:ok, cf_handle} -> RocksDB.put(k, v, %{rtx: rtx, cf: cf_handle})
-            :error -> IO.inspect {:unknown_cf_in_bundle, cfname}
-          end
-          drain_buffer_to_db(rtx, cf_by_name, rest, count + 1)
+          apply_payload =
+            cond do
+              cfname == "__apply__" ->
+                # Sidecar — defer to finalize_import, don't write to any CF.
+                v
+              true ->
+                case Map.fetch(cf_by_name, cfname) do
+                  {:ok, cf_handle} -> RocksDB.put(k, v, %{rtx: rtx, cf: cf_handle})
+                  :error -> IO.inspect {:unknown_cf_in_bundle, cfname}
+                end
+                apply_payload
+            end
+          drain_buffer_to_db(rtx, cf_by_name, rest, count + 1, apply_payload)
         _ ->
-          {count, buffer}
+          {count, buffer, apply_payload}
       end
     end
 
-    # Normalize sysconf for the importing node:
-    #   * temporal_tip = rooted_tip (we don't have any entries above rooted)
-    #   * pruned_below_height = height (no history below the bundle)
-    # The bundle's sysconf may carry the producer's values for these; we
-    # override so the importing node has a consistent starting point.
-    defp finalize_import(rtx, cf) do
-      case RDB.transaction_get_cf(rtx, cf.sysconf, "rooted_tip") do
-        {:ok, rooted_hash} when is_binary(rooted_hash) ->
-          case RDB.transaction_get_cf(rtx, cf.entry, rooted_hash) do
-            {:ok, entry_blob} when is_binary(entry_blob) ->
-              entry = Entry.unpack_from_db(entry_blob)
-              height = entry.header.height
-              RDB.transaction_put_cf(rtx, cf.sysconf, "temporal_tip", rooted_hash)
-              RDB.transaction_put_cf(rtx, cf.sysconf, "pruned_below_height",
-                                     Integer.to_string(height))
-              :ok
-            _ -> raise "bundle missing rooted-tip entry blob"
-          end
-        _ -> raise "bundle missing rooted_tip in sysconf"
-      end
-    end
+    # Replay the rooted-tip apply through the normal write path. This is the
+    # same code production uses when a block roots, so every per-entry key
+    # (entry blob, by_height*, entry:<hash>:*, tx_filter, cf.tx pointers) is
+    # populated identically — no risk of a "weird hole" where one meta field
+    # is missing on the synced tip.
+    defp finalize_import(_rtx, _cf, nil),
+      do: raise "bundle missing __apply__ sidecar"
+    defp finalize_import(rtx, cf, payload) do
+      %{
+        entry: entry_packed,
+        muts_hash: muts_hash,
+        muts_rev: muts_rev,
+        receipts: receipts,
+        root_receipts: root_receipts,
+        root_contractstate: root_cs
+      } = payload
 
-    defp read_value(rtx, cf, key) do
-      case RDB.transaction_get_cf(rtx, cf, key) do
-        {:ok, nil} -> nil
-        {:ok, v} -> v
-        _ -> nil
-      end
+      entry = Entry.unpack_from_db(entry_packed)
+      height = entry.header.height
+
+      DB.Entry.insert(entry, %{rtx: rtx})
+      DB.Entry.apply_into_main_chain(entry, muts_hash, muts_rev, receipts,
+                                     root_receipts, root_cs, %{rtx: rtx})
+
+      RDB.transaction_put_cf(rtx, cf.sysconf, "pruned_below_height", Integer.to_string(height))
     end
 
     defp scan_existing_bundles() do
@@ -324,15 +344,61 @@ defmodule FabricSnapshot do
       |> Enum.each(fn h -> File.rm(bundle_path(h)) end)
     end
 
-    defp stream_cf(rtx, cfname, cf, fd, zctx), do: stream_cf_loop(rtx, cfname, cf, "", fd, zctx)
+    defp stream_cf(rtx, cfname, cf, fd, zctx),
+      do: stream_cf_loop(rtx, cfname, cf, "", "", fd, zctx)
 
-    defp stream_cf_loop(rtx, cfname, cf, cursor, fd, zctx) do
-      {next_cursor, rows} = RDB.transaction_scan_cf(rtx, cf, "", cursor, :forward, true, 0, @scan_batch, 0)
+    defp stream_cf_prefix(rtx, cfname, cf, prefix, fd, zctx),
+      do: stream_cf_loop(rtx, cfname, cf, prefix, prefix, fd, zctx)
+
+    defp stream_cf_loop(rtx, cfname, cf, prefix, cursor, fd, zctx) do
+      {next_cursor, rows} = RDB.transaction_scan_cf(rtx, cf, prefix, cursor, :forward, true, 0, @scan_batch, 0)
       Enum.each(rows, fn {k, v} -> write_record(fd, zctx, cfname, k, v) end)
       cond do
         rows == [] -> :ok
         next_cursor == nil -> :ok
-        true -> stream_cf_loop(rtx, cfname, cf, next_cursor, fd, zctx)
+        true -> stream_cf_loop(rtx, cfname, cf, prefix, next_cursor, fd, zctx)
+      end
+    end
+
+    # Reads the source-side inputs that DB.Entry.apply_into_main_chain needs.
+    # Receipts aren't stored as a list on source — they're decomposed into
+    # cf.tx pointers per-tx. We reconstruct the list here by reading each
+    # pointer through the same snapshot-pinned rtx, then re-attaching :txid
+    # (apply_into_main_chain re-keys receipts by it).
+    defp build_apply_payload(rtx, cf, rooted_hash) do
+      meta = %{rtx: rtx, cf: cf.entry_meta}
+      with entry_packed when is_binary(entry_packed) <-
+             RocksDB.get(rooted_hash, %{rtx: rtx, cf: cf.entry}),
+           muts_hash when is_binary(muts_hash) <-
+             RocksDB.get("entry:#{rooted_hash}:muts_hash", meta) do
+        muts_rev_packed = RocksDB.get("entry:#{rooted_hash}:muts_rev", meta)
+        muts_rev = if is_binary(muts_rev_packed), do: RDB.vecpak_decode(muts_rev_packed), else: []
+        root_receipts = RocksDB.get("entry:#{rooted_hash}:root_receipts", meta) || ""
+        root_cs       = RocksDB.get("entry:#{rooted_hash}:root_contractstate", meta) || ""
+
+        entry = Entry.unpack_from_db(entry_packed)
+        receipts =
+          entry.txs
+          |> Enum.map(fn txu ->
+            case RocksDB.get(txu.hash, %{rtx: rtx, cf: cf.tx}) do
+              packed when is_binary(packed) ->
+                %{receipt: r} = RDB.vecpak_decode(packed)
+                Map.put(r, :txid, txu.hash)
+              _ -> nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        {:ok, %{
+          entry: entry_packed,
+          muts_hash: muts_hash,
+          muts_rev: muts_rev,
+          receipts: receipts,
+          root_receipts: root_receipts,
+          root_contractstate: root_cs
+        }}
+      else
+        _ -> :error
       end
     end
 

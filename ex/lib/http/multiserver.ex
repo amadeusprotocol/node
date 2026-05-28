@@ -77,11 +77,6 @@ defmodule Ama.MultiServer do
         end
     end
 
-    # Streams a (cached) contractstate snapshot file to the client via zero-copy
-    # sendfile. Headers are built manually because Photon's build_cors inlines
-    # the body — we don't want to slurp a potentially-100GB file into BEAM
-    # memory. The file is owned by the cache (see cached_state_snapshot/0), so
-    # it's NOT deleted after the send.
     defp send_state_snapshot_file(state, out_path) do
         size = File.stat!(out_path).size
         headers =
@@ -92,15 +87,27 @@ defmodule Ama.MultiServer do
             |> Map.put("Content-Type", "application/zstd")
             |> Map.put("Content-Encoding", "zstd")
             |> Map.put("Content-Length", "#{size}")
-        header_bin = "HTTP/1.1 200 OK\r\n" <> Photon.HTTP.Headers.build(headers) <> "\r\n"
+        header_bin = "HTTP/1.1 200 OK\r\n" <> Photon.HTTP.Headers.build(headers) <> "\r\n\r\n"
         :ok = :gen_tcp.send(state.socket, header_bin)
+
         {:ok, fd} = :file.open(out_path, [:read, :binary, :raw])
         try do
-            {:ok, _sent} = :file.sendfile(fd, state.socket)
+            stream_to_socket(state.socket, fd)
         after
             :file.close(fd)
         end
         state
+    end
+
+    defp stream_to_socket(socket, fd) do
+        case :file.read(fd, 262_144) do
+            :eof -> :ok
+            {:ok, chunk} ->
+                case :gen_tcp.send(socket, chunk) do
+                    :ok -> stream_to_socket(socket, fd)
+                    {:error, _} -> :ok  # client disconnected mid-transfer; stop quietly
+                end
+        end
     end
 
 

@@ -104,14 +104,30 @@ defmodule FabricGen do
     end
   end
 
-  defp produce_bundle_inline(height) do
-    %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+  defp produce_bundle_inline(_height) do
+    %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
     case RDB.transaction_with_snapshot(db) do
       {:ok, rtx} ->
-        FabricSnapshot.write_statepeerdownload_bundle(rtx, height)
-        IO.inspect {:bundle_produced_at, height}
+        r = RocksDB.get("rooted_tip",   %{rtx: rtx, cf: cf.sysconf})
+        t = RocksDB.get("temporal_tip", %{rtx: rtx, cf: cf.sysconf})
+        cond do
+          !is_binary(r) or !is_binary(t) ->
+            RDB.transaction_rollback(rtx)
+          r != t ->
+            RDB.transaction_rollback(rtx)
+          true ->
+            case RDB.transaction_get_cf(rtx, cf.entry, r) do
+              {:ok, entry_blob} when is_binary(entry_blob) ->
+                entry = Entry.unpack_from_db(entry_blob)
+                height = entry.header.height
+                FabricSnapshot.write_statepeerdownload_bundle(rtx, height)
+                IO.inspect {:bundle_produced_at, height}
+              _ ->
+                RDB.transaction_rollback(rtx)
+            end
+        end
       err ->
-        IO.inspect {:bundle_snapshot_open_failed, height, err}
+        IO.inspect {:bundle_snapshot_open_failed, err}
         :error
     end
   end
