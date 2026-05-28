@@ -137,18 +137,48 @@ defmodule MMR do
   Verify a proof produced by `generate_proof/3`. Returns true iff the leaf
   derived from `block_hash` is committed in an MMR whose `root_chain` (over
   `chain_id` + size) equals `expected_root_chain`.
+
+  All structural fields of `proof` are validated against `proof.size` before
+  any hashing — crafted/malformed proofs return false rather than crashing
+  the caller, so this is safe to expose at a public RPC boundary.
   """
   def verify_proof(proof, block_hash, chain_id, expected_root_chain) do
-    layout = peaks_info(proof.size)
-    {_, _, leaf_start, _} = Enum.at(layout, proof.peak_pos)
-    rel_idx = proof.leaf_idx - leaf_start
+    try do
+      layout = peaks_info(proof.size)
+      peak_count = length(layout)
 
-    leaf = leaf_hash(block_hash)
-    peak_hash = apply_siblings(leaf, proof.siblings, rel_idx)
+      cond do
+        not is_integer(proof.size) or proof.size <= 0 -> false
+        not is_integer(proof.leaf_idx) or proof.leaf_idx < 0 or proof.leaf_idx >= proof.size -> false
+        not is_integer(proof.peak_pos) or proof.peak_pos < 0 or proof.peak_pos >= peak_count -> false
+        not is_list(proof.siblings)   -> false
+        not is_list(proof.other_peaks) -> false
+        length(proof.other_peaks) != peak_count - 1 -> false
+        not is_binary(block_hash) or byte_size(block_hash) != 32 -> false
+        not is_binary(chain_id) -> false
+        not is_binary(expected_root_chain) or byte_size(expected_root_chain) != 32 -> false
 
-    all_peaks = List.insert_at(proof.other_peaks, proof.peak_pos, peak_hash)
-    computed = root_chain(chain_id, %{peaks: all_peaks, size: proof.size})
-    computed == expected_root_chain
+        true ->
+          {peak_h, _peak_sz, leaf_start, leaf_end} = Enum.at(layout, proof.peak_pos)
+          cond do
+            proof.leaf_idx < leaf_start or proof.leaf_idx > leaf_end -> false
+            length(proof.siblings) != peak_h -> false
+            not Enum.all?(proof.siblings,    &(is_binary(&1) and byte_size(&1) == 32)) -> false
+            not Enum.all?(proof.other_peaks, &(is_binary(&1) and byte_size(&1) == 32)) -> false
+
+            true ->
+              rel_idx = proof.leaf_idx - leaf_start
+              leaf = leaf_hash(block_hash)
+              peak_hash = apply_siblings(leaf, proof.siblings, rel_idx)
+              all_peaks = List.insert_at(proof.other_peaks, proof.peak_pos, peak_hash)
+              root_chain(chain_id, %{peaks: all_peaks, size: proof.size}) == expected_root_chain
+          end
+      end
+    rescue
+      _ -> false
+    catch
+      _, _ -> false
+    end
   end
 
   defp peaks_info(size), do: peaks_info(size, 0, []) |> Enum.reverse()
