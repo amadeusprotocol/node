@@ -138,6 +138,12 @@ defmodule FabricSnapshot do
             write_record(fd, zctx, "sysconf", "temporal_tip",    rooted_hash)
             write_record(fd, zctx, "sysconf", "temporal_height", Integer.to_string(height))
 
+            # Ship MMR state as it was BEFORE the rooted entry was applied;
+            # finalize_import appends rooted_hash on top so the importer lands
+            # at the correct post-rooted peaks.
+            Enum.each(DB.MMR.export_snapshot(rooted_hash, %{rtx: rtx}),
+                      fn {k, v} -> write_record(fd, zctx, "sysconf", k, v) end)
+
             height_padded = String.pad_leading(Integer.to_string(height), 12, "0")
             stream_cf_prefix(rtx, "attestation", cf.attestation, "consensus:#{rooted_hash}:", fd, zctx)
             stream_cf_prefix(rtx, "attestation", cf.attestation, "attestation:#{height_padded}:#{rooted_hash}:", fd, zctx)

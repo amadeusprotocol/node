@@ -63,7 +63,7 @@ defmodule MMR do
       @dst_root,
       chain_id,
       bag(peaks),
-      <<size::64-big>>
+      <<size::64>>
     ])
   end
 
@@ -78,5 +78,106 @@ defmodule MMR do
     {init, [last]} = Enum.split(peaks, length(peaks) - 1)
     merged = node_hash(last, new)
     carry(init, merged, n - 1)
+  end
+
+  # ---------- inclusion proofs ----------
+
+  @doc """
+  Build an inclusion proof that the leaf at `leaf_idx` is committed in an
+  MMR with state `%{peaks, size}`. `get_block_hash` is `height -> block_hash`
+  (the caller wires up the DB lookup).
+
+  Returns
+      %{
+        size:        N,
+        leaf_idx:    H,
+        peak_pos:    K,            # which peak contains the target leaf
+        siblings:    [hash, …],    # path from leaf to its peak's root
+        other_peaks: [hash, …]     # all OTHER peaks (taken from state.peaks)
+      }
+
+  Cost is O(2^h) hashes where h is the height of the peak containing the
+  target leaf — the proof has to walk that subtree to collect siblings.
+  Other peaks are reused from `state.peaks` (the producer's stored peaks
+  ARE the peak roots) so we don't re-hash them.
+  """
+  def generate_proof(state, leaf_idx, get_block_hash) when leaf_idx < state.size do
+    layout = peaks_info(state.size)
+
+    {peak_pos, {_h, _sz, leaf_start, leaf_end}} =
+      layout
+      |> Enum.with_index()
+      |> Enum.find_value(fn {p = {_, _, s, e}, i} ->
+        if leaf_idx >= s and leaf_idx <= e, do: {i, p}, else: nil
+      end)
+
+    rel_idx = leaf_idx - leaf_start
+    leaves =
+      leaf_start..leaf_end
+      |> Enum.map(&leaf_hash(get_block_hash.(&1)))
+
+    siblings = collect_siblings(leaves, rel_idx, [])
+
+    other_peaks =
+      state.peaks
+      |> Enum.with_index()
+      |> Enum.reject(fn {_, i} -> i == peak_pos end)
+      |> Enum.map(fn {p, _} -> p end)
+
+    %{
+      size: state.size,
+      leaf_idx: leaf_idx,
+      peak_pos: peak_pos,
+      siblings: siblings,
+      other_peaks: other_peaks
+    }
+  end
+
+  @doc """
+  Verify a proof produced by `generate_proof/3`. Returns true iff the leaf
+  derived from `block_hash` is committed in an MMR whose `root_chain` (over
+  `chain_id` + size) equals `expected_root_chain`.
+  """
+  def verify_proof(proof, block_hash, chain_id, expected_root_chain) do
+    layout = peaks_info(proof.size)
+    {_, _, leaf_start, _} = Enum.at(layout, proof.peak_pos)
+    rel_idx = proof.leaf_idx - leaf_start
+
+    leaf = leaf_hash(block_hash)
+    peak_hash = apply_siblings(leaf, proof.siblings, rel_idx)
+
+    all_peaks = List.insert_at(proof.other_peaks, proof.peak_pos, peak_hash)
+    computed = root_chain(chain_id, %{peaks: all_peaks, size: proof.size})
+    computed == expected_root_chain
+  end
+
+  defp peaks_info(size), do: peaks_info(size, 0, []) |> Enum.reverse()
+  defp peaks_info(0, _leaf_idx, acc), do: acc
+  defp peaks_info(size, leaf_idx, acc) do
+    h = floor_log2(size)
+    subtree_size = :erlang.bsl(1, h)
+    peaks_info(size - subtree_size, leaf_idx + subtree_size,
+               [{h, subtree_size, leaf_idx, leaf_idx + subtree_size - 1} | acc])
+  end
+
+  defp floor_log2(n) when n > 0, do: floor_log2(n, 0)
+  defp floor_log2(1, acc), do: acc
+  defp floor_log2(n, acc) when n > 1, do: floor_log2(div(n, 2), acc + 1)
+
+  defp collect_siblings([_single], _idx, acc), do: Enum.reverse(acc)
+  defp collect_siblings(level, idx, acc) do
+    sibling_idx = :erlang.bxor(idx, 1)
+    sibling = Enum.at(level, sibling_idx)
+    next_level = level |> Enum.chunk_every(2) |> Enum.map(fn [l, r] -> node_hash(l, r) end)
+    collect_siblings(next_level, div(idx, 2), [sibling | acc])
+  end
+
+  defp apply_siblings(current, [], _idx), do: current
+  defp apply_siblings(current, [sibling | rest], idx) do
+    next =
+      if rem(idx, 2) == 0,
+        do: node_hash(current, sibling),
+        else: node_hash(sibling, current)
+    apply_siblings(next, rest, div(idx, 2))
   end
 end

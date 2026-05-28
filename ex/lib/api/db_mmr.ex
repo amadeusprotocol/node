@@ -77,6 +77,14 @@ defmodule DB.MMR do
     end
   end
 
+  def export_snapshot(entry_hash, db_opts \\ %{}) do
+    state = snapshot_for(entry_hash, db_opts)
+    %{
+      @sysconf_peaks => RDB.vecpak_encode(state.peaks),
+      @sysconf_size  => Integer.to_string(state.size)
+    }
+  end
+
   @doc """
   Stable chain identifier. Currently the genesis hash — unique per network.
   """
