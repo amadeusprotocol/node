@@ -1,20 +1,24 @@
 defmodule FabricSnapshot do
-    # Wire format written by sync_contractstate_to_file/1 and consumed by
-    # bootstrap importers. The file is a zstd-compressed stream of records;
-    # each record is:
+    # State-peer-download bundle: zstd-compressed stream of records consumed
+    # by `import_bundle_file/1`. Wire format per record:
     #
     #   <cfname_len :: 32-big>
     #   <cfname     :: cfname_len bytes>
     #   <term_len   :: 32-big>
-    #   <vecpak_term:: term_len bytes>     # vecpak-encoded %{k: <key>, v: <value>}
+    #   <vecpak_term:: term_len bytes>     # vecpak %{k, v}
     #
-    # CFs are written in order. Within a CF, records are emitted in RocksDB
-    # key order. Both contractstate CFs are read through a single
-    # snapshot-pinned transaction, so they are mutually consistent.
+    # `cfname` is the destination column-family name for normal records, or
+    # the sentinel "__apply__" for the sidecar record (one per bundle, last)
+    # whose `v` carries the inputs `apply_into_main_chain` needs to replay
+    # the rooted-tip apply on the importer.
+    #
+    # All reads share a single snapshot-pinned RocksDB transaction; the
+    # writer also guards on `temporal_tip == rooted_tip` inside that view
+    # so contractstate is consistent with the anchor it ships.
     @scan_batch 10_000
     @bundle_path_prefix "/tmp/statepeerdownload_"
     @bundle_path_suffix ".zstd"
-    @bundle_target_offset 1000           # offset into the epoch where a bundle is produced
+    @bundle_target_offset 1000           # offset in epoch past which bundle attempts begin
     @bundle_epoch_size 100_000
     @bundle_keep 2                       # number of latest bundles retained on disk
     @bundle_latest_key {__MODULE__, :statepeerdownload_latest}
@@ -29,15 +33,15 @@ defmodule FabricSnapshot do
 
     def latest_statepeerdownload(), do: :persistent_term.get(@bundle_latest_key, nil)
 
-    # Boot-time setup. Called from Ex.run_node_services after bootstrap so
-    # chain state (rooted_height) is guaranteed present:
+    # Boot-time setup. Called from Ex.full_node after bootstrap so chain
+    # state (rooted_height) is guaranteed present:
     #   * delete any orphaned .tmp files left by a crashed writer;
     #   * scan /tmp for finished bundles and seed @bundle_latest_key with
     #     the highest height — HTTP queries work immediately on restart;
-    #   * if NO bundle exists at all but the node has a chain, BUILD one
-    #     synchronously at the current rooted_height so the endpoint is
-    #     usable from the first request (don't make peers wait for the
-    #     first FabricGen tick).
+    #   * if no current-epoch bundle exists, attempt one at boot. The
+    #     attempt is gated on temporal_tip == rooted_tip (same alignment
+    #     check as the FabricGen tick path); if the chain isn't quiescent
+    #     yet, skip and let FabricGen retry on its tick.
     # No-op when STATEPEERDOWNLOAD is off.
     def check_or_build_statepeerdownload() do
       if Application.fetch_env!(:ama, :statepeerdownload) do
@@ -109,13 +113,11 @@ defmodule FabricSnapshot do
       end
     end
 
-    # Produces a bundle at `height` using `rtx` — a snapshot-pinned txn that
-    # FabricGen captured at the exact moment rooted_height == height. Runs
-    # synchronously, intended to be invoked from a spawned task so FabricGen
-    # itself isn't blocked.
-    #
+    # Produces a bundle at `height` using `rtx` — a snapshot-pinned txn
+    # whose caller has already verified temporal_tip == rooted_tip inside it.
     # Writes to .tmp first, atomically renames on success, updates
     # @bundle_latest_key, deletes bundles past @bundle_keep.
+    # Always rolls back `rtx` (we never want this snapshot's writes to commit).
     # Returns :ok | {:error, reason}.
     def write_statepeerdownload_bundle(rtx, height) do
       out_path = bundle_path(height)
@@ -212,11 +214,10 @@ defmodule FabricSnapshot do
     end
 
     # Stream-decompresses `file_path` and writes every record into the live
-    # DB inside a single RocksDB transaction. Commits atomically at the end —
-    # if the transaction fails, the DB is left empty so the next boot just
-    # retries. Finalize-step rewrites temporal_tip = rooted_tip and
-    # pruned_below_height = embedded height so the importing (non-archival)
-    # node starts from a well-defined state.
+    # DB inside a single RocksDB transaction. Commits atomically at the end;
+    # on failure the txn is rolled back, leaving the DB empty so the next
+    # boot just retries. The `__apply__` sidecar is held aside and replayed
+    # in finalize_import — same write path a production apply uses.
     def import_bundle_file(file_path) do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       cf_by_name = %{

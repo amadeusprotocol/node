@@ -49,19 +49,21 @@ defmodule FabricGen do
     state
   end
 
-  # Produces a state-peer-download bundle inline (synchronously). Triggers:
-  #   * BOOTSTRAP    — no bundle exists at all yet. Fires once for the
-  #                    current rooted_height, regardless of validator role.
-  #   * VALIDATOR    — this node holds a key in the current epoch's
-  #                    validator set: fire when the rooted_tip entry was
-  #                    SIGNED by one of our keys. We have ~one validator
-  #                    round of slack before our next slot, so the dump
-  #                    happens between rooting our block and producing
-  #                    the next one.
-  #   * NON-VALIDATOR — fall back to `rem(rooted, 100_000) == 1000`.
+  # Attempts a state-peer-download bundle inline (synchronously). One of
+  # these three trigger windows must be open for an attempt to fire; each
+  # attempt is then gated inside produce_bundle_inline on the rtx-consistent
+  # check temporal_tip == rooted_tip, so a bundle only lands when the chain
+  # is quiescent enough that contractstate matches the rooted anchor:
   #
-  # In all cases, only one bundle per epoch is produced (subsequent ticks
-  # see the persistent_term cache pointing at this epoch's height and skip).
+  #   * BOOTSTRAP     — no bundle anywhere yet (every tick retries until one
+  #                     lands).
+  #   * VALIDATOR     — we hold a key in the current epoch's validator set
+  #                     and the rooted_tip was signed by one of our keys.
+  #   * NON-VALIDATOR — rooted is past offset @bundle_target_offset into the
+  #                     current epoch (every tick retries inside the window).
+  #
+  # Only one bundle per epoch is produced — already_have_bundle_for_epoch?
+  # short-circuits subsequent ticks once a bundle for this epoch is on disk.
   defp maybe_produce_state_bundle() do
     if Application.fetch_env!(:ama, :statepeerdownload) do
       rooted = DB.Chain.rooted_height() || 0
