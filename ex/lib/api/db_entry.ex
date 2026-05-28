@@ -89,6 +89,13 @@ defmodule DB.Entry do
   end
 
   def apply_into_main_chain(entry, muts_hash, muts_rev, receipts, root_receipts, root_contractstate, db_opts = %{rtx: _}) do
+    prev_mmr = DB.MMR.load_or_empty(db_opts)
+    DB.MMR.snapshot_before(entry.hash, prev_mmr, db_opts)
+    new_mmr = MMR.append(prev_mmr, entry.hash)
+    DB.MMR.save(new_mmr, db_opts)
+
+    # IO.puts "MMR h=#{entry.header.height} root_chain=#{Base.encode16(MMR.root_chain(DB.MMR.chain_id(), new_mmr), case: :lower)}"
+
     entry_packed = Entry.pack_for_db(entry)
     RocksDB.put(entry.hash, entry_packed, db_handle(db_opts, :entry, %{}))
     RocksDB.put("by_height:#{pad_integer(entry.header.height)}:#{entry.hash}", entry.hash, db_handle(db_opts, :entry_meta, %{}))
@@ -156,6 +163,7 @@ defmodule DB.Entry do
     RocksDB.delete("entry:#{hash}:muts_rev", db_handle(db_opts, :entry_meta, %{}))
     RocksDB.delete("entry:#{hash}:root_receipts", db_handle(db_opts, :entry_meta, %{}))
     RocksDB.delete("entry:#{hash}:root_contractstate", db_handle(db_opts, :entry_meta, %{}))
+    RocksDB.delete("entry:#{hash}:mmr_peaks_before", db_handle(db_opts, :entry_meta, %{}))
     RocksDB.delete_prefix("consensus:#{hash}:", db_handle(db_opts, :attestation, %{}))
     RocksDB.delete_prefix("attestation:#{height_padded}:#{hash}:", db_handle(db_opts, :attestation, %{}))
 

@@ -175,6 +175,12 @@ defmodule DB.Chain do
     m_rev = DB.Entry.muts_rev(current_entry.hash, %{rtx: rtx})
     revert_muts(m_rev, %{rtx: rtx})
 
+    # revert mmr
+    case DB.MMR.snapshot_for(current_entry.hash, %{rtx: rtx}) do
+      nil  -> :ok
+      prev -> DB.MMR.save(prev, %{rtx: rtx})
+    end
+
     DB.Entry.delete_UNSAFE(current_entry.hash, %{rtx: rtx})
     prev_hash = current_entry.header.prev_hash
     if prev_hash == target_hash do

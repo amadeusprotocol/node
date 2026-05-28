@@ -120,6 +120,8 @@ defmodule Ama do
   end
 
   def run_node_services() do
+    ensure_mmr_synced()
+
     if !Application.fetch_env!(:ama, :testnet) do
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricSyncAttestGen, start: {FabricSyncAttestGen, :start_link, []}})
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricSyncGen, start: {FabricSyncGen, :start_link, []}})
@@ -139,6 +141,22 @@ defmodule Ama do
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: SpecialMeetingGen, start: {SpecialMeetingGen, :start_link, []}})
     run_udp_listener()
     run_webpanel()
+  end
+
+  defp ensure_mmr_synced() do
+    cond do
+      is_nil(DB.Chain.tip()) ->
+        :ok
+
+      true ->
+        tip_height = DB.Chain.height()
+        expected_size = tip_height + 1
+        current = DB.MMR.load() || %{size: 0, peaks: []}
+        if current.size != expected_size do
+          IO.puts "MMR not synced with chain (have size=#{current.size}, expected #{expected_size}) — rebuilding"
+          MMR.Bootstrap.rebuild_from_checkpoint()
+        end
+    end
   end
 
   def run_udp_listener() do

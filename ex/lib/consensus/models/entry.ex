@@ -53,8 +53,15 @@ defmodule Entry do
     h (entry_hash || state_root || receipts_logs_extra_root)
     """
 
+    # :root_chain — PHASE 1 schema-only rollout.
+    # The field is whitelisted in @fields_header on every node, but proposers
+    # do NOT populate it yet (see build_next/3 below). Because Map.take only
+    # picks keys that exist on the source, current blocks (which don't carry
+    # the key) hash identically to pre-rollout. Once enough peers have shipped
+    # Phase 1, the next release flips proposers on (Phase 2). Old nodes that
+    # missed Phase 1 will reject Phase-2 blocks.
     @fields [:header, :hash, :signature, :txs, :mask, :mask_size, :mask_set_size]
-    @fields_header [:height, :prev_hash, :slot, :prev_slot, :signer, :dr, :vr, :root_tx, :root_validator]
+    @fields_header [:height, :prev_hash, :slot, :prev_slot, :signer, :dr, :vr, :root_tx, :root_validator, :root_chain]
 
     def unpack_from_db(nil), do: nil
     def unpack_from_db(entry_packed) do
@@ -213,6 +220,28 @@ defmodule Entry do
 
         if :crypto.hash(:sha256, ceh.dr) != neh.dr, do: throw(%{error: :invalid_dr})
         if !BlsEx.verify?(neh.signer, neh.vr, ceh.vr, BLS12AggSig.dst_vrf()), do: throw(%{error: :invalid_vr})
+
+        # root_chain soft validation (log-only for now). Only runs when the
+        # proposer set the field AND our local MMR is in sync at this height.
+        # Filters bad blocks out of the candidate pool BEFORE expensive
+        # contract exec in apply_entry — so a persistently bad block doesn't
+        # DoS our apply path. Flip the IO.inspect to a `throw` to enforce.
+        case neh[:root_chain] do
+          nil -> :ok
+          theirs ->
+            mmr = DB.MMR.load_or_empty()
+            if mmr.size == neh.height do
+              ours = MMR.root_chain(DB.MMR.chain_id(), mmr)
+              if theirs != ours do
+                IO.inspect(
+                  {:root_chain_mismatch, neh.height,
+                    ours: Base.encode16(ours, case: :lower),
+                    theirs: Base.encode16(theirs, case: :lower)}
+                )
+                # throw(%{error: :root_chain_mismatch})
+              end
+            end
+        end
 
         chain_epoch = div(neh.height, 100_000)
         chain_height = neh.height
