@@ -33,6 +33,7 @@ wasmer-compiler-singlepass = "7.1.0"
 wasmer-middlewares = "7.1.0"
 wasmparser = "0.247.0"
 lazy_static = "1.4"
+rustc-hash = "2"
 
 [dependencies.rust-rocksdb]
 git = "https://github.com/vans163/rust-rocksdb"
@@ -43,6 +44,9 @@ features = ["zstd", "zstd-static-linking-only", "multi-threaded-cf"] #"jemalloc"
 [dependencies.rust-librocksdb-sys]
 git = "https://github.com/vans163/rust-rocksdb"
 rev = "db696cdc176714a7e7b83717542de05040cf5109"
+
+[dev-dependencies]
+tempfile = "3"
 
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/vans163/rust-rocksdb", rev = "db696cdc176714a7e7b83717542de05040cf5109" }

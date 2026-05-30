@@ -54,7 +54,7 @@ pub enum Op {
     Delete(Option<Vec<u8>>, Vec<u8>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum VerifyStatus {
     Included,
     Mismatch,
@@ -233,7 +233,8 @@ impl Hubt {
             match op {
                 Op::Insert(ns, k, v) => {
                     let path = compute_namespace_path(ns.as_deref(), &k);
-                    (true, path, leaf_hash(&path, &k, &v))
+                    let lh = leaf_hash(&path, &k, &v);
+                    (true, path, lh)
                 },
                 Op::Delete(ns, k) => {
                     let path = compute_namespace_path(ns.as_deref(), &k);
@@ -394,23 +395,125 @@ impl Hubt {
     pub fn prove(&self, ns: Option<Vec<u8>>, k: Vec<u8>) -> Proof {
         let target_path = compute_namespace_path(ns.as_deref(), &k);
 
-        let (found_key, found_hash) = match self.find_longest_prefix_node(&target_path) {
-            Some((key, hash)) => (key, hash),
-            None => {
-                return Proof {
-                    root: ZERO_HASH,
-                    nodes: vec![],
-                    path: ZERO_HASH,
-                    hash: ZERO_HASH
-                };
-            }
-        };
+        // Empty tree
+        if self.leaves.is_empty() {
+            return Proof { root: ZERO_HASH, nodes: vec![], path: ZERO_HASH, hash: ZERO_HASH };
+        }
+
+        // Exact-match (inclusion proof)
+        if let Some(h) = self.leaves.get(&target_path) {
+            return Proof {
+                root: self.root(),
+                nodes: self.generate_proof_nodes(target_path, 256),
+                path: target_path,
+                hash: *h,
+            };
+        }
+
+        // Non-existence: walk DOWN toward target until we either find an empty
+        // branch on target's side (the chosen leaf-on-the-other-side will
+        // naturally yield a ZERO_HASH sibling at div_len in generate_proof_nodes
+        // → verifier returns NonExistence at bintree.rs:514) or reach a leaf
+        // in a compressed-edge subtree shared with target (which yields
+        // Suffix Divergence at bintree.rs:582).
+        let proof_path = self.find_proof_path_descending(&target_path);
+        let proof_hash = *self.leaves.get(&proof_path).unwrap_or(&ZERO_HASH);
 
         Proof {
             root: self.root(),
-            nodes: self.generate_proof_nodes(found_key.path, found_key.len),
-            path: found_key.path,
-            hash: found_hash,
+            nodes: self.generate_proof_nodes(proof_path, 256),
+            path: proof_path,
+            hash: proof_hash,
+        }
+    }
+
+    /// Walk the tree from the topmost internal toward `target`, picking a
+    /// leaf such that `generate_proof_nodes` will emit a verifier-acceptable
+    /// non-existence proof.
+    fn find_proof_path_descending(&self, target: &Path) -> Path {
+        let first = *self.leaves.first_key_value().unwrap().0;
+        let last  = *self.leaves.last_key_value().unwrap().0;
+        if first == last {
+            return first;
+        }
+
+        // Topmost internal: at LCP(first_leaf, last_leaf).
+        let (root_path, root_len) = lcp_be(&first, &last);
+
+        // If target doesn't share the topmost internal's prefix, we can't
+        // descend (target falls outside the tree's universe). Fall back to
+        // the original nearest-leaf strategy — verifier may return Invalid
+        // for this case; documented limitation of the non-sparse tree.
+        if !prefix_match_be(target, &root_path, root_len) {
+            return self
+                .find_longest_prefix_node(target)
+                .map(|(k, _)| k.path)
+                .unwrap_or(first);
+        }
+
+        let mut cur_path = root_path;
+        let mut cur_len  = root_len;
+
+        loop {
+            let target_dir = get_bit_be(target, cur_len);
+
+            let mut t_child = cur_path;
+            set_bit_be(&mut t_child, cur_len, target_dir);
+            mask_after_be(&mut t_child, cur_len + 1);
+
+            let next_int = self
+                .internals
+                .range(NodeKey { path: t_child, len: cur_len + 1 }..)
+                .find(|(k, _)| prefix_match_be(&k.path, &t_child, cur_len + 1))
+                .map(|(k, _)| *k);
+            let next_leaf = self
+                .leaves
+                .range(t_child..)
+                .find(|(p, _)| prefix_match_be(p, &t_child, cur_len + 1))
+                .map(|(p, _)| *p);
+
+            match (next_int, next_leaf) {
+                (None, None) => {
+                    // Empty target-side at this internal → pick any leaf on
+                    // the OPPOSITE side. generate_proof_nodes for that leaf
+                    // will produce a ZERO_HASH sibling at cur_len (since the
+                    // get_child_hash for target's direction at cur_len finds
+                    // nothing) → div_len == cur_len, NonExistence.
+                    let opp_dir = 1 - target_dir;
+                    let mut o_child = cur_path;
+                    set_bit_be(&mut o_child, cur_len, opp_dir);
+                    mask_after_be(&mut o_child, cur_len + 1);
+                    return self
+                        .leaves
+                        .range(o_child..)
+                        .find(|(p, _)| prefix_match_be(p, &o_child, cur_len + 1))
+                        .map(|(p, _)| *p)
+                        .unwrap_or(first);
+                }
+                (None, Some(leaf)) => {
+                    // Compressed-edge: only a leaf under target's side.
+                    return leaf;
+                }
+                (Some(int_k), _) => {
+                    // Before descending, target must match int_k.path through
+                    // int_k.len bits. If target diverges in the compressed
+                    // edge between (cur_path, cur_len) and (int_k.path, int_k.len),
+                    // descent is incoherent — the resulting proof would commit
+                    // to a leaf in a subtree target doesn't belong to, and the
+                    // verifier hits the "Malleable Gap" branch returning Invalid.
+                    if !prefix_match_be(target, &int_k.path, int_k.len) {
+                        return self
+                            .find_longest_prefix_node(target)
+                            .map(|(k, _)| k.path)
+                            .unwrap_or(first);
+                    }
+                    cur_path = int_k.path;
+                    cur_len  = int_k.len;
+                    if cur_len >= 255 {
+                        return next_leaf.unwrap_or(first);
+                    }
+                }
+            }
         }
     }
 
