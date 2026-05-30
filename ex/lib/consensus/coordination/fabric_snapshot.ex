@@ -203,9 +203,9 @@ defmodule FabricSnapshot do
       case :httpc.request(:get, {to_charlist(url), []}, [{:timeout, :infinity}],
                           [stream: to_charlist(download_path)]) do
         {:ok, :saved_to_file} -> :ok
-        {:ok, _} -> :ok
-        err -> raise "state-peer bundle download failed: #{inspect err}"
+        err -> halt_bundle("download from #{url} failed: #{inspect err}")
       end
+
       bytes = File.stat!(download_path).size
       IO.puts "FabricSnapshot: downloaded #{bytes} bytes, importing.."
 
@@ -215,8 +215,13 @@ defmodule FabricSnapshot do
           IO.puts "FabricSnapshot: imported #{count} records, chain ready"
           :ok
         {:error, reason} ->
-          raise "bundle import failed: #{inspect reason}"
+          halt_bundle("import from #{url} failed: #{inspect reason}")
       end
+    end
+
+    defp halt_bundle(msg) do
+      IO.puts "\nFATAL: state bundle #{msg}\n       halting; node cannot start without chain state."
+      :erlang.halt(1)
     end
 
     # Stream-decompresses `file_path` and writes every record into the live
