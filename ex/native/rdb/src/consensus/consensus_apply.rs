@@ -555,9 +555,116 @@ pub fn contract_validate<'db, 'a>(
 }
 
 fn update_and_root_contractstate(applyenv: &mut ApplyEnv) -> [u8; 32] {
-    //Select only the last muts, rest are irrelevent for tree
+    // Check whether HBSMT data already lives in `contractstate_tree` — if yes,
+    // we've migrated and must skip the Hubt path entirely. (Hubt's
+    // `seek_first_leaf` deserializes keys as a 34-byte NodeKey and panics on
+    // HBSMT's 32-byte leaf keys.) Cheap: one seek + length check.
+    if !is_hbsmt_migrated(applyenv) {
+        let hubt_root = {
+            let hubt = consensus::bintree_rdb::RocksHubt::new(applyenv);
+            hubt.root()
+        };
+        if &hubt_root == bugged_contractstate_root() {
+            let height = applyenv.caller_env.entry_height;
+            println!("[HBSMT] migration: triggered at height {} (Hubt at bugged root)", height);
+            let started = std::time::Instant::now();
+            wipe_contractstate_tree(applyenv);
+            seed_hbsmt_from_contractstate(applyenv);
+            let elapsed_ms = started.elapsed().as_millis();
+            println!("[HBSMT] migration: completed at height {} in {} ms", height, elapsed_ms);
+        }
+    }
+
+    // Per-block incremental update: gather this block's mutations and apply
+    // them to the HBSMT persisted in `contractstate_tree`. Returns the new
+    // root.
+    apply_block_muts_to_hbsmt(applyenv)
+}
+
+/// Detect post-migration state by checking whether the first key in
+/// `contractstate_tree` is 32 bytes. HBSMT leaves are 32-byte path keys;
+/// Hubt only ever writes 34-byte `NodeKey`s. So a 32-byte first key means
+/// HBSMT data has been written and Hubt's deserializer must not be invoked.
+fn is_hbsmt_migrated(env: &ApplyEnv) -> bool {
+    let cf = match env.db.cf_handle("contractstate_tree") {
+        Some(cf) => cf,
+        None => return false,
+    };
+    let mut iter = env.txn.raw_iterator_cf(&cf);
+    iter.seek_to_first();
+    iter.valid() && iter.key().map_or(false, |k| k.len() == 32)
+}
+
+/// The Hubt contractstate root at which the Patricia trie observably gets
+/// "stuck" — mutations to the tree no longer change the root. Decoded once
+/// from Base58 `FvScjStfVuaKT9vtphER2cvFh5C68TGqh9W6GBgJxvAS` and cached.
+fn bugged_contractstate_root() -> &'static [u8; 32] {
+    static CELL: OnceLock<[u8; 32]> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let v = bs58::decode("FvScjStfVuaKT9vtphER2cvFh5C68TGqh9W6GBgJxvAS")
+            .into_vec()
+            .expect("bugged-root base58 decode");
+        let mut out = [0u8; 32];
+        assert_eq!(v.len(), 32, "bugged-root must be 32 bytes");
+        out.copy_from_slice(&v);
+        out
+    })
+}
+
+/// Delete every entry in `contractstate_tree`. Called once when the legacy
+/// Hubt root is observed at the bugged value; after this, the CF is empty.
+fn wipe_contractstate_tree(env: &mut ApplyEnv) {
+    let cf_tree = match env.db.cf_handle("contractstate_tree") {
+        Some(cf) => cf,
+        None => return,
+    };
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    {
+        let mut iter = env.txn.raw_iterator_cf(&cf_tree);
+        iter.seek_to_first();
+        while iter.valid() {
+            if let Some(k) = iter.key() { keys.push(k.to_vec()); }
+            iter.next();
+        }
+    }
+    for k in keys {
+        let _ = env.txn.delete_cf(&cf_tree, &k);
+    }
+}
+
+/// One-time migration seed: iterate the entire `contractstate` CF and
+/// insert every (namespace, key, value) into the persistent HBSMT held in
+/// `contractstate_tree`. Called exactly once when the bugged Hubt root is
+/// observed.
+fn seed_hbsmt_from_contractstate(env: &mut ApplyEnv) {
+    use crate::consensus::bintree::Op as BinOp;
+
+    let cf_cs = env.cf_contractstate.clone();
+    let mut ops: Vec<BinOp> = Vec::new();
+    {
+        let mut iter = env.txn.raw_iterator_cf(&cf_cs);
+        iter.seek_to_first();
+        while iter.valid() {
+            let key = match iter.key() { Some(k) => k.to_vec(), None => break };
+            let value = match iter.value() { Some(v) => v.to_vec(), None => break };
+            let namespace = consensus_kv::contractstate_namespace(&key);
+            ops.push(BinOp::Insert(namespace, key, value));
+            iter.next();
+        }
+    }
+    crate::consensus::hbsmt_rdb::hbsmt_batch_update_env(env, "contractstate_tree", ops);
+}
+
+/// Per-block incremental update: collect this block's mutations from
+/// `muts_final`, translate to HBSMT ops with proper namespacing, and apply
+/// them via `HbsmtCf::batch_update` against `contractstate_tree`. Returns
+/// the new root.
+fn apply_block_muts_to_hbsmt(env: &mut ApplyEnv) -> [u8; 32] {
+    use crate::consensus::bintree::Op as BinOp;
+
+    // Collapse muts_final to last-write-wins per key.
     let mut map: HashMap<Vec<u8>, consensus_muts::Mutation> = HashMap::new();
-    for m in applyenv.muts_final.clone() {
+    for m in env.muts_final.clone() {
         match m {
             consensus_muts::Mutation::Put { ref key, .. }
             | consensus_muts::Mutation::Delete { ref key, .. }
@@ -567,39 +674,26 @@ fn update_and_root_contractstate(applyenv: &mut ApplyEnv) -> [u8; 32] {
             }
         }
     }
-    let mut ops: Vec<consensus::bintree::Op> = Vec::with_capacity(map.len());
+    let mut ops: Vec<BinOp> = Vec::with_capacity(map.len());
     for (key, m) in map {
         let namespace = consensus_kv::contractstate_namespace(&key);
         let op = match m {
-            consensus_muts::Mutation::Put { value, .. } => consensus::bintree::Op::Insert(namespace, key, value),
-            consensus_muts::Mutation::Delete { .. } => consensus::bintree::Op::Delete(namespace, key),
+            consensus_muts::Mutation::Put { value, .. } => BinOp::Insert(namespace, key, value),
+            consensus_muts::Mutation::Delete { .. } => BinOp::Delete(namespace, key),
             consensus_muts::Mutation::SetBit { .. } => {
-                let val = applyenv.txn.get_cf(&applyenv.cf, &key).unwrap().unwrap();
-                consensus::bintree::Op::Insert(namespace, key, val)
+                let val = env.txn.get_cf(&env.cf_contractstate, &key).unwrap().unwrap();
+                BinOp::Insert(namespace, key, val)
             }
             consensus_muts::Mutation::ClearBit { .. } => {
-                let val = applyenv.txn.get_cf(&applyenv.cf, &key).unwrap().unwrap();
-                consensus::bintree::Op::Insert(namespace, key, val)
+                let val = env.txn.get_cf(&env.cf_contractstate, &key).unwrap().unwrap();
+                BinOp::Insert(namespace, key, val)
             }
         };
         ops.push(op);
     }
 
-    applyenv.cf = applyenv.db.cf_handle("contractstate_tree").unwrap();
-    applyenv.cf_name = b"contractstate_tree".to_vec();
-    applyenv.muts = Vec::new();
-    applyenv.muts_rev = Vec::new();
-
-    let mut hubt_contractstate = consensus::bintree_rdb::RocksHubt::new(applyenv);
-    hubt_contractstate.batch_update(ops);
-    let contractstate_root = hubt_contractstate.root();
-
-    let mut muts = unique_mutations(applyenv.muts.clone(), false);
-    applyenv.muts_final.append(&mut muts);
-    let mut muts_rev = unique_mutations(applyenv.muts_rev.clone(), true);
-    applyenv.muts_final_rev.append(&mut muts_rev);
-
-    contractstate_root
+    crate::consensus::hbsmt_rdb::hbsmt_batch_update_env(env, "contractstate_tree", ops);
+    crate::consensus::hbsmt_rdb::hbsmt_root_env(env, "contractstate_tree")
 }
 
 fn root_receipts(count: usize, receipts: Vec<TXReceipt>) -> [u8; 32] {

@@ -1,17 +1,20 @@
-//! RocksDB-backed Compact Sparse Merkle Tree. Same algorithm as the in-memory
-//! `Hbsmt` but with persistent storage — leaves and splits live in
-//! dedicated CFs, accessed transactionally during each batch.
+//! RocksDB-backed HBSMT (Hot Binary Sparse Merkle Tree) — own-DB wrapper for
+//! tests and benches. The same algorithm runs against `ApplyEnv` via the
+//! `hbsmt_root_env` / `hbsmt_batch_update_env` free functions below.
 //!
-//! Storage layout (single TransactionDB, multiple CFs):
-//!   - `smt_leaves`:  key = `path[32]`,                  value = `leaf_hash[32]`
-//!   - `smt_splits`:  key = `path[32] || depth_be[2]`,   value = `node_hash[32]`
+//! Storage: a single column family holding both leaves and splits, keyed
+//! by length:
+//!   - 32-byte key → **leaf**, value = `identity_hash(32) || value_hash(32)` (64 B)
+//!   - 34-byte key → **split**, key = `path(32) || depth_be(2)`, value = `node_hash(32)` (32 B)
 //!
-//! Performance optimizations carried over:
+//! Algorithm features:
 //!   - One-Phase Batch Update (sorted-partition descent, one hash per node).
 //!   - Single-leaf-subtree collapse via `lift_single_leaf`.
 //!   - LCP-jump for hot-namespace concentration (all dirty paths share prefix).
 //!   - Per-batch in-memory write-back cache so a node touched multiple times
 //!     in one batch is hashed once and written once.
+//!   - Length-filtered iteration so leaves and splits sharing one CF don't
+//!     confuse the leaf-count scans.
 
 use crate::consensus::bintree::{
     get_bit_be, mask_after_be, set_bit_be, Hash, Op, Path, ZERO_HASH,
@@ -47,8 +50,7 @@ use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-const CF_LEAVES: &str = "smt_leaves";
-const CF_SPLITS: &str = "smt_splits";
+const CF_HBSMT: &str = "hbsmt";
 
 pub struct HbsmtRdb {
     db: TransactionDB<MultiThreaded>,
@@ -79,19 +81,13 @@ impl HbsmtRdb {
         bbt.set_cache_index_and_filter_blocks(true);
         bbt.set_pin_l0_filter_and_index_blocks_in_cache(true);
 
-        let mut leaves_opts = Options::default();
-        leaves_opts.set_write_buffer_size(128 * 1024 * 1024);
-        leaves_opts.set_block_based_table_factory(&bbt);
-        leaves_opts.set_compression_type(DBCompressionType::None);
-
-        let mut splits_opts = Options::default();
-        splits_opts.set_write_buffer_size(256 * 1024 * 1024);
-        splits_opts.set_block_based_table_factory(&bbt);
-        splits_opts.set_compression_type(DBCompressionType::None);
+        let mut cf_opts = Options::default();
+        cf_opts.set_write_buffer_size(256 * 1024 * 1024);
+        cf_opts.set_block_based_table_factory(&bbt);
+        cf_opts.set_compression_type(DBCompressionType::None);
 
         let cfs = vec![
-            ColumnFamilyDescriptor::new(CF_LEAVES, leaves_opts),
-            ColumnFamilyDescriptor::new(CF_SPLITS, splits_opts),
+            ColumnFamilyDescriptor::new(CF_HBSMT, cf_opts),
         ];
         let txn_db_opts = TransactionDBOptions::default();
         let db = TransactionDB::<MultiThreaded>::open_cf_descriptors(
@@ -103,33 +99,32 @@ impl HbsmtRdb {
     }
 
     pub fn root(&self) -> Hash {
-        let cf_splits = self.db.cf_handle(CF_SPLITS).unwrap();
+        let cf_leaves = self.db.cf_handle(CF_HBSMT).unwrap();
         let key = split_key(&[0u8; 32], 0);
-        if let Some(v) = self.db.get_cf(&cf_splits, key).ok().flatten() {
-            return v.try_into().unwrap_or(self.empties[0]);
+        if let Some(v) = self.db.get_cf(&cf_leaves, key).ok().flatten() {
+            if v.len() == 32 {
+                return v.try_into().unwrap_or(self.empties[0]);
+            }
         }
         // No stored top-level split: the tree is empty, a single leaf is lifted
         // to the root, or all leaves cluster on one side of depth 0. Walk to compute.
-        let cf_leaves = self.db.cf_handle(CF_LEAVES).unwrap();
-        self.subtree_hash_db(&cf_leaves, &cf_splits, [0u8; 32], 0)
+        self.subtree_hash_db(&cf_leaves, [0u8; 32], 0)
     }
 
     /// Produce a proof for `(ns, key)` against the current root. Read-only;
     /// no transaction. Verify with [`smt_common::verify_hbsmt`].
     pub fn prove(&self, ns: Option<&[u8]>, k: &[u8]) -> HbsmtProof {
         let target = compute_namespace_path_hbsmt(ns.unwrap_or(b""), k);
-        let cf_leaves = self.db.cf_handle(CF_LEAVES).unwrap();
-        let cf_splits = self.db.cf_handle(CF_SPLITS).unwrap();
+        let cf_leaves = self.db.cf_handle(CF_HBSMT).unwrap();
         let mut siblings = Vec::new();
         let terminus = self.descend_for_proof(
-            &cf_leaves, &cf_splits, &target, [0u8; 32], 0, &mut siblings);
+            &cf_leaves, &target, [0u8; 32], 0, &mut siblings);
         HbsmtProof { siblings, terminus }
     }
 
     fn descend_for_proof(
         &self,
         cf_leaves: &Arc<BoundColumnFamily<'_>>,
-        cf_splits: &Arc<BoundColumnFamily<'_>>,
         target: &Path,
         prefix: Path,
         depth: u16,
@@ -157,22 +152,20 @@ impl HbsmtRdb {
                 let bit = get_bit_be(target, depth);
                 let (lp, rp) = child_prefixes(&prefix, depth);
                 let (target_prefix, sibling_prefix) = if bit == 0 { (lp, rp) } else { (rp, lp) };
-                let sibling_hash = self.subtree_hash_db(cf_leaves, cf_splits, sibling_prefix, depth + 1);
+                let sibling_hash = self.subtree_hash_db(cf_leaves, sibling_prefix, depth + 1);
                 siblings.push(sibling_hash);
-                self.descend_for_proof(cf_leaves, cf_splits, target, target_prefix, depth + 1, siblings)
+                self.descend_for_proof(cf_leaves, target, target_prefix, depth + 1, siblings)
             }
         }
     }
 
-    /// Read-only subtree hash for proof generation (no transaction).
-    /// Read-only subtree hash. **Correctness**: checks leaf count before
-    /// consulting the stored split CF — stored splits in a collapsed subtree
-    /// are stale and must not be trusted. Matches the invariant enforced in
-    /// the transactional `subtree_hash` and in `Hbsmt::subtree_hash`.
+    /// Read-only subtree hash. Checks leaf count before consulting the
+    /// stored split — stored splits in a collapsed subtree are stale and
+    /// must not be trusted. Mirrors the invariant in `Ctx::subtree_hash`
+    /// and `Hbsmt::subtree_hash`.
     fn subtree_hash_db(
         &self,
         cf_leaves: &Arc<BoundColumnFamily<'_>>,
-        cf_splits: &Arc<BoundColumnFamily<'_>>,
         prefix: Path,
         depth: u16,
     ) -> Hash {
@@ -194,12 +187,12 @@ impl HbsmtRdb {
                 lift_single_leaf(lh, &p, depth, &self.empties)
             }
             _ => {
-                if let Some(v) = self.db.get_cf(cf_splits, split_key(&prefix, depth)).ok().flatten() {
+                if let Some(v) = self.db.get_cf(cf_leaves, split_key(&prefix, depth)).ok().flatten() {
                     return v.try_into().unwrap_or(self.empties[depth as usize]);
                 }
                 let (lp, rp) = child_prefixes(&prefix, depth);
-                let l = self.subtree_hash_db(cf_leaves, cf_splits, lp, depth + 1);
-                let r = self.subtree_hash_db(cf_leaves, cf_splits, rp, depth + 1);
+                let l = self.subtree_hash_db(cf_leaves, lp, depth + 1);
+                let r = self.subtree_hash_db(cf_leaves, rp, depth + 1);
                 hbsmt_node_hash(&l, &r)
             }
         }
@@ -213,102 +206,65 @@ impl HbsmtRdb {
     ) -> (Option<(Path, Hash, Hash)>, bool) {
         let mut iter = self.db.raw_iterator_cf(cf_leaves);
         iter.seek(lo);
-        if !iter.valid() { return (None, false); }
-        let k = match iter.key() { Some(k) => k, None => return (None, false) };
-        if k > hi.as_slice() { return (None, false); }
-        let mut path = [0u8; 32];
-        path.copy_from_slice(k);
-        let v = iter.value().unwrap();
-        let (id, val) = match decode_leaf(v) {
-            Some(t) => t,
-            None => return (None, false),
-        };
-        iter.next();
-        let more = iter.valid()
-            && iter.key().map(|k2| k2 <= hi.as_slice()).unwrap_or(false);
-        (Some((path, id, val)), more)
+        let mut first: Option<(Path, Hash, Hash)> = None;
+        let mut more = false;
+        while iter.valid() {
+            let k = match iter.key() { Some(k) => k, None => break };
+            if k > hi.as_slice() { break; }
+            if k.len() != 32 { iter.next(); continue; }
+            let v = match iter.value() { Some(v) => v, None => { iter.next(); continue; } };
+            let (id, val) = match decode_leaf(v) {
+                Some(t) => t,
+                None => { iter.next(); continue; }
+            };
+            let mut path = [0u8; 32];
+            path.copy_from_slice(k);
+            if first.is_none() {
+                first = Some((path, id, val));
+                iter.next();
+            } else {
+                more = true;
+                break;
+            }
+        }
+        (first, more)
     }
 
     /// Apply ops in a single transaction. Reads through the txn so intra-batch
-    /// writes are visible to subsequent reads.
+    /// writes are visible to subsequent reads. Prefetches existing leaves via
+    /// `multi_get_cf` for ~2-3× faster cold reads vs individual gets.
     pub fn batch_update(&self, ops: Vec<Op>) {
         if ops.is_empty() { return; }
-
-        // 1. Collapse multi-writes to same key. Each leaf stored as
-        //    (identity_hash, value_hash) so proofs can distinguish
-        //    Mismatch from NonExistence under (logic-error) path-collision.
-        let mut latest: BTreeMap<Path, Option<(Hash, Hash)>> = BTreeMap::new();
-        for op in ops {
-            match op {
-                Op::Insert(ns, k, v) => {
-                    let path = compute_namespace_path_hbsmt(ns.as_deref().unwrap_or(b""), &k);
-                    let id = identity_hash(&path, ns.as_deref().unwrap_or(b""), &k);
-                    let val = value_hash(&v);
-                    latest.insert(path, Some((id, val)));
-                }
-                Op::Delete(ns, k) => {
-                    let path = compute_namespace_path_hbsmt(ns.as_deref().unwrap_or(b""), &k);
-                    latest.insert(path, None);
-                }
-            }
-        }
-
-        let cf_leaves = self.db.cf_handle(CF_LEAVES).unwrap();
-        let cf_splits = self.db.cf_handle(CF_SPLITS).unwrap();
+        let latest = collapse_ops_to_latest(ops);
+        let cf = self.db.cf_handle(CF_HBSMT).unwrap();
         let txn = self.db.transaction();
 
-        // 2. Apply leaf changes; collect dirty paths.
-        //    Batch-prefetch existing values via multi_get_cf (RocksDB's bulk
-        //    read path is roughly 2-3× faster than individual gets when keys
-        //    aren't already in block cache).
         let paths_ordered: Vec<Path> = latest.keys().copied().collect();
         let mg_keys: Vec<(&Arc<BoundColumnFamily>, &Path)> =
-            paths_ordered.iter().map(|p| (&cf_leaves, p)).collect();
+            paths_ordered.iter().map(|p| (&cf, p)).collect();
         let prev_values = txn.multi_get_cf(mg_keys.iter().map(|(c, k)| (*c, *k)));
 
         let mut dirty: Vec<Path> = Vec::with_capacity(latest.len());
         for (i, path) in paths_ordered.iter().enumerate() {
             let prev = prev_values.get(i).and_then(|r| r.as_ref().ok()).cloned().flatten();
-            let new_val = latest.get(path).unwrap();
-            match new_val {
+            match latest.get(path).unwrap() {
                 Some((id, val)) => {
                     let encoded = encode_leaf(id, val);
                     if prev.as_deref() != Some(&encoded[..]) {
-                        txn.put_cf(&cf_leaves, path, encoded).unwrap();
+                        txn.put_cf(&cf, path, encoded).unwrap();
                         dirty.push(*path);
                     }
                 }
                 None => {
                     if prev.is_some() {
-                        txn.delete_cf(&cf_leaves, path).unwrap();
+                        txn.delete_cf(&cf, path).unwrap();
                         dirty.push(*path);
                     }
                 }
             }
         }
-        if dirty.is_empty() {
-            txn.commit().unwrap();
-            return;
-        }
-
-        // 3. Descend and rehash. Use a per-batch in-memory cache to avoid
-        //    re-reading nodes from RocksDB within the same descent.
-        let mut ctx = Ctx {
-            txn: &txn,
-            cf_leaves: &cf_leaves,
-            cf_splits: &cf_splits,
-            empties: &self.empties,
-            split_cache: FxHashMap::default(),
-            split_writes: FxHashMap::default(),
-            split_deletes: Vec::new(),
-        };
-        let _ = descend_and_rehash(&mut ctx, [0u8; 32], 0, &dirty);
-
-        for ((path, depth), hash) in ctx.split_writes {
-            txn.put_cf(&cf_splits, split_key(&path, depth), hash).unwrap();
-        }
-        for (path, depth) in ctx.split_deletes {
-            let _ = txn.delete_cf(&cf_splits, split_key(&path, depth));
+        if !dirty.is_empty() {
+            descend_and_flush(&txn, &cf, &self.empties, &dirty);
         }
         txn.commit().unwrap();
     }
@@ -338,7 +294,7 @@ impl<'a> Ctx<'a> {
         let key = (*prefix, depth);
         if let Some(h) = self.split_cache.get(&key) { return Some(*h); }
         if let Some(h) = self.split_writes.get(&key) { return Some(*h); }
-        match self.txn.get_cf(self.cf_splits, split_key(prefix, depth)) {
+        match self.txn.get_cf(self.cf_leaves, split_key(prefix, depth)) {
             Ok(Some(v)) => {
                 let h: Hash = v.try_into().unwrap_or(ZERO_HASH);
                 self.split_cache.insert(key, h);
@@ -359,24 +315,84 @@ impl<'a> Ctx<'a> {
         self.split_deletes.push((prefix, depth));
     }
 
-    /// Two leaves at or after `lo`, matching `prefix` for `prefix_bits`, ≤ `hi`.
-    /// Returns `(path, identity_hash, value_hash)` per leaf.
+    /// Two leaves at or after `lo`, ≤ `hi`. Filters out 34-byte split keys
+    /// that share the CF with 32-byte leaf keys.
     fn first_two_leaves_in(&self, lo: &Path, hi: &Path) -> (Option<(Path, Hash, Hash)>, bool) {
         let mut iter = self.txn.raw_iterator_cf(self.cf_leaves);
         iter.seek(lo);
-        if !iter.valid() { return (None, false); }
-        let k = iter.key().unwrap();
-        if k > hi.as_slice() { return (None, false); }
-        let mut path = [0u8; 32];
-        path.copy_from_slice(k);
-        let v = iter.value().unwrap();
-        let (id, val) = match decode_leaf(v) {
-            Some(t) => t,
-            None => return (None, false),
-        };
-        iter.next();
-        let more = iter.valid() && iter.key().map(|k2| k2 <= hi.as_slice()).unwrap_or(false);
-        (Some((path, id, val)), more)
+        let mut first: Option<(Path, Hash, Hash)> = None;
+        let mut more = false;
+        while iter.valid() {
+            let k = match iter.key() { Some(k) => k, None => break };
+            if k > hi.as_slice() { break; }
+            if k.len() != 32 { iter.next(); continue; }
+            let v = match iter.value() { Some(v) => v, None => { iter.next(); continue; } };
+            let (id, val) = match decode_leaf(v) {
+                Some(t) => t,
+                None => { iter.next(); continue; }
+            };
+            let mut path = [0u8; 32];
+            path.copy_from_slice(k);
+            if first.is_none() {
+                first = Some((path, id, val));
+                iter.next();
+            } else {
+                more = true;
+                break;
+            }
+        }
+        (first, more)
+    }
+}
+
+/// Collapse a batch of ops to a sorted map of `path → Option<(id, val)>`
+/// (None = delete). Last write wins per path; Penumbra-style mutate-in-place.
+fn collapse_ops_to_latest(ops: Vec<Op>) -> BTreeMap<Path, Option<(Hash, Hash)>> {
+    let mut latest = BTreeMap::new();
+    for op in ops {
+        match op {
+            Op::Insert(ns, k, v) => {
+                let ns_ref = ns.as_deref().unwrap_or(b"");
+                let path = compute_namespace_path_hbsmt(ns_ref, &k);
+                let id = identity_hash(&path, ns_ref, &k);
+                let val = value_hash(&v);
+                latest.insert(path, Some((id, val)));
+            }
+            Op::Delete(ns, k) => {
+                let ns_ref = ns.as_deref().unwrap_or(b"");
+                let path = compute_namespace_path_hbsmt(ns_ref, &k);
+                latest.insert(path, None);
+            }
+        }
+    }
+    latest
+}
+
+/// Descend the dirty set, rehash every touched internal node, and flush the
+/// per-batch split writes/deletes to the txn. Shared by `HbsmtRdb` and
+/// `hbsmt_batch_update_env` — both use the same single-CF layout where
+/// `cf_leaves` and `cf_splits` point at the same handle.
+fn descend_and_flush(
+    txn: &Transaction<TransactionDB<MultiThreaded>>,
+    cf: &Arc<BoundColumnFamily>,
+    empties: &[Hash; 257],
+    dirty: &[Path],
+) {
+    let mut ctx = Ctx {
+        txn,
+        cf_leaves: cf,
+        cf_splits: cf,
+        empties,
+        split_cache: FxHashMap::default(),
+        split_writes: FxHashMap::default(),
+        split_deletes: Vec::new(),
+    };
+    let _ = descend_and_rehash(&mut ctx, [0u8; 32], 0, dirty);
+    for ((path, depth), hash) in ctx.split_writes {
+        txn.put_cf(cf, split_key(&path, depth), hash).unwrap();
+    }
+    for (path, depth) in ctx.split_deletes {
+        let _ = txn.delete_cf(cf, split_key(&path, depth));
     }
 }
 
@@ -522,6 +538,78 @@ fn subtree_hash(ctx: &mut Ctx, prefix: Path, depth: u16) -> Hash {
 
 // Pure helpers live in `smt_common.rs` — see those for `lift_single_leaf`,
 // `lcp_depth`, `subtree_range`, `child_prefixes`, `make_empties`, `hbsmt_node_hash`.
+
+// ============================================================================
+// Env-based wrappers: run the same algorithm (Ctx + descend_and_rehash) against
+// an externally-managed TransactionDB via `ApplyEnv`. Stores both leaves and
+// splits in a SINGLE column family — the algorithm tolerates this because
+// leaves are 32-byte keys and splits are 34-byte keys, and `first_two_leaves_in`
+// filters by length. Intended use: the chain's `contractstate_tree` CF (after
+// the one-time Hubt → HBSMT migration).
+// ============================================================================
+
+use crate::consensus::consensus_apply::ApplyEnv;
+
+/// Compute the HBSMT root from `env.txn` against `cf_name`. Same algorithm as
+/// `HbsmtRdb::root`; reads through env.txn so pending writes are visible.
+pub fn hbsmt_root_env(env: &mut ApplyEnv, cf_name: &str) -> [u8; 32] {
+    let cf = env.db.cf_handle(cf_name).unwrap();
+    let key = split_key(&[0u8; 32], 0);
+    if let Some(v) = env.txn.get_cf(&cf, key).ok().flatten() {
+        if v.len() == 32 {
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&v);
+            return h;
+        }
+    }
+    // No stored top-level split: walk the tree. Construct an ephemeral Ctx
+    // with empty in-memory caches; we only need `subtree_hash` which reads.
+    let empties = make_empties();
+    let mut ctx = Ctx {
+        txn: &env.txn,
+        cf_leaves: &cf,
+        cf_splits: &cf,           // SAME CF — length filter disambiguates
+        empties: &empties,
+        split_cache: FxHashMap::default(),
+        split_writes: FxHashMap::default(),
+        split_deletes: Vec::new(),
+    };
+    subtree_hash(&mut ctx, [0u8; 32], 0)
+}
+
+/// Incremental batch update of the env-based HBSMT in `cf_name`. Writes go
+/// through `env.txn` so they commit atomically with the rest of the block's
+/// mutations.
+pub fn hbsmt_batch_update_env(env: &mut ApplyEnv, cf_name: &str, ops: Vec<Op>) {
+    if ops.is_empty() { return; }
+    let cf = env.db.cf_handle(cf_name).unwrap();
+    let latest = collapse_ops_to_latest(ops);
+
+    let mut dirty: Vec<Path> = Vec::with_capacity(latest.len());
+    for (path, val) in &latest {
+        let prev = env.txn.get_cf(&cf, &path[..]).ok().flatten();
+        match val {
+            Some((id, v)) => {
+                let encoded = encode_leaf(id, v);
+                if prev.as_deref() != Some(&encoded[..]) {
+                    env.txn.put_cf(&cf, &path[..], encoded).unwrap();
+                    dirty.push(*path);
+                }
+            }
+            None => {
+                if prev.is_some() {
+                    env.txn.delete_cf(&cf, &path[..]).unwrap();
+                    dirty.push(*path);
+                }
+            }
+        }
+    }
+    if dirty.is_empty() { return; }
+
+    let empties = make_empties();
+    descend_and_flush(&env.txn, &cf, &empties, &dirty);
+}
+
 
 // ============================================================================
 // TESTS + one shipping benchmark (1M hot-namespace 10k batch)
