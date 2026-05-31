@@ -732,7 +732,7 @@ fn apply_entry<'a>(
     let write_opts = WriteOptions::default();
     let txn = db.db.transaction_opt(&write_opts, &txn_opts);
 
-    let (txn, muts, muts_rev, receipts, root_receipts, root_contractstate) = consensus::consensus_apply::apply_entry(
+    let (txn, muts, muts_rev, receipts, root_receipts, root_contractstate, root_contractstate_hbsmt) = consensus::consensus_apply::apply_entry(
         &db.db,
         txn,
         entry,
@@ -749,6 +749,9 @@ fn apply_entry<'a>(
     ob1.as_mut_slice().copy_from_slice(&root_receipts);
     let mut ob2 = OwnedBinary::new(root_contractstate.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
     ob2.as_mut_slice().copy_from_slice(&root_contractstate);
+    // SHIM: shadow HBSMT root (observation only, not consensus). Remove at hardfork.
+    let mut ob3 = OwnedBinary::new(root_contractstate_hbsmt.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
+    ob3.as_mut_slice().copy_from_slice(&root_contractstate_hbsmt);
 
     let mut receipts_list = Vec::new();
     for r in receipts {
@@ -769,6 +772,7 @@ fn apply_entry<'a>(
         receipts_list,
         Binary::from_owned(ob1, env).encode(env),
         Binary::from_owned(ob2, env).encode(env),
+        Binary::from_owned(ob3, env).encode(env),
     )
         .encode(env))
 }

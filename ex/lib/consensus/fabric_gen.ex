@@ -382,7 +382,7 @@ defmodule FabricGen do
       start_contract_exec = :os.system_time(1000)
 
       entry = next_entry
-      {rtx, m, m_rev, receipts, root_receipts, root_contractstate} = RDB.apply_entry(db, RDB.vecpak_encode(entry),
+      {rtx, m, m_rev, receipts, root_receipts, root_contractstate, root_contractstate_hbsmt} = RDB.apply_entry(db, RDB.vecpak_encode(entry),
         Application.fetch_env!(:ama, :trainer_pk), Application.fetch_env!(:ama, :trainer_sk),
         !!Application.fetch_env!(:ama, :testnet), Map.keys(Application.fetch_env!(:ama, :keys_by_pk))
       )
@@ -407,7 +407,7 @@ defmodule FabricGen do
       m_rev = rebuild_m_fn.(m_rev)
 
       #receipts != [] && IO.inspect receipts
-      #IO.inspect {entry.header.height, :erlang.crc32(root_receipts), :erlang.crc32(root_contractstate)}
+      #IO.inspect {entry.header.height, :erlang.crc32(root_receipts), :erlang.crc32(root_contractstate), Base58.encode(root_contractstate_hbsmt)}
       #IO.inspect Enum.map(m, & Map.put(&1, :key, RocksDB.ascii_dump(&1.key))), limit: 11111111111
 
       #call the exit
@@ -420,7 +420,7 @@ defmodule FabricGen do
 
       RocksDB.put("temporal_tip", next_entry.hash, %{rtx: rtx, cf: cf.sysconf})
 
-      DB.Entry.apply_into_main_chain(next_entry, mutations_hash, m_rev, receipts, root_receipts, root_contractstate, %{rtx: rtx})
+      DB.Entry.apply_into_main_chain(next_entry, mutations_hash, m_rev, receipts, root_receipts, root_contractstate_hbsmt, %{rtx: rtx})
       if Application.fetch_env!(:ama, :archival_node) do
           DB.Entry.apply_into_main_chain_muts(next_entry.hash, m, %{rtx: rtx})
       end

@@ -34,7 +34,10 @@ defmodule DB.API do
       "entry", "entry_meta",
       "attestation",
       "tx", "tx_filter",
-      "contractstate", "contractstate_tree"
+      "contractstate", "contractstate_tree",
+      # SHIM: shadow HBSMT tree, parallel to the legacy Hubt `contractstate_tree`.
+      # Remove at the HBSMT hardfork.
+      "contractstate_tree_hbsmt"
     ]
     try do
       {db_ref, cf_ref_list} = open_with_migration(path, cfs)
@@ -45,6 +48,7 @@ defmodule DB.API do
         attestation_cf,
         tx_cf, tx_filter_cf,
         contractstate_cf, contractstate_tree_cf,
+        contractstate_tree_hbsmt_cf,
       ] = cf_ref_list
       cf = %{
         default: default_cf,
@@ -52,7 +56,8 @@ defmodule DB.API do
         entry: entry_cf, entry_meta: entry_meta_cf,
         attestation: attestation_cf,
         tx: tx_cf, tx_filter: tx_filter_cf,
-        contractstate: contractstate_cf, contractstate_tree: contractstate_tree_cf
+        contractstate: contractstate_cf, contractstate_tree: contractstate_tree_cf,
+        contractstate_tree_hbsmt: contractstate_tree_hbsmt_cf,
       }
       :persistent_term.put({:rocksdb, Fabric}, %{db: db_ref, cf_list: cf_ref_list, cf: cf, path: path})
     catch
