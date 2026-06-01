@@ -246,7 +246,10 @@ impl HbsmtRdb {
 
         let mut dirty: Vec<Path> = Vec::with_capacity(latest.len());
         for (i, path) in paths_ordered.iter().enumerate() {
-            let prev = prev_values.get(i).and_then(|r| r.as_ref().ok()).cloned().flatten();
+            let prev = prev_values[i]
+                .as_ref()
+                .expect("HBSMT batch_update: multi_get_cf read error")
+                .clone();
             match latest.get(path).unwrap() {
                 Some((id, val)) => {
                     let encoded = encode_leaf(id, val);
@@ -587,7 +590,9 @@ pub fn hbsmt_batch_update_env(env: &mut ApplyEnv, cf_name: &str, ops: Vec<Op>) {
 
     let mut dirty: Vec<Path> = Vec::with_capacity(latest.len());
     for (path, val) in &latest {
-        let prev = env.txn.get_cf(&cf, &path[..]).ok().flatten();
+        let prev = env.txn
+            .get_cf(&cf, &path[..])
+            .expect("HBSMT hbsmt_batch_update_env: get_cf read error");
         match val {
             Some((id, v)) => {
                 let encoded = encode_leaf(id, v);

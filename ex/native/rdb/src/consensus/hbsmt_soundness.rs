@@ -1979,3 +1979,680 @@ fn identity_hash_binds_path_ns_key() {
     let lh3 = leaf_hash_from_components(&id_a, &value_hash(b"999"));
     assert_ne!(lh1, lh3);
 }
+
+// ============================================================================
+// Adversarial regression suite (HBSMT soundness audit, 2026-05).
+//
+// Permanent home for the attack battery that the audit ran empirically. Each
+// test ASSERTS the attack is BLOCKED: a failure here means a real vuln (a
+// forged Included/Mismatch, a censored present key, a stale split / divergent
+// root, or a panic). Covers: forge-inclusion, forge-mismatch, censorship,
+// stop-depth manipulation, empty-terminus reconstruction, stop boundaries,
+// panic probes, stale-split / top-split state corruption, and single-CF
+// leaf/split disambiguation.
+// ============================================================================
+mod audit_attacks {
+    use super::*;
+
+    /// Deterministic LCG (no rand dependency) — same constants as the existing
+    /// shuffle tests.
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
+    }
+
+    fn rand_hash(state: &mut u64) -> Hash {
+        let mut h = [0u8; 32];
+        for chunk in h.chunks_mut(8) {
+            let r = lcg(state).to_le_bytes();
+            chunk.copy_from_slice(&r[..chunk.len()]);
+        }
+        h
+    }
+
+    /// Two distinct namespace strings sharing `sha256(ns)[0..4]` (the path's
+    /// 4-byte locality bucket). Birthday-resolves well under 200k tries.
+    fn find_4byte_ns_collision() -> (Vec<u8>, Vec<u8>) {
+        use std::collections::HashMap;
+        let mut seen: HashMap<[u8; 4], Vec<u8>> = HashMap::new();
+        let mut i: u64 = 0;
+        loop {
+            let cand = format!("ns-collide-{}", i).into_bytes();
+            let path = compute_namespace_path_hbsmt(&cand, b"x");
+            let mut pre = [0u8; 4];
+            pre.copy_from_slice(&path[0..4]);
+            if let Some(other) = seen.get(&pre) {
+                if other != &cand {
+                    return (other.clone(), cand);
+                }
+            } else {
+                seen.insert(pre, cand);
+            }
+            i += 1;
+            assert!(i < 5_000_000, "no 4-byte ns collision found");
+        }
+    }
+
+    // --- 1. Forge inclusion of an absent key --------------------------------
+    /// Attacker supplies a Leaf terminus carrying exactly the identity+value it
+    /// wants asserted for a key the tree never stored, sweeping every stop and
+    /// many sibling fillings. verify() must never return Included.
+    #[test]
+    fn audit_forge_inclusion_from_absent_key_blocked() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let ops: Vec<Op> = (0..200u32)
+            .map(|i| ins_ns(b"ns-hot", format!("key-{:04}", i).as_bytes(), format!("v{}", i).as_bytes()))
+            .collect();
+        smt.batch_update(ops);
+        let root = smt.root();
+        let empties = make_empties();
+
+        let absent_k = b"absent-target-key-zzz";
+        let v_want = b"9999999";
+        let target = compute_namespace_path_hbsmt(b"", absent_k);
+        let id = identity_hash(&target, b"", absent_k);
+        let val = value_hash(v_want);
+        let forged = HbsmtTerminus::Leaf { path: target, identity_hash: id, value_hash: val };
+
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for stop in 0..=64usize {
+            for trial in 0..40usize {
+                let mut sibs: Vec<Hash> = Vec::with_capacity(stop);
+                for d in 0..stop {
+                    let s = match trial % 3 {
+                        0 => [0u8; 32],
+                        1 => empties[d + 1],
+                        _ => rand_hash(&mut state),
+                    };
+                    sibs.push(s);
+                }
+                let proof = HbsmtProof { siblings: sibs, terminus: forged.clone() };
+                let status = verify_hbsmt(&root, &proof, None, absent_k, v_want);
+                assert_ne!(
+                    status, HbsmtVerifyStatus::Included,
+                    "forged inclusion for absent key accepted at stop={} trial={}", stop, trial
+                );
+            }
+        }
+    }
+
+    // --- 2. Forge inclusion with a wrong value for a present key ------------
+    #[test]
+    fn audit_forge_inclusion_different_value_blocked() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let ops: Vec<Op> = (0..32u32)
+            .map(|i| ins(format!("present-{:02}", i).as_bytes(), format!("real-{}", i).as_bytes()))
+            .collect();
+        smt.batch_update(ops);
+        let root = smt.root();
+
+        for i in 0..16u32 {
+            let k = format!("present-{:02}", i);
+            let real_v = format!("real-{}", i);
+            let proof = smt.prove(None, k.as_bytes());
+            assert_eq!(
+                verify_hbsmt(&root, &proof, None, k.as_bytes(), real_v.as_bytes()),
+                HbsmtVerifyStatus::Included
+            );
+            let (path, id) = match proof.terminus.clone() {
+                HbsmtTerminus::Leaf { path, identity_hash: id, .. } => (path, id),
+                HbsmtTerminus::Empty => panic!("present key {} had Empty terminus", k),
+            };
+            for y in 0..8u32 {
+                let yv = format!("forged-value-{}", y);
+                // Real identity, forged value → leaf hash changes → walk-up
+                // misses the root → Invalid (never Included), at the honest stop
+                // and at every truncated stop.
+                for cut in (0..=proof.siblings.len()).rev() {
+                    let mut sibs = proof.siblings.clone();
+                    sibs.truncate(cut);
+                    let p = HbsmtProof {
+                        siblings: sibs,
+                        terminus: HbsmtTerminus::Leaf { path, identity_hash: id, value_hash: value_hash(yv.as_bytes()) },
+                    };
+                    assert_ne!(
+                        verify_hbsmt(&root, &p, None, k.as_bytes(), yv.as_bytes()),
+                        HbsmtVerifyStatus::Included,
+                        "forged value accepted as Included key={} y={} stop={}", k, y, cut
+                    );
+                }
+            }
+        }
+    }
+
+    // --- 3. Forge mismatch via 4-byte cross-namespace collision -------------
+    /// A leaf (ns_a, k)=SECRET exists; an engineered ns_b shares the 4-byte path
+    /// bucket (same key ⇒ identical full path). Querying (ns_b, k) must report
+    /// NonExistence, never Mismatch (which would leak "a value lives here").
+    #[test]
+    fn audit_forge_mismatch_cross_ns_collision_blocked() {
+        let (ns_a, ns_b) = find_4byte_ns_collision();
+        assert_ne!(ns_a, ns_b);
+        let p_a = compute_namespace_path_hbsmt(&ns_a, b"k");
+        let p_b = compute_namespace_path_hbsmt(&ns_b, b"k");
+        assert_eq!(p_a, p_b, "same key + colliding 4-byte ns prefix → full path collision");
+
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        smt.batch_update(vec![ins_opt(Some(&ns_a[..]), b"k", b"SECRET")]);
+        let root = smt.root();
+        let proof = smt.prove(Some(&ns_a[..]), b"k");
+        assert_eq!(
+            verify_hbsmt(&root, &proof, Some(&ns_a[..]), b"k", b"SECRET"),
+            HbsmtVerifyStatus::Included
+        );
+
+        let values: [&[u8]; 4] = [b"SECRET", b"WRONG", b"", b"0"];
+        for v in values {
+            let status = verify_hbsmt(&root, &proof, Some(&ns_b[..]), b"k", v);
+            assert_eq!(
+                status, HbsmtVerifyStatus::NonExistence,
+                "cross-ns collision query leaked status {:?} for value {:?}", status, v
+            );
+        }
+    }
+
+    // --- 4. Forge mismatch for an absent key (terminus malleability) --------
+    #[test]
+    fn audit_forge_mismatch_for_absent_key_blocked() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let ops: Vec<Op> = (0..150u32)
+            .map(|i| ins_ns(b"ns-x", format!("k-{:03}", i).as_bytes(), b"v"))
+            .collect();
+        smt.batch_update(ops);
+        let root = smt.root();
+
+        let absent_k = b"never-written-key";
+        let target = compute_namespace_path_hbsmt(b"", absent_k);
+        let claimed_id = identity_hash(&target, b"", absent_k);
+        let honest = smt.prove(None, absent_k);
+        let mut state = 0xfeed_face_dead_beefu64;
+
+        for trial in 0..64usize {
+            let (tid, tval) = match trial % 4 {
+                0 => (claimed_id, value_hash(b"anything")),
+                1 => (rand_hash(&mut state), value_hash(b"v")),
+                2 => (claimed_id, value_hash(b"v")),
+                _ => (rand_hash(&mut state), rand_hash(&mut state)),
+            };
+            let mut tpath = target;
+            if trial % 2 == 0 && !honest.siblings.is_empty() {
+                let b = (lcg(&mut state) as u16) % (honest.siblings.len() as u16);
+                let bit = get_bit_be(&tpath, b);
+                set_bit_be(&mut tpath, b, 1 - bit);
+            }
+            let proof = HbsmtProof {
+                siblings: honest.siblings.clone(),
+                terminus: HbsmtTerminus::Leaf { path: tpath, identity_hash: tid, value_hash: tval },
+            };
+            let status = verify_hbsmt(&root, &proof, None, absent_k, b"anything");
+            assert_ne!(status, HbsmtVerifyStatus::Mismatch, "forged Mismatch for absent key, trial {}", trial);
+            assert_ne!(status, HbsmtVerifyStatus::Included, "forged Included for absent key, trial {}", trial);
+        }
+    }
+
+    // --- 5. Censorship: a present key can never be coerced to NonExistence --
+    #[test]
+    fn audit_censorship_present_key_never_nonexistence() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let ops: Vec<Op> = (0..64u32)
+            .map(|i| ins_ns(b"ns-c", format!("ck-{:03}", i).as_bytes(), format!("cv-{}", i).as_bytes()))
+            .collect();
+        smt.batch_update(ops);
+        let root = smt.root();
+
+        for i in 0..64u32 {
+            let k = format!("ck-{:03}", i);
+            let v = format!("cv-{}", i);
+            let honest = smt.prove(Some(b"ns-c"), k.as_bytes());
+            assert_eq!(
+                verify_hbsmt(&root, &honest, Some(b"ns-c"), k.as_bytes(), v.as_bytes()),
+                HbsmtVerifyStatus::Included
+            );
+            let (path0, id0, val0) = match honest.terminus.clone() {
+                HbsmtTerminus::Leaf { path, identity_hash: id, value_hash: vh } => (path, id, vh),
+                HbsmtTerminus::Empty => panic!("present key {} had Empty terminus", k),
+            };
+            // Flip every terminus.path bit one at a time.
+            for b in 0..256u16 {
+                let mut p = path0;
+                let bit = get_bit_be(&p, b);
+                set_bit_be(&mut p, b, 1 - bit);
+                let proof = HbsmtProof {
+                    siblings: honest.siblings.clone(),
+                    terminus: HbsmtTerminus::Leaf { path: p, identity_hash: id0, value_hash: val0 },
+                };
+                assert_ne!(
+                    verify_hbsmt(&root, &proof, Some(b"ns-c"), k.as_bytes(), v.as_bytes()),
+                    HbsmtVerifyStatus::NonExistence,
+                    "path-bit flip {} censored present key {}", b, k
+                );
+            }
+            // Truncate / extend the sibling vector.
+            for cut in 0..honest.siblings.len() {
+                let mut sibs = honest.siblings.clone();
+                sibs.truncate(cut);
+                let proof = HbsmtProof { siblings: sibs, terminus: honest.terminus.clone() };
+                assert_ne!(
+                    verify_hbsmt(&root, &proof, Some(b"ns-c"), k.as_bytes(), v.as_bytes()),
+                    HbsmtVerifyStatus::NonExistence,
+                    "sibling truncation to {} censored key {}", cut, k
+                );
+            }
+            for ext in 1..=4usize {
+                let mut sibs = honest.siblings.clone();
+                for _ in 0..ext { sibs.push([0u8; 32]); }
+                let proof = HbsmtProof { siblings: sibs, terminus: honest.terminus.clone() };
+                assert_ne!(
+                    verify_hbsmt(&root, &proof, Some(b"ns-c"), k.as_bytes(), v.as_bytes()),
+                    HbsmtVerifyStatus::NonExistence,
+                    "sibling extension by {} censored key {}", ext, k
+                );
+            }
+        }
+    }
+
+    // --- 6. Stop-depth manipulation never yields a wrong status -------------
+    #[test]
+    fn audit_stop_depth_manipulation_no_wrong_status() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let ops: Vec<Op> = (0..120u32)
+            .map(|i| ins_ns(b"ns-s", format!("s-{:03}", i).as_bytes(), format!("sv-{}", i).as_bytes()))
+            .collect();
+        smt.batch_update(ops);
+        let root = smt.root();
+        let empties = make_empties();
+        let mut state = 0x0bad_c0de_0bad_c0deu64;
+
+        // Present key — never NonExistence/Mismatch.
+        let pk = "s-007";
+        let pv = "sv-7";
+        let honest = smt.prove(Some(b"ns-s"), pk.as_bytes());
+        let extend = |sibs: &[Hash], ext: usize, garbage: bool, st: &mut u64| -> Vec<Hash> {
+            let mut out = sibs.to_vec();
+            for j in 0..ext {
+                let d = sibs.len() + j;
+                out.push(if garbage || d + 1 > 256 { rand_hash(st) } else { empties[d + 1] });
+            }
+            out
+        };
+        for ext in 0..=8usize {
+            for garbage in [false, true] {
+                let proof = HbsmtProof { siblings: extend(&honest.siblings, ext, garbage, &mut state), terminus: honest.terminus.clone() };
+                let status = verify_hbsmt(&root, &proof, Some(b"ns-s"), pk.as_bytes(), pv.as_bytes());
+                assert_ne!(status, HbsmtVerifyStatus::NonExistence);
+                assert_ne!(status, HbsmtVerifyStatus::Mismatch);
+            }
+        }
+        for cut in 0..honest.siblings.len() {
+            let mut sibs = honest.siblings.clone();
+            sibs.truncate(cut);
+            let proof = HbsmtProof { siblings: sibs, terminus: honest.terminus.clone() };
+            let status = verify_hbsmt(&root, &proof, Some(b"ns-s"), pk.as_bytes(), pv.as_bytes());
+            assert_ne!(status, HbsmtVerifyStatus::NonExistence);
+            assert_ne!(status, HbsmtVerifyStatus::Mismatch);
+        }
+
+        // Absent key — never Included/Mismatch.
+        let ak = "absent-s-key";
+        let honest_a = smt.prove(None, ak.as_bytes());
+        for ext in 0..=8usize {
+            for garbage in [false, true] {
+                let proof = HbsmtProof { siblings: extend(&honest_a.siblings, ext, garbage, &mut state), terminus: honest_a.terminus.clone() };
+                let status = verify_hbsmt(&root, &proof, None, ak.as_bytes(), b"whatever");
+                assert_ne!(status, HbsmtVerifyStatus::Included);
+                assert_ne!(status, HbsmtVerifyStatus::Mismatch);
+            }
+        }
+        for cut in 0..honest_a.siblings.len() {
+            let mut sibs = honest_a.siblings.clone();
+            sibs.truncate(cut);
+            let proof = HbsmtProof { siblings: sibs, terminus: honest_a.terminus.clone() };
+            let status = verify_hbsmt(&root, &proof, None, ak.as_bytes(), b"whatever");
+            assert_ne!(status, HbsmtVerifyStatus::Included);
+            assert_ne!(status, HbsmtVerifyStatus::Mismatch);
+        }
+    }
+
+    // --- 7. Empty terminus cannot reconstruct a populated root --------------
+    #[test]
+    fn audit_empty_terminus_cannot_match_populated_root() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let ops: Vec<Op> = (0..64u32)
+            .map(|i| ins_ns(b"ns-e", format!("e-{:02}", i).as_bytes(), format!("ev-{}", i).as_bytes()))
+            .collect();
+        smt.batch_update(ops);
+        let root = smt.root();
+        let empties = make_empties();
+        assert_ne!(root, empties[0]);
+
+        // Empty terminus + correct empty siblings reconstructs empties[0] ≠ root.
+        let sibs: Vec<Hash> = (0..256usize).map(|d| empties[d + 1]).collect();
+        let proof = HbsmtProof { siblings: sibs, terminus: HbsmtTerminus::Empty };
+        assert_eq!(verify_hbsmt(&root, &proof, None, b"anything", b"v"), HbsmtVerifyStatus::Invalid);
+
+        // Empty terminus at a present key's honest stop → Invalid (the real
+        // subtree there is non-empty), never NonExistence.
+        for i in 0..64u32 {
+            let k = format!("e-{:02}", i);
+            let honest = smt.prove(Some(b"ns-e"), k.as_bytes());
+            let proof = HbsmtProof { siblings: honest.siblings.clone(), terminus: HbsmtTerminus::Empty };
+            let status = verify_hbsmt(&root, &proof, Some(b"ns-e"), k.as_bytes(), b"x");
+            assert_eq!(status, HbsmtVerifyStatus::Invalid, "Empty terminus at key {} stop should be Invalid, got {:?}", k, status);
+        }
+    }
+
+    // --- 8. stop=0 extremes (step-5 vacuous) --------------------------------
+    #[test]
+    fn audit_stop_zero_extremes() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let ops: Vec<Op> = (0..40u32).map(|i| ins(format!("z-{}", i).as_bytes(), format!("zv-{}", i).as_bytes())).collect();
+        smt.batch_update(ops);
+        let root = smt.root();
+        let empties = make_empties();
+        assert_ne!(root, empties[0]);
+
+        // stop=0 Empty → h = empties[0] ≠ populated root → Invalid.
+        let p_empty = HbsmtProof { siblings: vec![], terminus: HbsmtTerminus::Empty };
+        assert_eq!(verify_hbsmt(&root, &p_empty, None, b"anything", b"v"), HbsmtVerifyStatus::Invalid);
+
+        // stop=0 single-leaf → h is a full single-leaf-tree root ≠ ours → Invalid.
+        let absent_k = b"single-leaf-claim";
+        let target = compute_namespace_path_hbsmt(b"", absent_k);
+        let id = identity_hash(&target, b"", absent_k);
+        let val = value_hash(b"v");
+        let p_leaf = HbsmtProof { siblings: vec![], terminus: HbsmtTerminus::Leaf { path: target, identity_hash: id, value_hash: val } };
+        let status = verify_hbsmt(&root, &p_leaf, None, absent_k, b"v");
+        assert_ne!(status, HbsmtVerifyStatus::Included, "stop=0 single-leaf forged Included");
+        assert_eq!(status, HbsmtVerifyStatus::Invalid);
+    }
+
+    // --- 9. Panic probe: extreme stops / termini ----------------------------
+    #[test]
+    fn audit_panic_probe_extreme_stops_and_termini() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        smt.batch_update(vec![ins(b"a", b"1"), ins(b"b", b"2"), ins(b"c", b"3")]);
+        let root = smt.root();
+
+        let absent = b"x";
+        let target = compute_namespace_path_hbsmt(b"", absent);
+        let id = identity_hash(&target, b"", absent);
+        let val = value_hash(b"v");
+        let termini = [
+            HbsmtTerminus::Empty,
+            HbsmtTerminus::Leaf { path: [0u8; 32], identity_hash: id, value_hash: val },
+            HbsmtTerminus::Leaf { path: [0xffu8; 32], identity_hash: id, value_hash: val },
+        ];
+        for n in [0usize, 1, 2, 128, 255, 256, 257, 512, 100_000] {
+            for term in &termini {
+                let proof = HbsmtProof { siblings: vec![[0u8; 32]; n], terminus: term.clone() };
+                let status = verify_hbsmt(&root, &proof, None, absent, b"v");
+                if n > 256 {
+                    assert_eq!(status, HbsmtVerifyStatus::Invalid, "oversized stop {} not rejected", n);
+                }
+            }
+        }
+        // Tree still intact.
+        let p = smt.prove(None, b"a");
+        assert_eq!(verify_hbsmt(&root, &p, None, b"a", b"1"), HbsmtVerifyStatus::Included);
+    }
+
+    // --- 10. Panic probe: pathological batches ------------------------------
+    #[test]
+    fn audit_panic_probe_pathological_batches() {
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let empty0 = make_empties()[0];
+
+        smt.batch_update(vec![]);
+        assert_eq!(smt.root(), empty0, "empty batch changed root");
+        smt.batch_update(vec![del(b"ghost")]);
+        assert_eq!(smt.root(), empty0, "delete-from-empty changed root");
+
+        // ins + del same key in one batch → absent.
+        smt.batch_update(vec![ins(b"t", b"v"), del(b"t")]);
+        let p = smt.prove(None, b"t");
+        assert_eq!(verify_hbsmt(&smt.root(), &p, None, b"t", b"v"), HbsmtVerifyStatus::NonExistence);
+
+        // Empty key and empty value (distinct keys; ns=None throughout).
+        smt.batch_update(vec![ins(b"", b""), ins(b"ek", b"")]);
+        let r = smt.root();
+        assert_eq!(verify_hbsmt(&r, &smt.prove(None, b""), None, b"", b""), HbsmtVerifyStatus::Included);
+        assert_eq!(verify_hbsmt(&r, &smt.prove(None, b"ek"), None, b"ek", b""), HbsmtVerifyStatus::Included);
+
+        // 100KB value.
+        let big = vec![0x5au8; 100_000];
+        smt.batch_update(vec![Op::Insert(None, b"bigk".to_vec(), big.clone())]);
+        assert_eq!(verify_hbsmt(&smt.root(), &smt.prove(None, b"bigk"), None, b"bigk", &big), HbsmtVerifyStatus::Included);
+
+        // 500 duplicate writes to one key in one batch → last wins.
+        let dups: Vec<Op> = (0..500u32).map(|i| Op::Insert(None, b"dup".to_vec(), format!("d{}", i).into_bytes())).collect();
+        smt.batch_update(dups);
+        assert_eq!(verify_hbsmt(&smt.root(), &smt.prove(None, b"dup"), None, b"dup", b"d499"), HbsmtVerifyStatus::Included);
+        assert_eq!(verify_hbsmt(&smt.root(), &smt.prove(None, b"dup"), None, b"dup", b"d0"), HbsmtVerifyStatus::Mismatch);
+    }
+
+    // --- 11. State-corruption fuzz: incremental == fresh == in-mem ----------
+    /// Randomized collapse/reinsert churn (hot namespaces ⇒ LCP-jump pressure).
+    /// After every phase the incrementally-updated RDB root must equal a tree
+    /// freshly built from the same live set AND the in-memory tree. Any stale
+    /// split forks one of the three.
+    #[test]
+    fn audit_state_corruption_collapse_reinsert_fuzz() {
+        use std::collections::BTreeMap;
+        let namespaces: [Option<&[u8]>; 3] = [None, Some(&b"ns-00"[..]), Some(&b"ns-01"[..])];
+        let mut state = 0xa5a5_5a5a_dead_0001u64;
+        for round in 0..8u32 {
+            let dir = TempDir::new().unwrap();
+            let inc = HbsmtRdb::open(dir.path());
+            let mut mem = Hbsmt::new();
+            let mut model: BTreeMap<(Option<Vec<u8>>, Vec<u8>), Vec<u8>> = BTreeMap::new();
+            let phases = 8 + (round % 5);
+            for phase in 0..phases {
+                let batch_n = 1 + (lcg(&mut state) % 24) as usize;
+                let mut ops: Vec<Op> = Vec::with_capacity(batch_n);
+                for _ in 0..batch_n {
+                    let ns_idx = if lcg(&mut state) % 3 == 0 { (lcg(&mut state) % 3) as usize } else { 1 };
+                    let ns = namespaces[ns_idx];
+                    let key = format!("k-{:02}", lcg(&mut state) % 40).into_bytes();
+                    if lcg(&mut state) % 3 == 0 {
+                        ops.push(Op::Delete(ns.map(|n| n.to_vec()), key.clone()));
+                        model.remove(&(ns.map(|n| n.to_vec()), key));
+                    } else {
+                        let val = format!("v-{}-{}", phase, lcg(&mut state) % 1000).into_bytes();
+                        ops.push(Op::Insert(ns.map(|n| n.to_vec()), key.clone(), val.clone()));
+                        model.insert((ns.map(|n| n.to_vec()), key), val);
+                    }
+                }
+                inc.batch_update(ops.clone());
+                mem.batch_update(ops);
+
+                let rebuild: Vec<Op> = model
+                    .iter()
+                    .map(|((ns, k), v)| Op::Insert(ns.clone(), k.clone(), v.clone()))
+                    .collect();
+                let fdir = TempDir::new().unwrap();
+                let fresh = HbsmtRdb::open(fdir.path());
+                fresh.batch_update(rebuild.clone());
+                let mut fmem = Hbsmt::new();
+                fmem.batch_update(rebuild);
+
+                let ri = inc.root();
+                assert_eq!(ri, fresh.root(), "round {} phase {}: incremental RDB != fresh RDB (stale split?)", round, phase);
+                assert_eq!(ri, mem.root(), "round {} phase {}: incremental RDB != in-mem", round, phase);
+                assert_eq!(ri, fmem.root(), "round {} phase {}: incremental RDB != fresh in-mem", round, phase);
+            }
+        }
+    }
+
+    // --- 12. Stale split: ≥2 leaves end up on one side after a delete -------
+    #[test]
+    fn audit_stale_split_two_leaves_one_side_after_delete() {
+        let fresh_root = |keep: &[u32]| -> Hash {
+            let dir = TempDir::new().unwrap();
+            let fresh = HbsmtRdb::open(dir.path());
+            let ops: Vec<Op> = keep.iter().map(|&i| ins_ns(b"ns-hot", format!("hk-{:02}", i).as_bytes(), format!("hv-{}", i).as_bytes())).collect();
+            fresh.batch_update(ops);
+            fresh.root()
+        };
+        for &(a, b) in &[(0u32, 2u32), (10, 13), (30, 31)] {
+            let dir = TempDir::new().unwrap();
+            let inc = HbsmtRdb::open(dir.path());
+            let mut mem = Hbsmt::new();
+            let ins_ops: Vec<Op> = (0..64u32).map(|i| ins_ns(b"ns-hot", format!("hk-{:02}", i).as_bytes(), format!("hv-{}", i).as_bytes())).collect();
+            inc.batch_update(ins_ops.clone());
+            mem.batch_update(ins_ops);
+
+            let keep: Vec<u32> = (a..b).collect();
+            let del_ops: Vec<Op> = (0..64u32)
+                .filter(|i| !keep.contains(i))
+                .map(|i| Op::Delete(Some(b"ns-hot".to_vec()), format!("hk-{:02}", i).into_bytes()))
+                .collect();
+            inc.batch_update(del_ops.clone());
+            mem.batch_update(del_ops);
+
+            assert_eq!(inc.root(), fresh_root(&keep), "keep [{},{}): incremental != fresh (stale split)", a, b);
+            assert_eq!(inc.root(), mem.root(), "keep [{},{}): incremental != in-mem", a, b);
+            let r = inc.root();
+            for i in 0..64u32 {
+                let k = format!("hk-{:02}", i);
+                let v = format!("hv-{}", i);
+                let p = inc.prove(Some(b"ns-hot"), k.as_bytes());
+                let want = if keep.contains(&i) { HbsmtVerifyStatus::Included } else { HbsmtVerifyStatus::NonExistence };
+                assert_eq!(verify_hbsmt(&r, &p, Some(b"ns-hot"), k.as_bytes(), v.as_bytes()), want, "key {} status", k);
+            }
+        }
+    }
+
+    // --- 13. Top split (0,0) never left stale after a collapse --------------
+    #[test]
+    fn audit_top_split_never_stale_after_collapse() {
+        let find_ns_bit0 = |want: u8| -> Vec<u8> {
+            let mut i = 0u64;
+            loop {
+                let ns = format!("nsbit-{}", i).into_bytes();
+                if get_bit_be(&compute_namespace_path_hbsmt(&ns, b"key"), 0) == want {
+                    return ns;
+                }
+                i += 1;
+                assert!(i < 1_000_000, "no ns with path bit0={}", want);
+            }
+        };
+        let ns0 = find_ns_bit0(0);
+        let ns1 = find_ns_bit0(1);
+        assert_ne!(
+            get_bit_be(&compute_namespace_path_hbsmt(&ns0, b"key"), 0),
+            get_bit_be(&compute_namespace_path_hbsmt(&ns1, b"key"), 0),
+            "engineered depth-0 bifurcation"
+        );
+
+        let empties = make_empties();
+        let dir = TempDir::new().unwrap();
+        let smt = HbsmtRdb::open(dir.path());
+        let mut mem = Hbsmt::new();
+        for cycle in 0..6u32 {
+            let v = format!("c{}", cycle);
+            let ops = vec![
+                ins_opt(Some(&ns0[..]), b"key", v.as_bytes()),
+                ins_opt(Some(&ns1[..]), b"key", v.as_bytes()),
+            ];
+            smt.batch_update(ops.clone());
+            mem.batch_update(ops);
+            assert_eq!(smt.root(), mem.root(), "cycle {} both present", cycle);
+
+            // Delete ns1 → single leaf ns0; top split must be removed.
+            let d1 = vec![Op::Delete(Some(ns1.clone()), b"key".to_vec())];
+            smt.batch_update(d1.clone());
+            mem.batch_update(d1);
+            let fdir = TempDir::new().unwrap();
+            let fresh = HbsmtRdb::open(fdir.path());
+            fresh.batch_update(vec![ins_opt(Some(&ns0[..]), b"key", v.as_bytes())]);
+            assert_eq!(smt.root(), fresh.root(), "cycle {} post-collapse top split stale", cycle);
+            assert_eq!(smt.root(), mem.root(), "cycle {} post-collapse in-mem", cycle);
+            let r = smt.root();
+            assert_eq!(verify_hbsmt(&r, &smt.prove(Some(&ns0[..]), b"key"), Some(&ns0[..]), b"key", v.as_bytes()), HbsmtVerifyStatus::Included);
+            assert_eq!(verify_hbsmt(&r, &smt.prove(Some(&ns1[..]), b"key"), Some(&ns1[..]), b"key", v.as_bytes()), HbsmtVerifyStatus::NonExistence);
+
+            // Delete ns0 → empty.
+            let d0 = vec![Op::Delete(Some(ns0.clone()), b"key".to_vec())];
+            smt.batch_update(d0.clone());
+            mem.batch_update(d0);
+            assert_eq!(smt.root(), empties[0], "cycle {} fully-emptied root != empties[0]", cycle);
+            assert_eq!(smt.root(), mem.root());
+        }
+    }
+
+    // --- 14. Single-CF: a leaf that is a byte-prefix of a split key ---------
+    /// The all-zero path [0;32] is a strict byte-prefix of the depth-0 split key
+    /// [0;32]||0u16. Inject a real 64-byte leaf there (env raw put_cf) and
+    /// confirm the length-filtered scan SEES it (root changes) and is idempotent.
+    #[test]
+    fn audit_single_cf_leaf_prefix_of_split_key() {
+        let env_box = TestEnv::new();
+        {
+            let mut env = env_box.make_env();
+            hbsmt_batch_update_env(&mut env, "contractstate_tree", vec![
+                ins_opt(None, b"alpha", b"1"),
+                ins_opt(None, b"beta", b"2"),
+                ins_opt(None, b"gamma", b"3"),
+            ]);
+            env.txn.commit().unwrap();
+        }
+        let root_env = |env_box: &TestEnv| -> Hash {
+            let mut env = env_box.make_env();
+            let r = hbsmt_root_env(&mut env, "contractstate_tree");
+            let _ = env.txn.commit();
+            r
+        };
+        let root_before = root_env(&env_box);
+
+        let cf = env_box.db.cf_handle("contractstate_tree").unwrap();
+        let mut leaf_val = [0u8; 64];
+        leaf_val[0..32].copy_from_slice(&identity_hash(&[0u8; 32], b"", b"zero-leaf"));
+        leaf_val[32..64].copy_from_slice(&value_hash(b"zero-leaf-value"));
+        env_box.db.put_cf(&cf, &[0u8; 32][..], &leaf_val[..]).unwrap();
+
+        let root_after = root_env(&env_box);
+        assert_ne!(root_after, root_before, "scan hid the zero-path leaf behind the split-key prefix");
+        assert_eq!(root_after, root_env(&env_box), "root not idempotent after zero-path leaf injection");
+    }
+
+    // --- 15. Single-CF: dense prefix cluster, build vs incremental ----------
+    #[test]
+    fn audit_single_cf_dense_prefix_cluster_build_vs_incremental() {
+        let make_ops = || -> Vec<Op> {
+            (0..400u32).map(|i| ins_ns(b"ns-dense", format!("dk-{:03}", i).as_bytes(), format!("dv-{}", i).as_bytes())).collect()
+        };
+        let d1 = TempDir::new().unwrap();
+        let one = HbsmtRdb::open(d1.path());
+        one.batch_update(make_ops());
+        let r_one = one.root();
+
+        let d2 = TempDir::new().unwrap();
+        let chunked = HbsmtRdb::open(d2.path());
+        for chunk in make_ops().chunks(7) { chunked.batch_update(chunk.to_vec()); }
+        let r_chunked = chunked.root();
+
+        let mut mem = Hbsmt::new();
+        mem.batch_update(make_ops());
+
+        assert_eq!(r_one, r_chunked, "one-batch != 7-op-chunked (single-CF scan miss?)");
+        assert_eq!(r_one, mem.root(), "one-batch != in-mem");
+        for i in [0u32, 1, 199, 200, 399] {
+            let k = format!("dk-{:03}", i);
+            let v = format!("dv-{}", i);
+            let p = one.prove(Some(b"ns-dense"), k.as_bytes());
+            assert_eq!(verify_hbsmt(&r_one, &p, Some(b"ns-dense"), k.as_bytes(), v.as_bytes()), HbsmtVerifyStatus::Included);
+        }
+    }
+}
