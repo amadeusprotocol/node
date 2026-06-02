@@ -131,6 +131,7 @@ defmodule FabricSnapshot do
           # Bulk CFs — full state, read through the same snapshot for mutual consistency.
           stream_cf(rtx, "contractstate",      cf.contractstate,      fd, zctx)
           stream_cf(rtx, "contractstate_tree", cf.contractstate_tree, fd, zctx)
+          stream_cf(rtx, "contractstate_tree_hbsmt", cf.contractstate_tree_hbsmt, fd, zctx)
 
           rooted_hash = RocksDB.get("rooted_tip", %{rtx: rtx, cf: cf.sysconf})
           if is_binary(rooted_hash) do
@@ -232,10 +233,11 @@ defmodule FabricSnapshot do
     def import_bundle_file(file_path) do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       cf_by_name = %{
-        "contractstate"      => cf.contractstate,
-        "contractstate_tree" => cf.contractstate_tree,
-        "sysconf"            => cf.sysconf,
-        "attestation"        => cf.attestation,
+        "contractstate"            => cf.contractstate,
+        "contractstate_tree"       => cf.contractstate_tree,
+        "contractstate_tree_hbsmt" => cf.contractstate_tree_hbsmt,
+        "sysconf"                  => cf.sysconf,
+        "attestation"              => cf.attestation,
       }
 
       {:ok, fd} = :file.open(file_path, [:read, :binary, :raw])

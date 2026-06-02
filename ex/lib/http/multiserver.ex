@@ -85,7 +85,6 @@ defmodule Ama.MultiServer do
             |> Photon.HTTP.Headers.add_date()
             |> Photon.HTTP.Headers.add_connection(state.request)
             |> Map.put("Content-Type", "application/zstd")
-            |> Map.put("Content-Encoding", "zstd")
             |> Map.put("Content-Length", "#{size}")
         header_bin = "HTTP/1.1 200 OK\r\n" <> Photon.HTTP.Headers.build(headers) <> "\r\n\r\n"
         :ok = :gen_tcp.send(state.socket, header_bin)
