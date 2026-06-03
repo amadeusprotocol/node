@@ -63,9 +63,14 @@ defmodule LoggerGen do
     if !isSynced do
       IO.puts "⛓️  #{height} / #{highest_height} R: #{height-rooted_height} | T: #{txpool_size} P: #{peer_cnt} 🔴 NOT-SYNCED #{Base58.encode(pk)}"
     else
-      IO.puts "⛓️  #{height} / #{highest_height} R: #{height-rooted_height} | T: #{txpool_size} P: #{peer_cnt} S: #{score} | #{Base58.encode(pk)} #{isTrainer} #{coins}"
+      IO.puts "⛓️  #{height} / #{highest_height} R: #{height-rooted_height} | T: #{txpool_size} P: #{peer_cnt} S: #{score} | #{Base58.encode(pk)} #{isTrainer} #{coins_2dp(coins)}"
     end
 
     state
+  end
+
+  defp coins_2dp(flat) when is_integer(flat) do
+    hundredths = div(flat + 9_999_999, 10_000_000)
+    "#{div(hundredths, 100)}.#{String.pad_leading(Integer.to_string(rem(hundredths, 100)), 2, "0")}"
   end
 end

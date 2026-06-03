@@ -12,12 +12,6 @@ pub struct Seg {
 }
 
 #[inline]
-pub fn simulate_fpr(n: f64, m: f64, k: f64) -> f64 {
-    assert!(n > 0.0 && m > 0.0 && k > 0.0, "n, m, k must be > 0");
-    (1.0 - (-k * n / m).exp()).powf(k)
-}
-
-#[inline]
 fn indices_from_digest(digest: &[u8]) -> Vec<u64> {
     let mut out = Vec::new();
     //Iterate in reverse

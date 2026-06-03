@@ -82,7 +82,13 @@ pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i12
     consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &coin::BURN_ADDRESS, b":balance:AMA"]), cost / 2);
 }
 
+pub fn cost_per_bytes_historical(bytes: usize) -> i128 {
+    COST_PER_BYTE_HISTORICAL
+        .checked_mul(bytes as i128)
+        .unwrap_or_else(|| std::panic::panic_any("cost_per_byte_overflow"))
+}
+
 pub fn tx_historical_cost(txu: &crate::model::tx::TXU) -> i128 {
     let tx_bytes = crate::model::tx::to_bytes_tx(&txu.tx).unwrap_or_else(|_| std::panic::panic_any("invalid_tx_serialization"));
-    std::cmp::max(AMA_1_CENT, COST_PER_BYTE_HISTORICAL * tx_bytes.len() as i128)
+    std::cmp::max(AMA_1_CENT, cost_per_bytes_historical(tx_bytes.len()))
 }

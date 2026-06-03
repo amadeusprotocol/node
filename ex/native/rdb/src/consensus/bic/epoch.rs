@@ -491,8 +491,7 @@ pub fn call_slash_trainer(env: &mut crate::consensus::consensus_apply::ApplyEnv,
     }
 
     let signers = consensus::aggsig::unmask_trainers(&trainers, &mask, mask_size as usize);
-    let consensus_pct = signers.len() as f64 / trainers.len() as f64;
-    if consensus_pct < 0.67 {
+    if (signers.len() as u64) * 100 < (trainers.len() as u64) * 67 {
         panic_any("invalid_amount_of_signatures")
     }
 
@@ -570,7 +569,10 @@ fn distribute_emissions_to_trainers(env: &mut ApplyEnv, trainers_to_recv: &Vec<(
     }
 
     for (trainer, trainer_sols) in trainers_to_recv {
-        let coins = (trainer_sols * total_emission) / total_sols;
+        let coins = trainer_sols
+            .checked_mul(total_emission)
+            .unwrap_or_else(|| panic_any("emission_overflow"))
+            / total_sols;
 
         let emission_address = kv_get(env, &bcat(&[b"account:", trainer, b":attribute:emission_address"]));
         let balance_key =

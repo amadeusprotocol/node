@@ -11,6 +11,8 @@ pub mod sol;
 pub mod sol_bloom;
 pub mod sol_difficulty;
 pub mod sol_freivalds;
+#[cfg(test)]
+pub mod sol_freivalds_poc;
 pub mod wasm;
 
 pub fn list_of_binaries_to_vecpak(list_of_binaries: Vec<Vec<u8>>) -> Vec<u8> {

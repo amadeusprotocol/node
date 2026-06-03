@@ -128,8 +128,8 @@ impl Exsss {
         // Generate random key for each element with its value
         let mut keyed: Vec<(f64, T)> = slice.iter().map(|val| (self.uniform_float(), val.clone())).collect();
 
-        // Sort by random keys
-        keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        // Sort by random keys.
+        keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         // Write sorted values back
         for (idx, (_key, val)) in keyed.into_iter().enumerate() {

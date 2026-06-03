@@ -173,7 +173,7 @@ fn import_log_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i3
         panic_any("exec_ptr_term_too_long")
     }
 
-    crate::consensus::consensus_kv::storage_budget_decr(applyenv, protocol::COST_PER_BYTE_HISTORICAL * len as i128);
+    crate::consensus::consensus_kv::storage_budget_decr(applyenv, protocol::cost_per_bytes_historical(len));
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
     let view = data.memory.clone().view(&store);
@@ -194,7 +194,7 @@ fn import_return_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len:
         panic_any("exec_ptr_term_too_long")
     }
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_BYTE_HISTORICAL * len as i128);
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(len));
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
     let view = data.memory.clone().view(&store);
@@ -268,7 +268,7 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
             panic_any("exec_call_total_args_too_long")
         }
 
-        crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_BYTE_HISTORICAL * total_bytes as i128);
+        crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(total_bytes));
 
         // Second pass: now allocate and copy. Total bytes already capped + paid for.
         let mut final_args: Vec<Vec<u8>> = Vec::with_capacity(main_table.len());
@@ -591,7 +591,7 @@ fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filen
 
     let full_error_msg = format!("as_abort: '{}' at {}:{}:{}", msg, filename, line, column);
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_BYTE_HISTORICAL * full_error_msg.len() as i128);
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(full_error_msg.len()));
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
     log_line(applyenv, full_error_msg.as_bytes().to_vec());
