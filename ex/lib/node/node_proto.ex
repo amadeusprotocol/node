@@ -64,6 +64,8 @@ defmodule NodeProto do
   @max_window_log 26
   @decompress_chunk_size 64 * 1024          # 64 KiB feed per streaming step
 
+  @op_atoms NodeOps.op_atoms()
+
   def decompress_and_unpack(compressed_data) do
     case :zstd.get_frame_header(compressed_data) do
       {:ok, %{frameContentSize: size}} when size > @max_decompressed_size ->
@@ -76,7 +78,13 @@ defmodule NodeProto do
     decompressed = stream_decompress(compressed_data)
 
     vec = RDB.vecpak_decode(decompressed)
-    Map.put(vec, :op, String.to_existing_atom(vec.op))
+    unless is_map(vec), do: throw(%{error: :vec_not_a_map})
+    op_str = Map.get(vec, :op)
+    op = case is_binary(op_str) and Map.fetch(@op_atoms, op_str) do
+      {:ok, atom} -> atom
+      _ -> throw(%{error: :unknown_op, op: op_str})
+    end
+    Map.put(vec, :op, op)
   end
 
   defp stream_decompress(input) do

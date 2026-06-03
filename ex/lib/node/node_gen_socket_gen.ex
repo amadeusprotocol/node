@@ -61,10 +61,14 @@ defmodule NodeGenSocketGen do
   end
 
   def proc_payload(peer_ip, pk, version, ts_nano, payload) do
+    if byte_size(payload) < 28, do: throw(%{error: :aead_payload_too_short})
     shared_secret = NodeANR.get_shared_secret(pk)
     <<iv::12-binary, tag::16-binary, ciphertext::binary>> = payload
     key = :crypto.hash(:sha256, [shared_secret, :binary.encode_unsigned(ts_nano), iv])
-    plaintext = :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ciphertext, <<>>, tag, false)
+    plaintext = case :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ciphertext, <<>>, tag, false) do
+      :error -> throw(%{error: :aead_decrypt_failed})
+      bin when is_binary(bin) -> bin
+    end
 
     msg = plaintext
     |> NodeProto.decompress_and_unpack()

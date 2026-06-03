@@ -113,5 +113,19 @@ impl DecodeFromTerm for Entry {
 
 pub fn from_bytes(data: &[u8]) -> Result<Entry, &'static str> {
     let term = vecpak::decode(data)?;
-    Ok(Entry::from_term(&term))
+    let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Entry::from_term(&term)))
+        .map_err(|_| "Entry::from_term panicked on malformed input")?;
+    if entry.header.signer.len() != 48 {
+        return Err("entry.header.signer must be 48 bytes");
+    }
+    if entry.header.prev_hash.len() != 32 {
+        return Err("entry.header.prev_hash must be 32 bytes");
+    }
+    if entry.header.vr.len() != 96 {
+        return Err("entry.header.vr must be 96 bytes");
+    }
+    if entry.header.dr.len() != 32 {
+        return Err("entry.header.dr must be 32 bytes");
+    }
+    Ok(entry)
 }
