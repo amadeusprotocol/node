@@ -181,7 +181,7 @@ fn open_transaction_db<'a>(env: Env<'a>, path: String, cf_names: Vec<String>) ->
     cf_opts.set_level_zero_file_num_compaction_trigger(4);
     cf_opts.set_level_zero_slowdown_writes_trigger(20);
     cf_opts.set_level_zero_stop_writes_trigger(36);
-    cf_opts.set_max_subcompactions(2);
+    cf_opts.set_max_subcompactions(1);
 
     //cf_opts.set_level_compaction_dynamic_level_bytes(false);
 
