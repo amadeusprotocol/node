@@ -1,6 +1,8 @@
 defmodule NodeGenSocketGen do
   use GenServer
 
+  @max_inflight 3_000
+
   def start_link(ip_tuple, port, idx) do
     GenServer.start_link(__MODULE__, [ip_tuple, port, idx], name: :"NodeGenSocketGen#{idx}")
   end
@@ -34,6 +36,7 @@ defmodule NodeGenSocketGen do
     state = %{
       idx: idx,
       ip: ip, ip_tuple: ip_tuple, port: port, socket: lsocket,
+      inflight: :counters.new(1, [:write_concurrency]),
       next_restart: :os.system_time(1000) + 3*60*60_000
     }
     {:ok, state}
@@ -74,7 +77,7 @@ defmodule NodeGenSocketGen do
     |> NodeProto.decompress_and_unpack()
 
     if !NodeGenNetguard.op_ok(peer_ip, msg.op) do
-      IO.inspect {:dropping_due_to_op_flood, peer_ip, msg.op}
+      IO.inspect({:dropping_due_to_op_flood, peer_ip, msg.op})
     else
       peer = %{ip4: peer_ip, pk: pk, version: version}
       hasPeerANR = NodeANR.handshaked_and_valid_ip4(pk, peer_ip)
@@ -116,15 +119,17 @@ defmodule NodeGenSocketGen do
       _ when testnet != nil -> state
 
       {:udp, _socket, {ipa,ipb,ipc,ipd}, _inportno, data} ->
-        #IO.puts IO.ANSI.red() <> inspect({:relay_from, ip, msg.op}) <> IO.ANSI.reset()
-        :erlang.spawn(fn()->
-          peer_ip = "#{ipa}.#{ipb}.#{ipc}.#{ipd}"
-          if !NodeGenNetguard.frame_ok(peer_ip) do
-            IO.inspect {:dropping_frame_from, peer_ip}
-          else
-            try do proc_msg(peer_ip, data) catch _,_ -> nil end
-          end
-        end)
+        peer_ip = "#{ipa}.#{ipb}.#{ipc}.#{ipd}"
+        ctr = state.inflight
+        cond do
+          !NodeGenNetguard.frame_ok(peer_ip) -> :ok
+          :counters.get(ctr, 1) >= @max_inflight -> :ok
+          true ->
+            :counters.add(ctr, 1, 1)
+            :erlang.spawn(fn()->
+              try do proc_msg(peer_ip, data) catch _,_ -> nil after :counters.sub(ctr, 1, 1) end
+            end)
+        end
 
       {:send_to, peer_pairs, msg} ->
         port = Application.fetch_env!(:ama, :udp_port)
@@ -153,6 +158,8 @@ defmodule NodeGenSocketGen do
           IO.inspect {:decrement_buckets_took, state.idx, took}
         end
         :erlang.send_after(3000, self(), :netguard_decrement_buckets)
+
+      _ -> :ok
     end
 
     if :os.system_time(1000) > state.next_restart do

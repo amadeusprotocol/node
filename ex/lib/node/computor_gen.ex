@@ -50,6 +50,8 @@ defmodule ComputorGen do
     {:noreply, state}
   end
 
+  def handle_info(_msg, state), do: {:noreply, state}
+
   def tick(state) do
     IO.puts "computor running #{DateTime.utc_now()}"
     pk = Application.fetch_env!(:ama, :trainer_pk)

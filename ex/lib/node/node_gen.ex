@@ -143,6 +143,7 @@ defmodule NodeGen do
         end)
         state
 
+      _ -> state
     end
     {:noreply, state}
   end
