@@ -212,8 +212,7 @@ defmodule Util do
     end
 
     def b3sum(path) do
-        {b3sum, 0} = System.shell("b3sum --no-names --raw #{U.b(path)}")
-        Base.hex_encode32(b3sum, padding: false, case: :lower)
+        Base.hex_encode32(Blake3.hash(File.read!(path)), padding: false, case: :lower)
     end
 
     def pad_bitstring_to_bytes(bitstring) do

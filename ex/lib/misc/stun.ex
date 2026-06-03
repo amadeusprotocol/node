@@ -25,7 +25,7 @@ defmodule STUN do
 
     iface = if !iface do Application.fetch_env!(:ama, :udp_ipv4_tuple) else iface end
     {:ok, %{status_code: 200, body: body}} = :comsat_http.get(url, %{}, %{timeout: 6000, inet_options: [{:ifaddr, iface}]})
-    JSX.decode!(body, labels: :atom).ip
+    JSX.decode!(body, labels: :attempt_atom).ip
   end
 
   def get_current_ip4(iface \\ nil) do

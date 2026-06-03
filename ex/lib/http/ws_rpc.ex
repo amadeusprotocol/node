@@ -1,6 +1,6 @@
 defmodule HTTP.WS.RPC do
     def init(state) do
-        {wsstate, reply} = Photon.WS.handshake(state.request, %{compress: %{}})
+        {wsstate, reply} = Photon.WS.handshake(state.request, %{})
         state = Map.merge(state, wsstate)
         :ok = :gen_tcp.send(state.socket, reply)
 
@@ -10,14 +10,22 @@ defmodule HTTP.WS.RPC do
         loop(state)
     end
 
+    @ws_max_buf 1024 * 1024
+    @ws_idle_ms 90_000
+
     def loop(state) do
         s = state
         receive do
             {:tcp, socket, bin} ->
-                state = %{state | buf: state.buf <> bin}
-                state = proc(state)
-                :inet.setopts(socket, [{:active, :once}])
-                loop(state)
+                if byte_size(state.buf) + byte_size(bin) > @ws_max_buf do
+                    :gen_tcp.close(socket)
+                    :closed
+                else
+                    state = %{state | buf: state.buf <> bin}
+                    state = proc(state)
+                    :inet.setopts(socket, [{:active, :once}])
+                    loop(state)
+                end
             {:tcp_closed, socket} -> :closed
 
             {:update_stats_entry_tx, stats, entry, txs} ->
@@ -31,6 +39,10 @@ defmodule HTTP.WS.RPC do
             m ->
                 IO.inspect("WSLOG: #{inspect m}")
                 loop(state)
+        after
+            @ws_idle_ms ->
+                :gen_tcp.close(state.socket)
+                :idle
         end
     end
 

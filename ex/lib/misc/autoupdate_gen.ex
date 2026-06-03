@@ -25,7 +25,7 @@ defmodule AutoUpdateGen do
     url = "https://api.github.com/repos/amadeus-robot/node/releases/latest"
     {:ok, %{status_code: 200, body: body}} = :comsat_http.get(url, %{},
       %{ssl_options: [{:server_name_indication, ~c"api.github.com"}, {:verify, :verify_none}]})
-    json = JSX.decode!(body, labels: :atom)
+    json = JSX.decode!(body, labels: :attempt_atom)
     if Application.fetch_env!(:ama, :version) < String.trim(json.tag_name, "v") do
         download_url = Enum.find_value(json.assets, fn(asset)->
             asset.name == "amadeusd" and asset.browser_download_url
