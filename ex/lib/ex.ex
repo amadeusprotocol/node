@@ -100,6 +100,7 @@ defmodule Ama do
         DB.API.close()
         FabricSnapshot.download_latest()
         DB.API.init()
+        FabricSnapshot.verify_genesis_present!()
       else
         IO.puts "non-archival node — fetching state bundle from RPC (no chain state local)"
         FabricSnapshot.download_and_import_bundle()

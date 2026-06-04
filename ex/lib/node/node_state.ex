@@ -102,8 +102,8 @@ defmodule NodeState do
       case Attestation.validate_vs_chain(attestation) do
         %{error: :ok} ->
           send(FabricCoordinatorGen, {:add_attestation, attestation})
-        _ ->
-          :ets.insert(AttestationCache, {{attestation.entry_hash, attestation.signer}, {attestation, :os.system_time(1000)}})
+        %{error: error} ->
+          cache_attestation_if_pending(attestation, error)
       end
     end)
   end
@@ -140,8 +140,8 @@ defmodule NodeState do
         case Attestation.validate_vs_chain(attestation) do
           %{error: :ok} ->
             send(FabricCoordinatorGen, {:add_attestation, attestation})
-          _ ->
-            :ets.insert(AttestationCache, {{attestation.entry_hash, attestation.signer}, {attestation, :os.system_time(1000)}})
+          %{error: error} ->
+            cache_attestation_if_pending(attestation, error)
         end
       end)
 
@@ -203,5 +203,11 @@ defmodule NodeState do
 
   def handle(op, _, _) do
     IO.inspect {:ukn_op, op}
+  end
+
+  defp cache_attestation_if_pending(attestation, error) do
+    if error in [:entry_dne, :ahead_of_localchain] and :ets.info(AttestationCache, :size) < 100_000 do
+      :ets.insert(AttestationCache, {{attestation.entry_hash, attestation.signer}, {attestation, :os.system_time(1000)}})
+    end
   end
 end

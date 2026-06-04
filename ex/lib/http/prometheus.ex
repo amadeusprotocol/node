@@ -1,8 +1,24 @@
 defmodule HTTP.Prometheus do
+  import Bitwise
+
+  @min_token_len 16
+
   def authorized?(headers) do
     token = Application.fetch_env!(:ama, :prometheus_token)
-    headers["authorization"] == "Bearer #{token}"
+    cond do
+      not is_binary(token) or byte_size(token) < @min_token_len -> false
+      true ->
+        presented = headers["authorization"]
+        is_binary(presented) and secure_compare("Bearer #{token}", presented)
+    end
   end
+
+  defp secure_compare(a, b) when is_binary(a) and is_binary(b) do
+    byte_size(a) == byte_size(b) and constant_time_eq(a, b, 0)
+  end
+  defp constant_time_eq(<<x, a::binary>>, <<y, b::binary>>, acc),
+    do: constant_time_eq(a, b, bor(acc, bxor(x, y)))
+  defp constant_time_eq(<<>>, <<>>, acc), do: acc == 0
 
   def health() do
     tip = DB.Chain.tip_entry()

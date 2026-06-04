@@ -201,7 +201,8 @@ defmodule FabricSnapshot do
       File.rm(download_path)
 
       IO.puts "FabricSnapshot: downloading state bundle from #{url} ..."
-      case :httpc.request(:get, {to_charlist(url), []}, [{:timeout, :infinity}],
+      case :httpc.request(:get, {to_charlist(url), []},
+                          https_opts(url) ++ [{:timeout, :infinity}],
                           [stream: to_charlist(download_path)]) do
         {:ok, :saved_to_file} -> :ok
         err -> halt_bundle("download from #{url} failed: #{inspect err}")
@@ -225,11 +226,69 @@ defmodule FabricSnapshot do
       :erlang.halt(1)
     end
 
-    # Stream-decompresses `file_path` and writes every record into the live
-    # DB inside a single RocksDB transaction. Commits atomically at the end;
-    # on failure the txn is rolled back, leaving the DB empty so the next
-    # boot just retries. The `__apply__` sidecar is held aside and replayed
-    # in finalize_import — same write path a production apply uses.
+    defp https_opts(url) do
+      case URI.parse(url) do
+        %{scheme: "https", host: host} when is_binary(host) ->
+          [{:ssl, [
+            {:server_name_indication, ~c"#{host}"},
+            {:verify, :verify_peer},
+            {:depth, 99},
+            {:cacerts, :certifi.cacerts()},
+            {:partial_chain, &Photon.GenTCP.partial_chain/1},
+            {:customize_hostname_check, [{:match_fun, :public_key.pkix_verify_hostname_match_fun(:https)}]}
+          ]}]
+        _ -> []
+      end
+    end
+
+    def assert_zip_safe!(file_charlist, dest_dir) do
+      dest_abs = Path.expand(dest_dir)
+      {:ok, entries} = :zip.table(file_charlist)
+      Enum.each(entries, fn
+        {:zip_file, name, _info, _comment, _offset, _comp} ->
+          name = to_string(name)
+          resolved = Path.expand(name, dest_abs)
+          cond do
+            String.starts_with?(name, "/") ->
+              raise "zip-slip: absolute path in snapshot archive: #{name}"
+            ".." in Path.split(name) ->
+              raise "zip-slip: parent traversal in snapshot archive: #{name}"
+            resolved != dest_abs and not String.starts_with?(resolved, dest_abs <> "/") ->
+              raise "zip-slip: member escapes work folder: #{name}"
+            true -> :ok
+          end
+        _ -> :ok
+      end)
+      :ok
+    end
+
+    defp verify_rooted_entry!(entry) do
+      res =
+        if entry[:mask] do
+          hash = :crypto.hash(:sha256, RDB.vecpak_encode(entry.header))
+          if entry[:hash] == hash, do: %{error: :ok}, else: %{error: :rooted_tip_hash_mismatch}
+        else
+          Entry.validate_signature(entry, true)
+        end
+      if res.error != :ok do
+        raise "bundle rooted tip failed verification: #{inspect res.error}"
+      end
+      :ok
+    end
+
+    def verify_genesis_present!() do
+      g = EntryGenesis.get()
+      case DB.Entry.by_hash(g.hash) do
+        %{hash: h, signature: sig} when h == g.hash and sig == g.signature ->
+          IO.puts "FabricSnapshot: genesis verified (#{Base58.encode(g.hash)})"
+          :ok
+        nil ->
+          halt_bundle("imported snapshot has no genesis at the pinned hash — refusing to boot a foreign/forged chain")
+        other ->
+          halt_bundle("imported snapshot genesis mismatch (#{inspect other[:hash]}) — refusing to boot a foreign/forged chain")
+      end
+    end
+
     def import_bundle_file(file_path) do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       cf_by_name = %{
@@ -332,6 +391,8 @@ defmodule FabricSnapshot do
 
       entry = Entry.unpack_from_db(entry_packed)
       height = entry.header.height
+
+      verify_rooted_entry!(entry)
 
       DB.Entry.insert(entry, %{rtx: rtx})
       DB.Entry.apply_into_main_chain(entry, muts_hash, muts_rev, receipts,
@@ -507,10 +568,12 @@ defmodule FabricSnapshot do
         :ok = File.mkdir_p!(cwd_dir)
         file = Path.join(cwd_dir, height_padded<>".zip")
         File.rm(file)
-        {:ok, _} = :httpc.request(:get, {url |> to_charlist(), []}, [], [stream: file |> to_charlist()])
+        {:ok, _} = :httpc.request(:get, {url |> to_charlist(), []}, https_opts(url), [stream: file |> to_charlist()])
         IO.puts "quick-sync download complete. Extracting.."
 
-        {:ok, _} = :zip.unzip(file |> to_charlist(), [{:cwd, Application.fetch_env!(:ama, :work_folder) |> to_charlist()}])
+        extract_dir = Application.fetch_env!(:ama, :work_folder)
+        assert_zip_safe!(file |> to_charlist(), extract_dir)
+        {:ok, _} = :zip.unzip(file |> to_charlist(), [{:cwd, extract_dir |> to_charlist()}])
         :ok = File.rm!(file)
         IO.puts "quick-sync done"
     end

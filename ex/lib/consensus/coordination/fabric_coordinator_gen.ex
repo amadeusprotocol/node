@@ -68,12 +68,11 @@ defmodule FabricCoordinatorGen do
 
     aggregate_attestation(attestation)
 
-    # Drain any cached attestations for this entry_hash now that the entry
-    # has arrived (or was already in main chain). Periodic sweep in
-    # handle_info(:sweep_attestation_cache) handles stale evictions.
     cached = :ets.select(AttestationCache, [{{{attestation.entry_hash, :_}, {:"$1", :_}}, [], [:"$1"]}])
     Enum.each(cached, fn(attestation)->
-      aggregate_attestation(attestation)
+      if Attestation.validate(attestation).error == :ok do
+        aggregate_attestation(attestation)
+      end
     end)
     if cached != [] do
       :ets.select_delete(AttestationCache, [{{{attestation.entry_hash, :_}, :_}, [], [true]}])
