@@ -669,12 +669,23 @@ pub fn check_module_limits(wasm_bytes: &[u8]) -> Result<(), &'static str> {
             Payload::DataSection(reader) => {
                 for data in reader {
                     let d = data.map_err(|_| "wasmparser_data_section_error")?;
-                    if let DataKind::Active { offset_expr, .. } = d.kind {
+                    if let DataKind::Active { offset_expr, .. } = &d.kind {
                         let mut r = offset_expr.get_operators_reader();
-                        if let Ok(ParserOperator::I32Const { value }) = r.read() {
-                            if value >= 0 && value < 65536 {
-                                return Err("wasmparser_first_65536_bytes_not_reserved");
-                            }
+                        let value = match r.read() {
+                            Ok(ParserOperator::I32Const { value }) => value,
+                            Ok(_) => return Err("wasmparser_data_offset_not_i32const"),
+                            Err(_) => return Err("wasmparser_data_section_error"),
+                        };
+                        if value < 0 {
+                            return Err("wasmparser_data_offset_negative");
+                        }
+                        let start = value as u64;
+                        if start < 65536 {
+                            return Err("wasmparser_first_65536_bytes_not_reserved");
+                        }
+                        let end = start.saturating_add(d.data.len() as u64);
+                        if start < 10_000 && end > 1_100 {
+                            return Err("wasmparser_data_overlaps_env_region");
                         }
                     }
                 }
@@ -701,6 +712,9 @@ pub fn validate_contract(env: &mut ApplyEnv, wasm_bytes: &[u8]) {
     setup_wasm_instance(env, &module, &mut store, true, &[]);
 }
 
+/// Flat charge for MemoryGrow / MemoryFill / MemoryCopy. 
+const MEMORY_BULK_OP_COST: u64 = 6_000_000;
+
 fn cost_function(operator: &WasmerOperator) -> u64 {
     match operator {
         WasmerOperator::Loop { .. } | WasmerOperator::Block { .. } | WasmerOperator::End { .. } | WasmerOperator::Br { .. } => 1,
@@ -711,15 +725,8 @@ fn cost_function(operator: &WasmerOperator) -> u64 {
 
         WasmerOperator::Call { .. } | WasmerOperator::CallIndirect { .. } => 10,
 
-        // Static upper-bound: wasmer's metering middleware can't see the size
-        // operand on the wasm stack, so per-byte metering needs a custom middleware.
-        // Until that's written, charge a flat cost that approximates ~33KB worth
-        // of equivalent I32Store ops (≈ 100_000 / 3). MemoryGrow is per-page
-        // (64KB) so a similar flat cost is reasonable.
-        // TODO: replace with custom middleware that injects size-aware gas
-        // decrement before each MemoryCopy/Fill/Grow (reads operand off stack).
-        WasmerOperator::MemoryCopy { .. } | WasmerOperator::MemoryFill { .. } => 100_000,
-        WasmerOperator::MemoryGrow { .. } => 100_000,
+        WasmerOperator::MemoryCopy { .. } | WasmerOperator::MemoryFill { .. } => MEMORY_BULK_OP_COST,
+        WasmerOperator::MemoryGrow { .. } => MEMORY_BULK_OP_COST,
 
         WasmerOperator::If { .. }
         | WasmerOperator::Else { .. }
@@ -854,7 +861,9 @@ pub fn setup_wasm_instance(env: &mut ApplyEnv, module: &Module, store: &mut Stor
 
     // Create Instance
     let instance = Instance::new(store, module, &import_object).unwrap_or_else(|e| {
-        log_line(env, e.to_string().into_bytes());
+        let mut msg = e.to_string().into_bytes();
+        msg.truncate(protocol::LOG_MSG_SIZE);
+        log_line(env, msg);
         panic_any("exec_instance")
     });
     host_env.as_mut(store).instance = Some(instance.clone());
@@ -926,7 +935,9 @@ pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: Strin
     let (instance, wasm_args) = setup_wasm_instance(env, &module, &mut store, false, &function_args);
 
     let entry_to_call = instance.exports.get_function(&function_name).unwrap_or_else(|e| {
-        log_line(env, e.to_string().into_bytes());
+        let mut msg = e.to_string().into_bytes();
+        msg.truncate(protocol::LOG_MSG_SIZE);
+        log_line(env, msg);
         panic_any("exec_function_not_found")
     });
     let start = Instant::now();
@@ -947,7 +958,9 @@ pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: Strin
         Ok(_) => env.caller_env.call_return_value.clone(),
         Err(ref e) if e.message() == "EXIT_IMPORT_RETURN" => env.caller_env.call_return_value.clone(),
         Err(err) => {
-            log_line(env, err.message().into_bytes());
+            let mut msg = err.message().into_bytes();
+            msg.truncate(protocol::LOG_MSG_SIZE);
+            log_line(env, msg);
             panic_any("exec_error");
         }
     }

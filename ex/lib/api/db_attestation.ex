@@ -61,9 +61,9 @@ defmodule DB.Attestation do
   end
 
   def by_height_by_signer(height, signer, db_opts \\ %{}) do
-    height = pad_integer(height)
-    RocksDB.get("attestation:#{height}:#{signer}", db_handle(db_opts, :attestation, %{}))
-    |> Attestation.unpack()
+    RocksDB.get_prefix("attestation:#{pad_integer(height)}:", db_handle(db_opts, :attestation, %{}))
+    |> Enum.map(& RDB.vecpak_decode(elem(&1, 1)))
+    |> Enum.find(& &1.signer == signer)
   end
 
 

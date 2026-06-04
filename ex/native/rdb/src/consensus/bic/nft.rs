@@ -68,6 +68,10 @@ pub fn call_transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, args
     kv_increment(env, &bcat(&[b"account:", receiver, b":nft:", collection, b":", token]), amount);
 }
 
+pub fn validate_collection(collection: &[u8]) {
+    crate::consensus::bic::coin::validate_name(collection, "invalid_collection", "collection_too_short", "collection_too_long")
+}
+
 pub fn call_create_collection(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Vec<Vec<u8>>) {
     if args.len() < 2 {
         panic_any("invalid_args")
@@ -75,16 +79,8 @@ pub fn call_create_collection(env: &mut crate::consensus::consensus_apply::Apply
     let collection_original = args[0].as_slice();
     let soulbound = args.get(1).and_then(|v| if v.is_empty() { None } else { Some(v.as_slice()) }).unwrap_or(b"false");
 
-    let collection: Vec<u8> = collection_original.iter().copied().filter(u8::is_ascii_alphanumeric).collect();
-    if collection_original != collection.as_slice() {
-        panic_any("invalid_collection")
-    }
-    if collection.len() < 1 {
-        panic_any("collection_too_short")
-    }
-    if collection.len() > 32 {
-        panic_any("collection_too_long")
-    }
+    validate_collection(collection_original);
+    let collection = collection_original.to_vec();
 
     if !consensus::bic::coin_symbol_reserved::is_free(&collection, &env.caller_env.account_caller) {
         panic_any("collection_reserved")

@@ -29,6 +29,7 @@ pub fn call_lock(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Ve
     if !(crate::consensus::bls12_381::validate_public_key(receiver) || receiver == &BURN_ADDRESS) {
         panic_any("invalid_receiver_pk")
     }
+    crate::consensus::bic::coin::validate_symbol(symbol);
     let amount = std::str::from_utf8(&amount).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_amount"));
     let duration = std::str::from_utf8(&duration).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_amount"));
 
@@ -43,7 +44,7 @@ pub fn call_lock(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Ve
         panic_any("insufficient_funds")
     }
 
-    let unlock_height = env.caller_env.entry_height + duration;
+    let unlock_height = env.caller_env.entry_height.checked_add(duration).unwrap_or_else(|| panic_any("invalid_duration"));
     kv_increment(env, &bcat(&[b"account:", &env.caller_env.account_caller.clone(), b":balance:", symbol]), -amount);
     create_lock(env, receiver, amount, symbol, unlock_height)
 }

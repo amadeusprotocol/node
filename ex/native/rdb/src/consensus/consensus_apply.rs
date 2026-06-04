@@ -800,7 +800,12 @@ fn call_exit(env: &mut ApplyEnv) {
     let seed_hash = blake3::hash(&vr);
     env.caller_env.seed = seed_hash.as_bytes().to_vec();
     //for assemblyscript
+    // Canonicalize NaN: interpreting hash bytes as f64 yields a NaN ~1/2048 of the
+    // time, and NaN payload/signaling-bit handling differs across CPU archs and wasm
+    // runtimes. An un-canonicalized NaN seed reaching a contract would diverge
+    // tx_state_root across validators (consensus fork). Only the NaN case changes.
     let seedf64 = f64::from_le_bytes(seed_hash.as_bytes()[0..8].try_into().unwrap_or([0u8; 8]));
+    let seedf64 = if seedf64.is_nan() { f64::from_bits(0x7ff8_0000_0000_0000) } else { seedf64 };
     env.caller_env.seedf64 = seedf64;
 
     env.muts = Vec::new();
@@ -1023,7 +1028,10 @@ pub fn call_wasmvm(
     buf.copy_from_slice(&result_hash.as_bytes()[0..8]);
 
     env.caller_env.seed = result_hash.as_bytes().to_vec();
-    env.caller_env.seedf64 = f64::from_le_bytes(buf);
+    // Canonicalize NaN seed (see call_exit derivation): a NaN payload diverges across
+    // archs/wasm runtimes -> tx_state_root fork. Only the NaN case changes.
+    let seedf64 = f64::from_le_bytes(buf);
+    env.caller_env.seedf64 = if seedf64.is_nan() { f64::from_bits(0x7ff8_0000_0000_0000) } else { seedf64 };
 
     //attachments
     env.caller_env.attached_symbol = Vec::new();

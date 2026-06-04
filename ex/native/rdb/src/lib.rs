@@ -360,7 +360,7 @@ fn delete_cf(cf: ResourceArc<CfResource>, key: Binary) -> NifResult<Atom> {
     cf.db.db.delete_cf(&*cf, key.as_slice()).map(|_| atoms::ok()).map_err(to_nif_rdb_err)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn delete_range_cf(cf: ResourceArc<CfResource>, start_key: Binary, end_key: Binary, compact: bool) -> NifResult<Atom> {
     cf.db.db.delete_range_cf(&*cf, start_key.as_slice(), end_key.as_slice()).map_err(to_nif_rdb_err)?;
     if compact {
@@ -377,7 +377,7 @@ fn iterator<'a>(env: Env<'a>, db: ResourceArc<DbResource>) -> NifResult<Term<'a>
 
 #[rustler::nif]
 fn iterator_close(it_resource: ResourceArc<ItResource>) -> Atom {
-    let mut guard = it_resource.it.lock().unwrap();
+    let mut guard = it_resource.it.lock().unwrap_or_else(|p| p.into_inner());
     *guard = None;
     atoms::ok()
 }
@@ -412,9 +412,9 @@ fn transaction_with_snapshot<'a>(env: Env<'a>, db: ResourceArc<DbResource>) -> N
     Ok((atoms::ok(), ResourceArc::new(TxResource { _db: db, tx: Mutex::new(Some(tx_static)) })).encode(env))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn transaction_commit(tx: ResourceArc<TxResource>) -> NifResult<Atom> {
-    let mut guard = tx.tx.lock().unwrap();
+    let mut guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.take().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     drop(guard); // don’t hold the lock while committing
     txn.commit().map(|_| atoms::ok()).map_err(to_nif_rdb_err)
@@ -422,7 +422,7 @@ fn transaction_commit(tx: ResourceArc<TxResource>) -> NifResult<Atom> {
 
 #[rustler::nif]
 fn transaction_rollback(tx: ResourceArc<TxResource>) -> NifResult<Atom> {
-    let mut guard = tx.tx.lock().unwrap();
+    let mut guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.take().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     drop(guard);
     txn.rollback().map(|_| atoms::ok()).map_err(to_nif_rdb_err)
@@ -430,7 +430,7 @@ fn transaction_rollback(tx: ResourceArc<TxResource>) -> NifResult<Atom> {
 
 #[rustler::nif]
 fn transaction_set_savepoint(tx: ResourceArc<TxResource>) -> NifResult<Atom> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     txn.set_savepoint();
     Ok(atoms::ok())
@@ -438,14 +438,14 @@ fn transaction_set_savepoint(tx: ResourceArc<TxResource>) -> NifResult<Atom> {
 
 #[rustler::nif]
 fn transaction_rollback_to_savepoint(tx: ResourceArc<TxResource>) -> NifResult<Atom> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     txn.rollback_to_savepoint().map(|_| atoms::ok()).map_err(to_nif_rdb_err)
 }
 
 #[rustler::nif]
 fn transaction_get<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -> NifResult<Term<'a>> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     match txn.get(key.as_slice()) {
         Ok(Some(value)) => {
@@ -460,7 +460,7 @@ fn transaction_get<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -
 
 #[rustler::nif]
 fn transaction_get_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource>, key: Binary) -> NifResult<Term<'a>> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     match txn.get_cf(&*cf, key.as_slice()) {
         Ok(Some(value)) => {
@@ -475,7 +475,7 @@ fn transaction_get_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: Resourc
 
 #[rustler::nif]
 fn transaction_exists<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -> NifResult<Term<'a>> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     let mut ro = ReadOptions::default();
     ro.fill_cache(false);
@@ -489,7 +489,7 @@ fn transaction_exists<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary
 
 #[rustler::nif]
 fn transaction_exists_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource>, key: Binary) -> NifResult<Term<'a>> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     let mut ro = ReadOptions::default();
     ro.fill_cache(false);
@@ -503,28 +503,28 @@ fn transaction_exists_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: Reso
 
 #[rustler::nif]
 fn transaction_put(tx: ResourceArc<TxResource>, key: Binary, val: Binary) -> NifResult<Atom> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     txn.put(key.as_slice(), val.as_slice()).map(|_| atoms::ok()).map_err(to_nif_rdb_err)
 }
 
 #[rustler::nif]
 fn transaction_put_cf(tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource>, key: Binary, val: Binary) -> NifResult<Atom> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     txn.put_cf(&*cf, key.as_slice(), val.as_slice()).map(|_| atoms::ok()).map_err(to_nif_rdb_err)
 }
 
 #[rustler::nif]
 fn transaction_delete(tx: ResourceArc<TxResource>, key: Binary) -> NifResult<Atom> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     txn.delete(key.as_slice()).map(|_| atoms::ok()).map_err(to_nif_rdb_err)
 }
 
 #[rustler::nif]
 fn transaction_delete_cf(tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource>, key: Binary) -> NifResult<Atom> {
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     txn.delete_cf(&*cf, key.as_slice()).map(|_| atoms::ok()).map_err(to_nif_rdb_err)
 }
@@ -560,7 +560,7 @@ fn transaction_scan_cf<'a>(
     start_key.extend_from_slice(prefix);
     start_key.extend_from_slice(cursor);
 
-    let guard = tx.tx.lock().unwrap();
+    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     let mut it = match cf {
         Some(cf) => txn.raw_iterator_cf(&*cf),
@@ -658,7 +658,7 @@ fn parse_iter_move<'a>(term: Term<'a>) -> Result<IterMove<'a>, Error> {
 #[rustler::nif]
 fn iterator_move<'a>(env: Env<'a>, res: ResourceArc<ItResource>, action: Term<'a>) -> NifResult<Term<'a>> {
     let action = parse_iter_move(action)?;
-    let mut g = res.it.lock().unwrap();
+    let mut g = res.it.lock().unwrap_or_else(|p| p.into_inner());
 
     macro_rules! move_and_encode {
         ($it:ident) => {{
@@ -726,55 +726,58 @@ fn apply_entry<'a>(
     testnet: bool,
     testnet_peddlebikes: Vec<Binary>,
 ) -> Result<Term<'a>, Error> {
-    let entry = crate::model::entry::from_bytes(entry_vecpak.as_slice()).map_err(|_| Error::BadArg)?;
+    let __res: std::thread::Result<Result<Term<'a>, Error>> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let entry = crate::model::entry::from_bytes(entry_vecpak.as_slice()).map_err(|_| Error::BadArg)?;
 
-    let txn_opts = TransactionOptions::default();
-    let write_opts = WriteOptions::default();
-    let txn = db.db.transaction_opt(&write_opts, &txn_opts);
+        let txn_opts = TransactionOptions::default();
+        let write_opts = WriteOptions::default();
+        let txn = db.db.transaction_opt(&write_opts, &txn_opts);
 
-    let (txn, muts, muts_rev, receipts, root_receipts, root_contractstate, root_contractstate_hbsmt) = consensus::consensus_apply::apply_entry(
-        &db.db,
-        txn,
-        entry,
-        pk.as_slice(),
-        sk.as_slice(),
-        testnet,
-        testnet_peddlebikes.iter().map(|bin| bin.as_slice().to_vec()).collect(),
-    );
+        let (txn, muts, muts_rev, receipts, root_receipts, root_contractstate, root_contractstate_hbsmt) = consensus::consensus_apply::apply_entry(
+            &db.db,
+            txn,
+            entry,
+            pk.as_slice(),
+            sk.as_slice(),
+            testnet,
+            testnet_peddlebikes.iter().map(|bin| bin.as_slice().to_vec()).collect(),
+        );
 
-    let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(txn) };
-    let term_txn = ResourceArc::new(TxResource { _db: db, tx: Mutex::new(Some(tx_static)) }).encode(env);
+        let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(txn) };
+        let term_txn = ResourceArc::new(TxResource { _db: db, tx: Mutex::new(Some(tx_static)) }).encode(env);
 
-    let mut ob1 = OwnedBinary::new(root_receipts.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
-    ob1.as_mut_slice().copy_from_slice(&root_receipts);
-    let mut ob2 = OwnedBinary::new(root_contractstate.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
-    ob2.as_mut_slice().copy_from_slice(&root_contractstate);
-    // SHIM: shadow HBSMT root (observation only, not consensus). Remove at hardfork.
-    let mut ob3 = OwnedBinary::new(root_contractstate_hbsmt.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
-    ob3.as_mut_slice().copy_from_slice(&root_contractstate_hbsmt);
+        let mut ob1 = OwnedBinary::new(root_receipts.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
+        ob1.as_mut_slice().copy_from_slice(&root_receipts);
+        let mut ob2 = OwnedBinary::new(root_contractstate.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
+        ob2.as_mut_slice().copy_from_slice(&root_contractstate);
+        // SHIM: shadow HBSMT root (observation only, not consensus). Remove at hardfork.
+        let mut ob3 = OwnedBinary::new(root_contractstate_hbsmt.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
+        ob3.as_mut_slice().copy_from_slice(&root_contractstate_hbsmt);
 
-    let mut receipts_list = Vec::new();
-    for r in receipts {
-        let mut map = Term::map_new(env);
-        map = map.map_put(atoms::success(), r.success).ok().unwrap();
-        map = map.map_put(atoms::txid(), to_binary2(env, &r.txid)).ok().unwrap();
-        map = map.map_put(atoms::result(), to_binary2(env, &r.result)).ok().unwrap();
-        map = map.map_put(atoms::exec_used(), to_binary2(env, &r.exec_used)).ok().unwrap();
-        let logs_list: Vec<Binary> = r.logs.iter().map(|log| to_binary2(env, log)).collect();
-        map = map.map_put(atoms::logs(), logs_list).ok().unwrap();
-        receipts_list.push(map);
-    }
+        let mut receipts_list = Vec::new();
+        for r in receipts {
+            let mut map = Term::map_new(env);
+            map = map.map_put(atoms::success(), r.success).ok().unwrap();
+            map = map.map_put(atoms::txid(), to_binary2(env, &r.txid)).ok().unwrap();
+            map = map.map_put(atoms::result(), to_binary2(env, &r.result)).ok().unwrap();
+            map = map.map_put(atoms::exec_used(), to_binary2(env, &r.exec_used)).ok().unwrap();
+            let logs_list: Vec<Binary> = r.logs.iter().map(|log| to_binary2(env, log)).collect();
+            map = map.map_put(atoms::logs(), logs_list).ok().unwrap();
+            receipts_list.push(map);
+        }
 
-    Ok((
-        term_txn,
-        consensus_muts::mutations_to_map(muts),
-        consensus_muts::mutations_to_map(muts_rev),
-        receipts_list,
-        Binary::from_owned(ob1, env).encode(env),
-        Binary::from_owned(ob2, env).encode(env),
-        Binary::from_owned(ob3, env).encode(env),
-    )
-        .encode(env))
+        Ok((
+            term_txn,
+            consensus_muts::mutations_to_map(muts),
+            consensus_muts::mutations_to_map(muts_rev),
+            receipts_list,
+            Binary::from_owned(ob1, env).encode(env),
+            Binary::from_owned(ob2, env).encode(env),
+            Binary::from_owned(ob3, env).encode(env),
+        )
+            .encode(env))
+    }));
+    match __res { Ok(inner) => inner, Err(_) => Err(Error::BadArg) }
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -788,6 +791,7 @@ fn contract_view<'a>(
     fargs: Vec<Binary>,
     testnet: bool,
 ) -> Result<Term<'a>, Error> {
+    let __res: std::thread::Result<Result<Term<'a>, Error>> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
     let entry = crate::model::entry::from_bytes(entry_vecpak.as_slice()).map_err(|_| Error::BadArg)?;
 
     let (success, result, logs) = consensus::consensus_apply::contract_view(
@@ -800,36 +804,41 @@ fn contract_view<'a>(
         testnet,
     );
 
-    let mut ob_result = OwnedBinary::new(result.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
+    let mut ob_result = OwnedBinary::new(result.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
     ob_result.as_mut_slice().copy_from_slice(&result);
 
     let mut logs_list = Vec::new();
     for l in logs {
-        let mut ob_log = OwnedBinary::new(l.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
+        let mut ob_log = OwnedBinary::new(l.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
         ob_log.as_mut_slice().copy_from_slice(&l);
         logs_list.push(Binary::from_owned(ob_log, env))
     }
 
     Ok((success, Binary::from_owned(ob_result, env), logs_list).encode(env))
+    }));
+    match __res { Ok(inner) => inner, Err(_) => Err(Error::BadArg) }
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn contract_validate<'a>(env: Env<'a>, db: ResourceArc<DbResource>, entry_vecpak: Binary, wasmbytes: Binary, testnet: bool) -> Result<Term<'a>, Error> {
+    let __res: std::thread::Result<Result<Term<'a>, Error>> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
     let entry = crate::model::entry::from_bytes(entry_vecpak.as_slice()).map_err(|_| Error::BadArg)?;
 
     let (result, logs) = consensus::consensus_apply::contract_validate(&db.db, entry, wasmbytes.as_slice(), testnet);
 
-    let mut ob_result = OwnedBinary::new(result.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
+    let mut ob_result = OwnedBinary::new(result.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
     ob_result.as_mut_slice().copy_from_slice(&result);
 
     let mut logs_list = Vec::new();
     for l in logs {
-        let mut ob_log = OwnedBinary::new(l.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
+        let mut ob_log = OwnedBinary::new(l.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
         ob_log.as_mut_slice().copy_from_slice(&l);
         logs_list.push(Binary::from_owned(ob_log, env))
     }
 
     Ok((Binary::from_owned(ob_result, env), logs_list).encode(env))
+    }));
+    match __res { Ok(inner) => inner, Err(_) => Err(Error::BadArg) }
 }
 
 #[rustler::nif]
@@ -849,7 +858,7 @@ fn vecpak_decode<'a>(env: Env<'a>, bin: Binary) -> Result<Term<'a>, Error> {
     Ok(term.encode(env))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn freivalds(tensor: Binary, vr_b3: Binary) -> bool {
     crate::consensus::bic::sol_freivalds::freivalds(tensor.as_slice(), vr_b3.as_slice())
 }
@@ -866,7 +875,10 @@ fn bintree_root<'a>(env: Env<'a>, proplist: Vec<(Option<Binary<'a>>, Binary<'a>,
     hubt.batch_update(ops);
     let root = hubt.root();
 
-    let mut ob = OwnedBinary::new(root.len()).ok_or_else(|| Error::Term(Box::new("alloc failed"))).unwrap();
+    let mut ob = match OwnedBinary::new(root.len()) {
+        Some(b) => b,
+        None => return atoms::error().encode(env),
+    };
     ob.as_mut_slice().copy_from_slice(&root);
     Binary::from_owned(ob, env).encode(env)
 }
@@ -991,7 +1003,7 @@ fn bintree_root_verify<'a>(env: Env<'a>, expected_root: Binary<'a>, proof_ex: Te
 }
 
 //rocksdb proof
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn bintree_contractstate_root_prove<'a>(env: Env<'a>, db: ResourceArc<DbResource>, ns: Option<Binary<'a>>, key: Binary<'a>) -> Term<'a> {
     let cf_handle = db.db.cf_handle("contractstate_tree").unwrap();
     let mut iter = db.db.raw_iterator_cf(&cf_handle);
@@ -1108,18 +1120,18 @@ fn protocol_circulating_without_burn<'a>(env: Env<'a>, epoch: u64) -> i128 {
     crate::consensus::bic::epoch::circulating_without_burn(epoch)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn build_tx_hashfilter<'a>(env: Env<'a>, signer: Binary<'a>, arg0: Binary<'a>, contract: Binary<'a>, function: Binary<'a>) -> Binary<'a> {
     let key = tx_filter::create_filter_key(&[&signer, &arg0, &contract, &function]);
     to_binary2(env, &key)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn build_tx_hashfilters<'a>(env: Env<'a>, txus: Vec<Term<'a>>) -> NifResult<Vec<(Binary<'a>, Binary<'a>)>> {
     tx_filter::build_tx_hashfilters(env, txus)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn query_tx_hashfilter<'a>(
     env: Env<'a>,
     db: ResourceArc<DbResource>,
@@ -1131,6 +1143,14 @@ fn query_tx_hashfilter<'a>(
     sort: bool,
     cursor: Option<Binary<'a>>,
 ) -> NifResult<(Option<Binary<'a>>, Vec<Binary<'a>>)> {
+    if limit > 100_000 {
+        return Err(Error::BadArg);
+    }
+    for b in [&signer, &arg0, &contract, &function] {
+        if b.as_slice().len() > 4096 {
+            return Err(Error::BadArg);
+        }
+    }
     tx_filter::query_tx_hashfilter(env, &db.db, &signer, &arg0, &contract, &function, limit as usize, sort, cursor.map(|b| b.as_slice()))
 }
 

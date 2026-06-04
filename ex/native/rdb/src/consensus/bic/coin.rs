@@ -6,6 +6,8 @@ use vecpak::{decode, encode, Term};
 pub const DECIMALS: u32 = 9;
 pub const BURN_ADDRESS: [u8; 48] = [0u8; 48];
 
+pub const MAX_MINT_PER_CALL: i128 = 1_000_000_000_000_000_000_000_000_000_000_000_000i128;
+
 pub fn to_flat(coins: i128) -> i128 {
     coins.checked_mul(1_000_000_000).expect("i128_overflow")
 }
@@ -126,6 +128,22 @@ pub fn call_transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, args
     }
 }
 
+pub fn validate_name(name: &[u8], invalid: &'static str, too_short: &'static str, too_long: &'static str) {
+    if !name.iter().all(u8::is_ascii_alphanumeric) {
+        panic_any(invalid)
+    }
+    if name.is_empty() {
+        panic_any(too_short)
+    }
+    if name.len() > 32 {
+        panic_any(too_long)
+    }
+}
+
+pub fn validate_symbol(symbol: &[u8]) {
+    validate_name(symbol, "invalid_symbol", "symbol_too_short", "symbol_too_long")
+}
+
 pub fn call_create_and_mint(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Vec<Vec<u8>>) {
     if args.len() < 2 {
         panic_any("invalid_args")
@@ -137,16 +155,8 @@ pub fn call_create_and_mint(env: &mut crate::consensus::consensus_apply::ApplyEn
     let pausable = args.get(4).and_then(|v| if v.is_empty() { None } else { Some(v.as_slice()) }).unwrap_or(b"false");
     let soulbound = args.get(5).and_then(|v| if v.is_empty() { None } else { Some(v.as_slice()) }).unwrap_or(b"false");
 
-    let symbol: Vec<u8> = symbol_original.iter().copied().filter(u8::is_ascii_alphanumeric).collect();
-    if symbol_original != symbol.as_slice() {
-        panic_any("invalid_symbol")
-    }
-    if symbol.len() < 1 {
-        panic_any("symbol_too_short")
-    }
-    if symbol.len() > 32 {
-        panic_any("symbol_too_long")
-    }
+    validate_symbol(symbol_original);
+    let symbol = symbol_original.to_vec();
 
     if !consensus::bic::coin_symbol_reserved::is_free(&symbol, &env.caller_env.account_caller) {
         panic_any("symbol_reserved")
@@ -158,6 +168,9 @@ pub fn call_create_and_mint(env: &mut crate::consensus::consensus_apply::ApplyEn
     let amount = std::str::from_utf8(&amount).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_amount"));
     if amount <= 0 {
         panic_any("invalid_amount")
+    }
+    if amount > MAX_MINT_PER_CALL {
+        panic_any("mint_amount_exceeds_cap")
     }
 
     let decimals = std::str::from_utf8(&decimals).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_decimals"));
@@ -210,6 +223,9 @@ pub fn mint(env: &mut crate::consensus::consensus_apply::ApplyEnv, receiver: &[u
     }
     if amount <= 0 {
         panic_any("invalid_amount")
+    }
+    if amount > MAX_MINT_PER_CALL {
+        panic_any("mint_amount_exceeds_cap")
     }
 
     if !exists(env, &symbol) {

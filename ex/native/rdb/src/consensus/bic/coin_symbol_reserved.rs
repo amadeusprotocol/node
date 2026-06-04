@@ -79,6 +79,29 @@ fn is_reserved_symbol(upper: &[u8]) -> bool {
 }
 
 #[inline]
+fn strip_punct(input: &[u8]) -> Vec<u8> {
+    input.iter().copied().filter(u8::is_ascii_alphanumeric).collect()
+}
+
+#[inline]
+fn is_reserved_punctuation_stripped(stripped_upper: &[u8]) -> bool {
+    matches!(
+        stripped_upper,
+        b"FARTBOY"        // $FARTBOY
+        | b"RCGE"         // $RCGE
+        | b"BSCUSD"       // BSC-USD
+        | b"BTCB"         // BTC.B
+        | b"CGETHHASHKEY" // CGETH.HASHKEY
+        | b"MAG7SSI"      // MAG7.SSI
+        | b"SOLVBTCCORE"  // SOLVBTC.CORE
+        | b"SOLVBTCJUP"   // SOLVBTC.JUP
+        | b"USDCE"        // USDC.E
+        | b"USDTE"        // USDT.E
+        | b"USD"          // USD+
+    )
+}
+
+#[inline]
 pub fn is_free(symbol: &[u8], _caller: &[u8]) -> bool {
     let up = ascii_upper(symbol);
     if up.starts_with(b"AMA") {
@@ -87,5 +110,11 @@ pub fn is_free(symbol: &[u8], _caller: &[u8]) -> bool {
     if up.starts_with(b"W") {
         return false;
     }
-    !is_reserved_symbol(&up)
+    if is_reserved_symbol(&up) {
+        return false;
+    }
+    if is_reserved_punctuation_stripped(&strip_punct(&up)) {
+        return false;
+    }
+    true
 }
