@@ -150,8 +150,9 @@ defmodule API.Chain do
         {_, entry} = pop_in(entry, [:header, :txs_hash]) #old format; keep for backwards compat
         entry = put_in(entry, [:hash], Base58.encode(entry.hash))
         entry = if !entry[:mask] do entry else
-          put_in(entry, [:mask], Base58.encode(entry.mask))
-          put_in(entry, [:mask_size], entry.mask_size)
+          entry
+          |> put_in([:mask], Base58.encode(entry.mask))
+          |> put_in([:mask_size], entry.mask_size)
         end
         entry = put_in(entry, [:header, :dr], Base58.encode(entry.header.dr))
         entry = put_in(entry, [:header, :vr], Base58.encode(entry.header.vr))
@@ -171,14 +172,4 @@ defmodule API.Chain do
             entry
         end
     end
-end
-
-defmodule API do
-  def maybe_b58(size, binary) do
-    cond do
-      size != byte_size(binary) -> Base58.decode(binary)
-      binary == :binary.copy(<<"1">>, size) -> :binary.copy(<<0>>, size)
-      true -> binary
-    end
-  end
 end

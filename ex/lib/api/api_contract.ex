@@ -29,12 +29,19 @@ defmodule API.Contract do
       %{error: error, logs: logs}
     end
 
+    @richlist_top 1000
+    @richlist_ttl_ms 60 * 60_000
+
     def richlist() do
+      API.cached(:richlist, @richlist_ttl_ms, fn -> richlist_compute() end)
+    end
+    defp richlist_compute() do
       key = "account:#{:binary.copy(<<0>>, 48)}:balance:AMA"
       {acc, count} = richlist_1(key, {[], 0})
       acc = acc
       |> Enum.filter(& &1.symbol == "AMA")
       |> Enum.sort_by(& &1.flat, :desc)
+      |> Enum.take(@richlist_top)
       {acc, count}
     end
     def richlist_1(key, {acc, count}) do
@@ -45,7 +52,7 @@ defmodule API.Contract do
           key = <<"account:", (pk+1)::384, ":balance:AMA">>
           flat = :erlang.binary_to_integer(value)
           entry = %{pk: Base58.encode(<<pk::384>>), symbol: "AMA", flat: flat, float: trunc(BIC.Coin.from_flat(flat))}
-          richlist_1(key, {acc ++ [entry], count + 1})
+          richlist_1(key, {[entry | acc], count + 1})
         {<<"account:", pk::384, _::binary>>, _} ->
           key = <<"account:", pk::384, ":balance:AMA">>
           richlist_1(key, {acc, count})

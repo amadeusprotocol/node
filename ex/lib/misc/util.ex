@@ -122,18 +122,23 @@ defmodule Util do
         url = String.replace(url, "http://", "ws://")
     end
 
+    def https_ssl_opts(url) do
+        case URI.parse(url) do
+            %{scheme: "https", host: host} when is_binary(host) ->
+                %{ssl_options: [
+                    {:server_name_indication, ~c"#{host}"},
+                    {:verify, :verify_peer},
+                    {:depth, 99},
+                    {:cacerts, :certifi.cacerts()},
+                    {:partial_chain, &Photon.GenTCP.partial_chain/1},
+                    {:customize_hostname_check, [{:match_fun, :public_key.pkix_verify_hostname_match_fun(:https)}]}
+                ]}
+            _ -> %{}
+        end
+    end
+
     def get(url, headers \\ %{}, opts \\ %{}) do
-        %{host: host} = URI.parse(url)
-        ssl_opts = [
-            {:server_name_indication, ~c"#{host}"},
-            {:verify,:verify_peer},
-            {:depth,99},
-            {:cacerts, :certifi.cacerts()},
-            #{:verify_fun, verifyFun},
-            {:partial_chain, &Photon.GenTCP.partial_chain/1},
-            {:customize_hostname_check, [{:match_fun, :public_key.pkix_verify_hostname_match_fun(:https)}]}
-        ]
-        opts = Map.merge(opts, %{ssl_options: ssl_opts})
+        opts = Map.merge(opts, https_ssl_opts(url))
         :comsat_http.get(url, headers, opts)
     end
 
@@ -145,17 +150,7 @@ defmodule Util do
     end
 
     def delete(url, body, headers \\ %{}, opts \\ %{}) do
-        %{host: host} = URI.parse(url)
-        ssl_opts = [
-            {:server_name_indication, ~c"#{host}"},
-            {:verify,:verify_peer},
-            {:depth,99},
-            {:cacerts, :certifi.cacerts()},
-            #{:verify_fun, verifyFun},
-            {:partial_chain, &Photon.GenTCP.partial_chain/1},
-            {:customize_hostname_check, [{:match_fun, :public_key.pkix_verify_hostname_match_fun(:https)}]}
-        ]
-        opts = Map.merge(opts, %{ssl_options: ssl_opts})
+        opts = Map.merge(opts, https_ssl_opts(url))
         body = if !is_binary(body) do JSX.encode!(body) else body end
         :comsat_http.delete(url, headers, body, opts)
     end
@@ -167,17 +162,7 @@ defmodule Util do
     end
 
     def post(url, body, headers \\ %{}, opts \\ %{}) do
-        %{host: host} = URI.parse(url)
-        ssl_opts = [
-            {:server_name_indication, ~c"#{host}"},
-            {:verify,:verify_peer},
-            {:depth,99},
-            {:cacerts, :certifi.cacerts()},
-            #{:verify_fun, verifyFun},
-            {:partial_chain, &Photon.GenTCP.partial_chain/1},
-            {:customize_hostname_check, [{:match_fun, :public_key.pkix_verify_hostname_match_fun(:https)}]}
-        ]
-        opts = Map.merge(opts, %{ssl_options: ssl_opts})
+        opts = Map.merge(opts, https_ssl_opts(url))
         body = if !is_binary(body) do JSX.encode!(body) else body end
         :comsat_http.post(url, headers, body, opts)
     end
@@ -190,17 +175,7 @@ defmodule Util do
     end
 
     def put(url, body, headers \\ %{}, opts \\ %{}) do
-        %{host: host} = URI.parse(url)
-        ssl_opts = [
-            {:server_name_indication, ~c"#{host}"},
-            {:verify,:verify_peer},
-            {:depth,99},
-            {:cacerts, :certifi.cacerts()},
-            #{:verify_fun, verifyFun},
-            {:partial_chain, &Photon.GenTCP.partial_chain/1},
-            {:customize_hostname_check, [{:match_fun, :public_key.pkix_verify_hostname_match_fun(:https)}]}
-        ]
-        opts = Map.merge(opts, %{ssl_options: ssl_opts})
+        opts = Map.merge(opts, https_ssl_opts(url))
         body = if !is_binary(body) do JSX.encode!(body) else body end
         :comsat_http.put(url, headers, body, opts)
     end

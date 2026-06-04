@@ -1,6 +1,18 @@
 defmodule RPC.API do
   defp http_opts(url) do
-    %{ssl_options: [{:server_name_indication, ~c"#{URI.parse(url).host}"}, {:verify, :verify_none}]}
+    case URI.parse(url) do
+      %{scheme: "https", host: host} when is_binary(host) ->
+        %{ssl_options: [
+          {:server_name_indication, ~c"#{host}"},
+          {:verify, :verify_peer},
+          {:depth, 99},
+          {:cacerts, :certifi.cacerts()},
+          {:partial_chain, &Photon.GenTCP.partial_chain/1},
+          {:customize_hostname_check, [{:match_fun, :public_key.pkix_verify_hostname_match_fun(:https)}]}
+        ]}
+      _ ->
+        %{}
+    end
   end
 
   # JSON-decoded GET; raises if upstream is not 200. For success-path RPC calls.

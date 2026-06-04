@@ -78,7 +78,8 @@ defmodule TXPool do
           with [<<sol_epoch::32-little, sol_svrh::32-binary, _::binary>> = arg0 | _] <- action.args,
                true <- sol_epoch == chain_epoch,
                true <- sol_svrh == chain_segment_vr_hash,
-               true <- byte_size(arg0) == BIC.Sol.size() do
+               true <- byte_size(arg0) == BIC.Sol.size(),
+               true <- BIC.Sol.verify_hash_diff(chain_epoch, Blake3.hash(arg0), chain_diff_bits) do
             :ok
           else
             _ -> throw(%{error: :invalid_tx_sol, key: {txu.tx.nonce, txu.hash}})

@@ -128,8 +128,10 @@ defmodule DB.Chain do
 
   def validator_for_height(height, db_opts \\ %{}) do
     validators = validators_for_height(height, db_opts)
-    index = rem(height, length(validators))
-    Enum.at(validators, index)
+    case validators do
+      [] -> nil
+      _ -> Enum.at(validators, rem(height, length(validators)))
+    end
   end
 
   def validator_for_height_current(db_opts \\ %{}) do

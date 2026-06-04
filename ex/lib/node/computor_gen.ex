@@ -65,7 +65,7 @@ defmodule ComputorGen do
           sol = UPOW.compute_for(epoch, EntryGenesis.signer(), EntryGenesis.pop(), pk, :crypto.strong_rand_bytes(96), 100)
           if sol do
             IO.puts "🔢 tensor matmul complete! broadcasting sol.."
-            NodeGen.broadcast(:sol, :trainers, [sol])
+            NodeGen.broadcast(%{op: :sol, sol: sol})
           end
 
         true ->
@@ -77,7 +77,7 @@ defmodule ComputorGen do
             IO.puts "🔢 tensor matmul complete! tx #{Base58.encode(hash)}"
 
             TXPool.insert(packed_tx)
-            NodeGen.broadcast(:txpool, :trainers, [[packed_tx]])
+            NodeGen.broadcast(NodeProto.event_tx(packed_tx))
           end
     end
     state
@@ -87,6 +87,6 @@ defmodule ComputorGen do
     sk = Application.fetch_env!(:ama, :trainer_sk)
     packed_tx = TX.build(sk, "Epoch", "set_emission_address", [to_address])
     TXPool.insert(packed_tx)
-    NodeGen.broadcast(:txpool, :trainers, [[packed_tx]])
+    NodeGen.broadcast(NodeProto.event_tx(packed_tx))
   end
 end

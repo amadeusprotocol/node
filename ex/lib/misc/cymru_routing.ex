@@ -6,12 +6,18 @@ defmodule CymruRouting do
   @recv_timeout 6_000
 
   def lookup(ip) do
-    with {:ok, s} <- normalize_ip(ip),
-         {:ok, results} <- query_whois([s]) do
-      case Map.get(results, s) do
-        nil -> {:error, :not_found}
-        m   -> {:ok, m}
+    try do
+      with {:ok, s} <- normalize_ip(ip),
+           {:ok, results} <- query_whois([s]) do
+        case Map.get(results, s) do
+          nil -> {:error, :not_found}
+          m   -> {:ok, m}
+        end
       end
+    rescue _ -> {:error, :cymru_failed}
+    catch
+      :exit, _ -> {:error, :cymru_failed}
+      _, _ -> {:error, :cymru_failed}
     end
   end
 
@@ -81,11 +87,15 @@ defmodule CymruRouting do
       "end\n"
     ]
 
-    {:ok, sock} = :gen_tcp.connect(@host, @port, @tcp_opts, @connect_timeout)
-    :ok = :gen_tcp.send(sock, q)
-    data = recv_all(sock, <<>>)
-    :ok = :gen_tcp.close(sock)
-    {:ok, parse_whois(data)}
+    case :gen_tcp.connect(@host, @port, @tcp_opts, @connect_timeout) do
+      {:ok, sock} ->
+        :gen_tcp.send(sock, q)
+        data = recv_all(sock, <<>>)
+        :gen_tcp.close(sock)
+        {:ok, parse_whois(data)}
+      {:error, reason} ->
+        {:error, {:cymru_connect_failed, reason}}
+    end
   end
 
   defp recv_all(sock, acc) do

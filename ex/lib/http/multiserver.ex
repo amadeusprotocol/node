@@ -267,8 +267,12 @@ defmodule Ama.MultiServer do
                 quick_reply(%{state|request: r}, JSX.encode!(result))
             r.method == "POST" and r.path == "/api/contract/get_prefix" ->
                 {r, key} = Photon.HTTP.read_body_all(state.socket, r)
-                result = API.Contract.get_prefix(key)
-                quick_reply(%{state|request: r}, RDB.vecpak_encode(result))
+                if not is_binary(key) or byte_size(key) < 8 do
+                    quick_reply(%{state|request: r}, JSX.encode!(%{error: :prefix_too_short, min: 8}), 400)
+                else
+                    result = API.Contract.get_prefix(key)
+                    quick_reply(%{state|request: r}, RDB.vecpak_encode(result))
+                end
             r.method == "POST" and r.path == "/api/contract/view" ->
                 {r, vecpak} = Photon.HTTP.read_body_all(state.socket, r)
                 m = RDB.vecpak_decode(vecpak)
@@ -297,7 +301,7 @@ defmodule Ama.MultiServer do
                         contract: if query[:contract_b58] do Base58.decode(query.contract_b58) else query[:contract] end,
                         function: query[:function],
                         
-                        limit: :erlang.binary_to_integer(filters.limit),
+                        limit: min(:erlang.binary_to_integer(filters.limit), 1000),
                         sort: case filters.sort do "desc" -> :desc; _ -> :asc end,
                         cursor: if query[:cursor_b58] do Base58.decode(query.cursor_b58) else query[:cursor] end,
 

@@ -1,17 +1,26 @@
 defmodule NodeGenNetguard do
   @max_frames_per_6_sec 40_000
+  @max_ips_per_shard 10_000
 
   def frame_ok(peer_ip) do
     phash = :erlang.phash2(peer_ip, 8)
-    counter = :ets.update_counter(:"NODENetGuardTotalFrames#{phash}", peer_ip, 1, {peer_ip, 0})
-    counter < @max_frames_per_6_sec
+    tbl = :"NODENetGuardTotalFrames#{phash}"
+    if :ets.lookup(tbl, peer_ip) == [] and :ets.info(tbl, :size) >= @max_ips_per_shard do
+      true
+    else
+      :ets.update_counter(tbl, peer_ip, 1, {peer_ip, 0}) < @max_frames_per_6_sec
+    end
   end
 
   def op_ok(peer_ip, op) do
     if quota = NodeOps.quota(op) do
       phash = :erlang.phash2(peer_ip, 8)
-      counter = :ets.update_counter(:"NODENetGuardPer6Seconds#{phash}", {peer_ip, op}, 1, {{peer_ip, op}, 0})
-      counter < quota
+      tbl = :"NODENetGuardPer6Seconds#{phash}"
+      if :ets.lookup(tbl, {peer_ip, op}) == [] and :ets.info(tbl, :size) >= @max_ips_per_shard do
+        true
+      else
+        :ets.update_counter(tbl, {peer_ip, op}, 1, {{peer_ip, op}, 0}) < quota
+      end
     end
   end
 

@@ -13,13 +13,14 @@ defmodule NodeState do
     end)
   end
   def handle(:new_phone_who_dis_reply, istate, term) do
+    if !is_map(Map.get(term, :anr)) or !is_integer(term.anr[:ts]), do: throw(:bad_anr)
     anr = NodeANR.verify_and_unpack(term.anr)
 
     #signed within 60 seconds
     ts = :os.system_time(1)
     fresh6s = abs(ts - term.anr.ts) <= 60
 
-    if !!anr and istate.peer.ip4 == anr.ip4 and fresh6s do
+    if !!anr and istate.peer.ip4 == anr.ip4 and anr.pk == istate.peer.pk and fresh6s do
       send(NodeGen, {:handle_sync, :new_phone_who_dis_reply_ns, istate, %{pk: anr.pk, anr: anr}})
     end
   end
@@ -89,11 +90,13 @@ defmodule NodeState do
   end
 
   def handle(:event_entry, istate, term) do
-    seen_time = :os.system_time(1000)
-    %{error: :ok, entry: entry} = Entry.unpack_and_validate_from_net(term.entry_packed)
-    if Entry.height(entry) >= DB.Chain.rooted_height() do
-      DB.Entry.insert(entry)
-      NodeANR.set_tips(istate.peer.pk, nil, Map.merge(entry, %{sig_error: :ok}))
+    case Entry.unpack_and_validate_from_net(term.entry_packed) do
+      %{error: :ok, entry: entry} ->
+        if Entry.height(entry) >= DB.Chain.rooted_height() do
+          DB.Entry.insert(entry)
+          NodeANR.set_tips(istate.peer.pk, nil, Map.merge(entry, %{sig_error: :ok}))
+        end
+      _ -> :ok
     end
   end
 
@@ -129,10 +132,13 @@ defmodule NodeState do
       rooted_tip = DB.Chain.rooted_height()
 
       Enum.each(trie[:entries]||[], fn(entry_packed)->
-        %{error: :ok, entry: entry} = Entry.unpack_and_validate_from_net(entry_packed)
-        if Entry.height(entry) >= rooted_tip do
-          DB.Entry.insert(entry)
-          NodeANR.set_tips(istate.peer.pk, nil, Map.merge(entry, %{sig_error: :ok}))
+        case Entry.unpack_and_validate_from_net(entry_packed) do
+          %{error: :ok, entry: entry} ->
+            if Entry.height(entry) >= rooted_tip do
+              DB.Entry.insert(entry)
+              NodeANR.set_tips(istate.peer.pk, nil, Map.merge(entry, %{sig_error: :ok}))
+            end
+          _ -> :ok
         end
       end)
 
