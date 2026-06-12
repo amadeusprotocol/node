@@ -47,7 +47,7 @@ defmodule FabricSyncGen do
     behind_root = temporal_height - rooted_height
 
     if behind_root > 1000 do
-      entries = Enum.to_list(rooted_height..temporal_height)
+      entries = Enum.to_list(rooted_height..temporal_height//1)
       IO.puts "Behind Root: Syncing #{length(entries)} entries"
       next_heights = Enum.to_list(entries)
       |> Enum.take(1000)
@@ -61,7 +61,7 @@ defmodule FabricSyncGen do
 
     cond do
       behind_bft > 0 ->
-        entries = (try do Enum.to_list((temporal_height+1)..height_network_bft) catch _,_ -> [height_network_bft] end)
+        entries = (try do Enum.to_list((temporal_height+1)..height_network_bft//1) catch _,_ -> [height_network_bft] end)
         IO.puts "Behind BFT: Syncing #{length(entries)} entries"
         next_heights = Enum.to_list(entries)
         |> Enum.take(1000)
@@ -73,7 +73,7 @@ defmodule FabricSyncGen do
         |> fetch_chunks(temporal_peers)
 
       behind_root > 0 ->
-        next_heights = (try do  Enum.to_list((rooted_height+1)..height_network_root) catch _,_ -> [height_network_root] end)
+        next_heights = (try do  Enum.to_list((rooted_height+1)..height_network_root//1) catch _,_ -> [height_network_root] end)
         |> Enum.take(1000)
         |> Enum.uniq()
         {rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
@@ -84,7 +84,7 @@ defmodule FabricSyncGen do
 
       #TODO: only fetch missing attestations
       behind_temp > 0 ->
-        next_heights = (try do Enum.to_list(temporal_height..height_network_temp) catch _,_-> [height_network_temp] end)
+        next_heights = (try do Enum.to_list(temporal_height..height_network_temp//1) catch _,_-> [height_network_temp] end)
         |> Enum.take(1000)
         |> Enum.uniq()
         {rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :validators)
