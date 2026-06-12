@@ -112,15 +112,21 @@ defmodule SpecialMeetingGen do
 
   def handle_info({:add_slash_trainer_entry_reply, entry_hash, pk, signature}, state = %{slash_trainer: _}) do
     st = state.slash_trainer
-    true = st.entry.hash == entry_hash
-    if pk in st.validators do
-      aggsig = BLS12AggSig.add_padded(st.entry.aggsig, st.validators, pk, signature)
-      state = put_in(state, [:slash_trainer, :entry, :aggsig], aggsig)
-      IO.inspect {:entry, st.aggsig.mask_set_size / st.aggsig.mask_size}
-      {:noreply, state}
-    else
-      {:noreply, state}
+    cond do
+      !st[:entry] or !st.entry[:entry] -> {:noreply, state}
+      st.entry.entry.hash != entry_hash -> {:noreply, state}
+      pk not in st.validators -> {:noreply, state}
+      true ->
+        aggsig = BLS12AggSig.add_padded(st.entry.aggsig, st.validators, pk, signature)
+        state = put_in(state, [:slash_trainer, :entry, :aggsig], aggsig)
+        IO.inspect {:entry, aggsig.mask_set_size / aggsig.mask_size}
+        {:noreply, state}
     end
+  end
+
+  def handle_info(msg, state) do
+    IO.inspect {:unknown_special_meeting_msg, msg}
+    {:noreply, state}
   end
 
   def tick(state) do

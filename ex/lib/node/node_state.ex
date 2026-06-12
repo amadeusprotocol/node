@@ -188,22 +188,25 @@ defmodule NodeState do
   def handle(:special_business_reply, istate, term) do
     #IO.inspect {:special_business_reply, term.business}
     op = term.business.op
+    validators = DB.Chain.validators_for_height(DB.Chain.height() + 1) || []
     cond do
       #istate.peer.pk != <<>> -> nil
       op == "slash_trainer_tx_reply" ->
         b = term.business
         msg = <<"slash_trainer", b.epoch::32-little, b.malicious_pk::binary>>
-        sigValid = BlsEx.verify?(b.pk, b.signature, msg, BLS12AggSig.dst_motion())
+        sigValid = b.pk in validators and BlsEx.verify?(b.pk, b.signature, msg, BLS12AggSig.dst_motion())
         if sigValid do
           send(SpecialMeetingGen, {:add_slash_trainer_tx_reply, term.business.pk, term.business.signature})
         end
 
       op == "slash_trainer_entry_reply" ->
         b = term.business
-        sigValid = BlsEx.verify?(b.pk, b.signature, b.entry_hash, BLS12AggSig.dst_entry())
+        sigValid = b.pk in validators and BlsEx.verify?(b.pk, b.signature, b.entry_hash, BLS12AggSig.dst_entry())
         if sigValid do
           send(SpecialMeetingGen, {:add_slash_trainer_entry_reply, b.entry_hash, b.pk, b.signature})
         end
+
+      true -> nil
     end
   end
 
