@@ -2,6 +2,7 @@ pub mod atoms;
 pub mod consensus;
 pub mod model;
 pub mod tx_filter;
+pub mod upow;
 
 use rustler::types::{Binary, OwnedBinary};
 use rustler::{Atom, Encoder, Env, Error, NifResult, NifTaggedEnum, ResourceArc, Term};
@@ -861,6 +862,50 @@ fn vecpak_decode<'a>(env: Env<'a>, bin: Binary) -> Result<Term<'a>, Error> {
 #[rustler::nif(schedule = "DirtyCpu")]
 fn freivalds(tensor: Binary, vr_b3: Binary) -> bool {
     crate::consensus::bic::sol_freivalds::freivalds(tensor.as_slice(), vr_b3.as_slice())
+}
+
+/// UPOW2 computer. Computes up to `iterations` nonce attempts (each a real 16x50240
+/// * 50240x16 matmul), split across `threads` workers (min 1), and returns the first
+/// 1264-byte sol whose Blake3 hash has at least `diff_bits` leading zero bits (the
+/// network difficulty), or nil. DirtyCpu.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn compute_upow<'a>(
+    env: Env<'a>,
+    epoch: u64,
+    segment_vr_hash: Binary,
+    trainer: Binary,
+    pop: Binary,
+    computor: Binary,
+    diff_bits: u64,
+    iterations: u64,
+    threads: u64,
+) -> NifResult<Term<'a>> {
+    use crate::upow;
+    if segment_vr_hash.len() != 32 || trainer.len() != 48 || pop.len() != 96 || computor.len() != 48 {
+        return Err(Error::BadArg);
+    }
+
+    // Build the 240-byte seed template; nonce bytes [228..240] are filled per attempt.
+    let mut seed = [0u8; upow::PREAMBLE];
+    seed[0..4].copy_from_slice(&(epoch as u32).to_le_bytes());
+    seed[4..36].copy_from_slice(segment_vr_hash.as_slice());
+    seed[36..84].copy_from_slice(trainer.as_slice());
+    seed[84..180].copy_from_slice(pop.as_slice());
+    seed[180..228].copy_from_slice(computor.as_slice());
+
+    let nthreads = (threads as usize).max(1);
+    let rng_seeds: Vec<u64> = (0..nthreads).map(|_| rand::random::<u64>()).collect();
+
+    let found = std::panic::catch_unwind(|| upow::compute(&seed, diff_bits as u32, iterations, nthreads, &rng_seeds)).unwrap_or(None);
+
+    match found {
+        Some(sol) => {
+            let mut ob = OwnedBinary::new(sol.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
+            ob.as_mut_slice().copy_from_slice(&sol);
+            Ok((atoms::ok(), Binary::from_owned(ob, env)).encode(env))
+        }
+        None => Ok(atoms::nil().encode(env)),
+    }
 }
 
 #[rustler::nif]

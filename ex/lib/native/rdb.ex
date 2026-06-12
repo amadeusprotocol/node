@@ -53,6 +53,8 @@ defmodule RDB do
 
   def freivalds(_tensor, _vr), do: :erlang.nif_error(:nif_not_loaded)
 
+  def compute_upow(_epoch, _segment_vr_hash, _trainer, _pop, _computor, _diff_bits, _iterations, _threads), do: :erlang.nif_error(:nif_not_loaded)
+
   def bintree_root(_propslist), do: :erlang.nif_error(:nif_not_loaded)
   def bintree_root_prove(_propslist, _ns, _key), do: :erlang.nif_error(:nif_not_loaded)
   def bintree_root_verify(_expected_root, _proof, _ns, _key, _value), do: :erlang.nif_error(:nif_not_loaded)

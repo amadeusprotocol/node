@@ -1,6 +1,9 @@
 defmodule UPOW do
     def compute_for(epoch, trainer, pop, computor, segment_vr, itrs \\ 30)
-    def compute_for(epoch, trainer, pop, computor, segment_vr, 0), do: nil
+    def compute_for(epoch, trainer, pop, computor, segment_vr, itrs) when epoch >= 156 do
+        compute(epoch, trainer, pop, computor, Blake3.hash(segment_vr), DB.Chain.diff_bits(), itrs, 0)
+    end
+    def compute_for(_epoch, _trainer, _pop, _computor, _segment_vr, 0), do: nil
     def compute_for(epoch, trainer, pop, computor, segment_vr, itrs) do
         {hash, sol} = branch_sol(epoch, trainer, pop, computor, segment_vr)
         valid = BIC.Sol.verify_hash(epoch, hash)
@@ -8,6 +11,13 @@ defmodule UPOW do
             sol
         else
             compute_for(epoch, trainer, pop, computor, segment_vr, itrs - 1)
+        end
+    end
+
+    def compute(epoch, trainer, pop, computor, segment_vr_hash, diff_bits, iterations \\ 100, threads \\ 0) do
+        case RDB.compute_upow(epoch, segment_vr_hash, trainer, pop, computor, diff_bits, iterations, threads) do
+            {:ok, sol} -> sol
+            nil -> nil
         end
     end
 
