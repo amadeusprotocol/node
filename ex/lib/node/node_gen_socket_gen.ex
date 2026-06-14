@@ -143,6 +143,7 @@ defmodule NodeGenSocketGen do
             case :gen_udp.send(state.socket, ip, port, msg_packed) do
               :ok -> :ok
               {:error, :eperm} -> :rand.uniform(100) == 1 && IO.puts("udp_send_error eperm")
+              {:error, other} -> :rand.uniform(100) == 1 && IO.puts("udp_send_error #{inspect(other)}")
             end
           end)
         end)
