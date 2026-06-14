@@ -375,12 +375,16 @@ fn collapse_ops_to_latest(ops: Vec<Op>) -> BTreeMap<Path, Option<(Hash, Hash)>> 
 /// per-batch split writes/deletes to the txn. Shared by `HbsmtRdb` and
 /// `hbsmt_batch_update_env` — both use the same single-CF layout where
 /// `cf_leaves` and `cf_splits` point at the same handle.
-fn descend_and_flush(
+/// Descend the dirty set and rehash every touched internal node, returning the
+/// per-batch split writes/deletes WITHOUT flushing them. Callers flush either
+/// straight to the txn (`descend_and_flush`) or through `kv_put`/`kv_delete` so
+/// the writes are recorded as mutations (`hbsmt_batch_update_env_muts`).
+fn descend_and_collect_splits(
     txn: &Transaction<TransactionDB<MultiThreaded>>,
     cf: &Arc<BoundColumnFamily>,
     empties: &[Hash; 257],
     dirty: &[Path],
-) {
+) -> (FxHashMap<(Path, u16), Hash>, Vec<(Path, u16)>) {
     let mut ctx = Ctx {
         txn,
         cf_leaves: cf,
@@ -391,10 +395,20 @@ fn descend_and_flush(
         split_deletes: Vec::new(),
     };
     let _ = descend_and_rehash(&mut ctx, [0u8; 32], 0, dirty);
-    for ((path, depth), hash) in ctx.split_writes {
+    (ctx.split_writes, ctx.split_deletes)
+}
+
+fn descend_and_flush(
+    txn: &Transaction<TransactionDB<MultiThreaded>>,
+    cf: &Arc<BoundColumnFamily>,
+    empties: &[Hash; 257],
+    dirty: &[Path],
+) {
+    let (split_writes, split_deletes) = descend_and_collect_splits(txn, cf, empties, dirty);
+    for ((path, depth), hash) in split_writes {
         txn.put_cf(cf, split_key(&path, depth), hash).unwrap();
     }
-    for (path, depth) in ctx.split_deletes {
+    for (path, depth) in split_deletes {
         let _ = txn.delete_cf(cf, split_key(&path, depth));
     }
 }
@@ -613,6 +627,58 @@ pub fn hbsmt_batch_update_env(env: &mut ApplyEnv, cf_name: &str, ops: Vec<Op>) {
 
     let empties = make_empties();
     descend_and_flush(&env.txn, &cf, &empties, &dirty);
+}
+
+/// Same incremental update as `hbsmt_batch_update_env`, but every leaf and split
+/// write/delete goes through `kv_put`/`kv_delete` so it is recorded as a
+/// forward + reverse `Mutation` under `env.cf_name`. That makes the HBSMT
+/// rewind-safe (the reverse muts undo it on reorg) and folds its node hashes
+/// into `mutations_hash`. The caller MUST set `env.cf` to `cf_name`'s handle and
+/// `env.cf_name` to `cf_name` first (so the mutations carry the right table), and
+/// reset `env.muts`/`env.muts_rev` around the call to scope them — exactly the
+/// pattern the legacy RocksHubt uses. Used as the consensus contractstate tree
+/// from forkheight on. `kv_put` charges no budget here because `exec_track` is
+/// off during post-tx root computation (same as RocksHubt).
+pub fn hbsmt_batch_update_env_muts(env: &mut ApplyEnv, cf_name: &str, ops: Vec<Op>) {
+    use crate::consensus::consensus_kv::{kv_delete, kv_put};
+    if ops.is_empty() { return; }
+    let cf = env.db.cf_handle(cf_name).unwrap();
+    let latest = collapse_ops_to_latest(ops);
+
+    // Leaf phase: write only changed leaves, recording mutations.
+    let mut dirty: Vec<Path> = Vec::with_capacity(latest.len());
+    for (path, val) in &latest {
+        let prev = env.txn
+            .get_cf(&cf, &path[..])
+            .expect("HBSMT hbsmt_batch_update_env_muts: get_cf read error");
+        match val {
+            Some((id, v)) => {
+                let encoded = encode_leaf(id, v);
+                if prev.as_deref() != Some(&encoded[..]) {
+                    kv_put(env, &path[..], &encoded);
+                    dirty.push(*path);
+                }
+            }
+            None => {
+                if prev.is_some() {
+                    kv_delete(env, &path[..]);
+                    dirty.push(*path);
+                }
+            }
+        }
+    }
+    if dirty.is_empty() { return; }
+
+    // Split phase: compute touched internal nodes (descend reads env.txn, which
+    // already reflects the leaf writes above), then record them as mutations too.
+    let empties = make_empties();
+    let (split_writes, split_deletes) = descend_and_collect_splits(&env.txn, &cf, &empties, &dirty);
+    for ((path, depth), hash) in split_writes {
+        kv_put(env, &split_key(&path, depth), &hash);
+    }
+    for (path, depth) in split_deletes {
+        kv_delete(env, &split_key(&path, depth));
+    }
 }
 
 

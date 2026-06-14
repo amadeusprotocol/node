@@ -928,6 +928,26 @@ fn bintree_root<'a>(env: Env<'a>, proplist: Vec<(Option<Binary<'a>>, Binary<'a>,
     Binary::from_owned(ob, env).encode(env)
 }
 
+#[rustler::nif]
+fn hbsmt_root<'a>(env: Env<'a>, proplist: Vec<(Option<Binary<'a>>, Binary<'a>, Binary<'a>)>) -> Term<'a> {
+    let mut ops = Vec::with_capacity(100);
+    for (ns, k_bin, v_bin) in &proplist {
+        let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
+        ops.push(bintree::Op::Insert(ns_vec, k_bin.to_vec(), v_bin.to_vec()));
+    }
+
+    let mut t = crate::consensus::hbsmt::Hbsmt::new();
+    t.batch_update(ops);
+    let root = t.root();
+
+    let mut ob = match OwnedBinary::new(root.len()) {
+        Some(b) => b,
+        None => return atoms::error().encode(env),
+    };
+    ob.as_mut_slice().copy_from_slice(&root);
+    Binary::from_owned(ob, env).encode(env)
+}
+
 // Helper to convert &[u8] -> Elixir Binary (<<...>>)
 fn to_binary2<'a>(env: Env<'a>, data: &[u8]) -> Binary<'a> {
     let mut binary = OwnedBinary::new(data.len()).unwrap();

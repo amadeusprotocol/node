@@ -179,7 +179,7 @@ defmodule DB.Chain do
 
     # revert mmr
     case DB.MMR.snapshot_for(current_entry.hash, %{rtx: rtx}) do
-      nil  -> :ok
+      nil  -> raise "rewind: missing MMR snapshot for entry #{Base58.encode(current_entry.hash)} (height #{current_entry.header.height}); cannot restore accumulator"
       prev -> DB.MMR.save(prev, %{rtx: rtx})
     end
 
@@ -200,6 +200,7 @@ defmodule DB.Chain do
       cf_table = case mut.table do
         "contractstate" -> cf.contractstate
         "contractstate_tree" -> cf.contractstate_tree
+        "contractstate_tree_hbsmt" -> cf.contractstate_tree_hbsmt
       end
       case op do
         :put ->

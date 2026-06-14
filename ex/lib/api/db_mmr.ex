@@ -78,11 +78,15 @@ defmodule DB.MMR do
   end
 
   def export_snapshot(entry_hash, db_opts \\ %{}) do
-    state = snapshot_for(entry_hash, db_opts)
-    %{
-      @sysconf_peaks => RDB.vecpak_encode(state.peaks),
-      @sysconf_size  => Integer.to_string(state.size)
-    }
+    case snapshot_for(entry_hash, db_opts) do
+      nil ->
+        raise "export_snapshot: missing MMR snapshot for rooted entry #{Base58.encode(entry_hash)}; refusing to ship a bundle without MMR state"
+      state ->
+        %{
+          @sysconf_peaks => RDB.vecpak_encode(state.peaks),
+          @sysconf_size  => Integer.to_string(state.size)
+        }
+    end
   end
 
   @doc """

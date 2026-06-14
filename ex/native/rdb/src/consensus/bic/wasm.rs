@@ -301,6 +301,10 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
     crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_CALL);
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
+    if applyenv.call_depth >= protocol::MAX_CALL_DEPTH {
+        panic_any("exec_call_depth_exceeded");
+    }
+
     let og_account_caller = applyenv.caller_env.account_caller.clone();
     let og_account_current = applyenv.caller_env.account_current.clone();
 
@@ -577,6 +581,18 @@ fn as_read_string(view: &MemoryView, ptr: i32) -> String {
     String::from_utf16_lossy(&u16_vec)
 }
 
+fn as_peek_len(view: &MemoryView, ptr: i32) -> usize {
+    let len_ptr = match (ptr as u64).checked_sub(4) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let mut len_buf = [0u8; 4];
+    if view.read(len_ptr, &mut len_buf).is_err() {
+        return 0;
+    }
+    (u32::from_le_bytes(len_buf) as usize).min(protocol::WASM_MAX_PTR_LEN)
+}
+
 fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filename_ptr: i32, line: i32, column: i32) -> Result<(), RuntimeError> {
     let (data, mut store) = env.data_and_store_mut();
     let instance = data.instance.clone().unwrap_or_else(|| panic_any("exec_instance_not_injected"));
@@ -584,22 +600,21 @@ fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filen
     budget_sync_in(&mut store, &instance, applyenv);
     let view = data.memory.clone().view(&store);
 
-    //set_return_value(applyenv, b"as_abort".to_vec());
-
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(as_peek_len(&view, msg_ptr)));
     let msg = as_read_string(&view, msg_ptr);
+
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(as_peek_len(&view, filename_ptr)));
     let filename = as_read_string(&view, filename_ptr);
 
-    let full_error_msg = format!("as_abort: '{}' at {}:{}:{}", msg, filename, line, column);
-
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(full_error_msg.len()));
+    // Sync the meter only after `view`'s last use (set_remaining_points needs &mut store).
     set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
 
+    let full_error_msg = format!("as_abort: '{}' at {}:{}:{}", msg, filename, line, column);
     log_line(applyenv, full_error_msg.as_bytes().to_vec());
 
     //TODO: is this OK?
     panic_any("as_abort");
     Ok(())
-    //Err(RuntimeError::new("as_abort"))
 }
 
 fn as_seed_implementation(mut env: FunctionEnvMut<HostEnv>) -> Result<f64, RuntimeError> {
@@ -622,7 +637,7 @@ fn log_line(applyenv: &mut ApplyEnv, line: Vec<u8>) {
     if (applyenv.logs_size.saturating_add(len)) > protocol::LOG_TOTAL_SIZE {
         panic_any("exec_logs_total_size_exceeded")
     }
-    if applyenv.logs.len() > protocol::LOG_TOTAL_ELEMENTS {
+    if applyenv.logs.len() >= protocol::LOG_TOTAL_ELEMENTS {
         panic_any("exec_logs_total_elements_exceeded")
     }
 

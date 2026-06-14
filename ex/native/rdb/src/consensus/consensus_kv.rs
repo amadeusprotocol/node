@@ -44,6 +44,12 @@ pub fn storage_budget_decr(env: &mut ApplyEnv, amount: i128) {
     }
 }
 
+fn charge_read_value(env: &mut ApplyEnv, value_len: usize) {
+    if env.caller_env.entry_height >= protocol::forkheight(env) {
+        exec_budget_decr(env, protocol::cost_db_read_byte(env) * value_len as i128);
+    }
+}
+
 pub fn exec_kv_size(key: &[u8], value: Option<&[u8]>) {
     if key.len() > protocol::MAX_DB_KEY_SIZE {
         panic_any("exec_too_large_key_size");
@@ -174,14 +180,21 @@ pub fn kv_exists(env: &mut ApplyEnv, key: &[u8]) -> bool {
 
     match env.txn.get_cf(&env.cf, key).unwrap() {
         None => false,
-        Some(_) => true,
+        Some(v) => {
+            charge_read_value(env, v.len());
+            true
+        }
     }
 }
 
 pub fn kv_get(env: &mut ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
     exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::cost_db_read_byte(env) * (key.len()) as i128);
 
-    env.txn.get_cf(&env.cf, key).unwrap()
+    let v = env.txn.get_cf(&env.cf, key).unwrap();
+    if let Some(ref val) = v {
+        charge_read_value(env, val.len());
+    }
+    v
 }
 
 pub fn kv_get_next(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -189,25 +202,31 @@ pub fn kv_get_next(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 
     let seek = [prefix, key].concat();
 
-    let mut it = env.txn.raw_iterator_cf(&env.cf);
-    it.seek(&seek);
-    let it_valid = it.valid();
-    if !it_valid {
-        return None;
+    let result = {
+        let mut it = env.txn.raw_iterator_cf(&env.cf);
+        it.seek(&seek);
+        if !it.valid() {
+            None
+        } else {
+            if let Some(k) = it.key() {
+                if k == &seek {
+                    it.next();
+                }
+            }
+            match it.item() {
+                Some((k, v)) if k.starts_with(prefix) => {
+                    let next_key_wo_prefix = k[prefix.len()..].to_vec();
+                    Some((next_key_wo_prefix, v.to_vec()))
+                }
+                _ => None,
+            }
+        }
     };
-    if let Some(k) = it.key() {
-        if k == &seek {
-            it.next();
-        }
-    }
 
-    match it.item() {
-        Some((k, v)) if k.starts_with(prefix) => {
-            let next_key_wo_prefix = k[prefix.len()..].to_vec();
-            Some((next_key_wo_prefix, v.to_vec()))
-        }
-        _ => None,
+    if let Some((_, ref v)) = result {
+        charge_read_value(env, v.len());
     }
+    result
 }
 
 pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -215,25 +234,31 @@ pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 
     let seek = [prefix, key].concat();
 
-    let mut it = env.txn.raw_iterator_cf(&env.cf);
-    it.seek_for_prev(&seek);
-    let it_valid = it.valid();
-    if !it_valid {
-        return None;
+    let result = {
+        let mut it = env.txn.raw_iterator_cf(&env.cf);
+        it.seek_for_prev(&seek);
+        if !it.valid() {
+            None
+        } else {
+            if let Some(k) = it.key() {
+                if k == &seek {
+                    it.prev();
+                }
+            }
+            match it.item() {
+                Some((k, v)) if k.starts_with(prefix) => {
+                    let next_key_wo_prefix = k[prefix.len()..].to_vec();
+                    Some((next_key_wo_prefix, v.to_vec()))
+                }
+                _ => None,
+            }
+        }
     };
-    if let Some(k) = it.key() {
-        if k == &seek {
-            it.prev();
-        }
-    }
 
-    match it.item() {
-        Some((k, v)) if k.starts_with(prefix) => {
-            let next_key_wo_prefix = k[prefix.len()..].to_vec();
-            Some((next_key_wo_prefix, v.to_vec()))
-        }
-        _ => None,
+    if let Some((_, ref v)) = result {
+        charge_read_value(env, v.len());
     }
+    result
 }
 
 pub fn kv_get_prev_or_first(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -241,20 +266,22 @@ pub fn kv_get_prev_or_first(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Op
 
     let seek = [prefix, key].concat();
 
-    let mut it = env.txn.raw_iterator_cf(&env.cf);
-    it.seek_for_prev(&seek);
-
-    match it.item() {
-        Some((k, v)) => {
-            if k.starts_with(prefix) {
+    let result = {
+        let mut it = env.txn.raw_iterator_cf(&env.cf);
+        it.seek_for_prev(&seek);
+        match it.item() {
+            Some((k, v)) if k.starts_with(prefix) => {
                 let next_key_wo_prefix = k[prefix.len()..].to_vec();
                 Some((next_key_wo_prefix, v.to_vec()))
-            } else {
-                None
             }
+            _ => None,
         }
-        None => None,
+    };
+
+    if let Some((_, ref v)) = result {
+        charge_read_value(env, v.len());
     }
+    result
 }
 
 pub fn contractstate_namespace(key: &[u8]) -> Option<Vec<u8>> {

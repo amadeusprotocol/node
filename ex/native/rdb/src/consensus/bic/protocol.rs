@@ -1,7 +1,7 @@
 use crate::consensus::bic::coin;
 use crate::consensus::consensus_kv;
 
-pub const FORKHEIGHT: u64 = 490_00000;
+pub const FORKHEIGHT: u64 = 710_00000;
 pub const FORKHEIGHT_TESTNET: u64 = 0;
 
 pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
@@ -31,33 +31,23 @@ pub const COST_PER_DB_WRITE_BASE: i128 = 25_000 * 10;
 pub const COST_PER_DB_WRITE_BYTE: i128 = 250;
 
 pub fn cost_db_read_byte(env: &crate::consensus::consensus_apply::ApplyEnv) -> i128 {
-    if env.caller_env.entry_height >= forkheight(env) {
-        COST_PER_DB_READ_BYTE
-    } else {
-        COST_PER_DB_READ_BYTE
-    };
     COST_PER_DB_READ_BYTE
 }
 
 pub fn cost_db_write_byte(env: &crate::consensus::consensus_apply::ApplyEnv) -> i128 {
-    if env.caller_env.entry_height >= forkheight(env) {
-        COST_PER_DB_WRITE_BYTE
-    } else {
-        COST_PER_DB_WRITE_BYTE
-    };
     COST_PER_DB_WRITE_BYTE
 }
 
 pub const COST_PER_CALL: i128 = AMA_01_CENT;
 pub const COST_PER_DEPLOY: i128 = AMA_1_CENT; //cost to deploy contract
 pub const COST_PER_SOL: i128 = AMA_1_CENT; //cost to submit_sol
+pub const COST_PER_SLASH: i128 = AMA_1_CENT; //cost to slash_trainer (BLS aggregation over the validator set)
 pub const COST_PER_NEW_LEAF_MERKLE: i128 = COST_PER_BYTE_STATE * 128; //cost to grow the merkle tree
 
 pub const LOG_MSG_SIZE: usize = 4096; //max log line length
 pub const LOG_TOTAL_SIZE: usize = 16384; //max log total size
 pub const LOG_TOTAL_ELEMENTS: usize = 32; //max elements in list
 pub const WASM_MAX_PTR_LEN: usize = 1048576; //largest term passable from inside WASM to HOST
-                                             //pub const WASM_MAX_PTR_LEN: usize = 32768; //dont smash passed first page
 pub const WASM_MAX_PANIC_MSG_SIZE: usize = 128;
 
 pub const MAX_DB_KEY_SIZE: usize = 512;

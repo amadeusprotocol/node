@@ -262,16 +262,27 @@ defmodule FabricSnapshot do
       :ok
     end
 
-    defp verify_rooted_entry!(entry) do
-      res =
-        if entry[:mask] do
-          hash = :crypto.hash(:sha256, RDB.vecpak_encode(entry.header))
-          if entry[:hash] == hash, do: %{error: :ok}, else: %{error: :rooted_tip_hash_mismatch}
-        else
-          Entry.validate_signature(entry, true)
-        end
+    defp verify_rooted_entry!(entry, rtx) do
+      res = if entry[:mask] do
+        hash = :crypto.hash(:sha256, RDB.vecpak_encode(entry.header))
+        if entry[:hash] == hash, do: %{error: :ok}, else: %{error: :rooted_tip_hash_mismatch}
+      else
+        Entry.validate_signature(entry, true)
+      end
       if res.error != :ok do
         raise "bundle rooted tip failed verification: #{inspect res.error}"
+      end
+
+      if entry.header.height >= Entry.root_chain_height() do
+        mmr = DB.MMR.load_or_empty(%{rtx: rtx})
+        if mmr.size != entry.header.height do
+          raise "bundle rooted tip MMR size #{mmr.size} != entry height #{entry.header.height}"
+        end
+        case Entry.check_root_chain(entry.header, mmr) do
+          :ok -> :ok
+          {:mismatch, ours, theirs} ->
+            raise "bundle rooted tip root_chain mismatch at height #{entry.header.height}; ours=#{Base58.encode(ours)} theirs=#{theirs && Base58.encode(theirs)}"
+        end
       end
       :ok
     end
@@ -392,7 +403,7 @@ defmodule FabricSnapshot do
       entry = Entry.unpack_from_db(entry_packed)
       height = entry.header.height
 
-      verify_rooted_entry!(entry)
+      verify_rooted_entry!(entry, rtx)
 
       DB.Entry.insert(entry, %{rtx: rtx})
       DB.Entry.apply_into_main_chain(entry, muts_hash, muts_rev, receipts,

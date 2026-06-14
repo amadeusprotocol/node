@@ -90,6 +90,9 @@ defmodule DB.Entry do
 
   def apply_into_main_chain(entry, muts_hash, muts_rev, receipts, root_receipts, root_contractstate, db_opts = %{rtx: _}) do
     prev_mmr = DB.MMR.load_or_empty(db_opts)
+    if prev_mmr.size != entry.header.height do
+      raise "apply_into_main_chain: MMR size #{prev_mmr.size} != entry height #{entry.header.height}; entry is not the next block above the root, refusing to append"
+    end
     DB.MMR.snapshot_before(entry.hash, prev_mmr, db_opts)
     new_mmr = MMR.append(prev_mmr, entry.hash)
     DB.MMR.save(new_mmr, db_opts)
