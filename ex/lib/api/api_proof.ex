@@ -6,12 +6,25 @@ defmodule API.Proof do
       key: proof.key,
       value: Base58.encode(proof.value),
       validators: Enum.map(proof.validators, & Base58.encode(&1)),
-      proof: %{
-        root: Base58.encode(proof.proof.root),
-        path: Base58.encode(proof.proof.path),
-        hash: Base58.encode(proof.proof.hash),
-        nodes: Enum.map(proof.proof.nodes, & %{direction: &1.direction, hash: Base58.encode(&1.hash)}),
-      }
+      proof: encode_hbsmt_proof(proof.proof)
+    }
+  end
+
+  defp encode_hbsmt_proof(proof) do
+    terminus = case proof.terminus do
+      :empty -> :empty
+      %{path: path, identity_hash: identity_hash, value_hash: value_hash} ->
+        %{
+          path: Base58.encode(path),
+          identity_hash: Base58.encode(identity_hash),
+          value_hash: Base58.encode(value_hash)
+        }
+    end
+
+    %{
+      root: Base58.encode(proof.root),
+      siblings: Enum.map(proof.siblings, &Base58.encode/1),
+      terminus: terminus
     }
   end
 
@@ -180,19 +193,14 @@ defmodule API.Proof do
   def contractstate(key, value \\ nil) do
     %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
     namespace = contractstate_namespace(key)
-    proof = RDB.bintree_contractstate_root_prove(db, namespace, key)
+    proof = RDB.hbsmt_contractstate_root_prove(db, namespace, key)
     map = %{
       namespace: Base58.encode(namespace),
       key: Base58.encode(key),
-      proof: %{
-        root: Base58.encode(proof.root),
-        path: Base58.encode(proof.path),
-        hash: Base58.encode(proof.hash),
-        nodes: Enum.map(proof.nodes, & %{direction: &1.direction, hash: Base58.encode(&1.hash)}),
-      }
+      proof: encode_hbsmt_proof(proof)
     }
     if !value do map else
-      result = RDB.bintree_root_verify(proof.root, proof, namespace, key, value)
+      result = RDB.hbsmt_root_verify(proof.root, proof, namespace, key, value)
       Map.merge(map, %{value: Base58.encode(value), result: result})
     end
   end

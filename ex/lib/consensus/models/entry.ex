@@ -145,13 +145,13 @@ defmodule Entry do
 
         if !is_binary(eh.root_tx), do: throw(%{error: :root_tx_not_binary})
         if byte_size(eh.root_tx) != 32, do: throw(%{error: :root_tx_not_256_bits})
-        if eh.root_tx != root_tx(tx_hashes, eh.height), do: throw(%{error: :root_tx_invalid})
+        if eh.root_tx != root_tx(tx_hashes), do: throw(%{error: :root_tx_invalid})
 
         if !is_binary(eh.root_validator), do: throw(%{error: :root_validator_not_binary})
         if byte_size(eh.root_validator) != 32, do: throw(%{error: :root_validator_not_256_bits})
         validators = DB.Chain.validators_for_height(eh.height)
         validators_last_change_height = DB.Chain.validators_last_change_height(eh.height)
-        if eh.root_validator != root_validator(validators, validators_last_change_height, eh.height), do: throw(%{error: :root_validator_invalid})
+        if eh.root_validator != root_validator(validators, validators_last_change_height), do: throw(%{error: :root_validator_invalid})
 
         is_special_meeting_block = !!e[:mask]
         steam = Task.async_stream(e.txs, fn txu ->
@@ -210,8 +210,6 @@ defmodule Entry do
         end
     end
 
-    def root_chain_height(), do: RDBProtocol.forkheight()
-
     def check_root_chain(header, mmr) do
       ours = MMR.root_chain(DB.MMR.chain_id(), mmr)
       if header.root_chain == ours, do: :ok, else: {:mismatch, ours, header.root_chain}
@@ -228,14 +226,12 @@ defmodule Entry do
         if :crypto.hash(:sha256, ceh.dr) != neh.dr, do: throw(%{error: :invalid_dr})
         if !BlsEx.verify?(neh.signer, neh.vr, ceh.vr, BLS12AggSig.dst_vrf()), do: throw(%{error: :invalid_vr})
 
-        if neh.height >= root_chain_height() do
-          mmr = DB.MMR.load_or_empty()
-          if mmr.size == neh.height do
-            case check_root_chain(neh, mmr) do
-              :ok -> :ok
-              {:mismatch, ours, theirs} ->
-                throw(%{error: :root_chain_mismatch, height: neh.height, ours: Base58.encode(ours), theirs: theirs && Base58.encode(theirs)})
-            end
+        mmr = DB.MMR.load_or_empty()
+        if mmr.size == neh.height do
+          case check_root_chain(neh, mmr) do
+            :ok -> :ok
+            {:mismatch, ours, theirs} ->
+              throw(%{error: :root_chain_mismatch, height: neh.height, ours: Base58.encode(ours), theirs: theirs && Base58.encode(theirs)})
           end
         end
 
@@ -271,6 +267,11 @@ defmodule Entry do
         validators = DB.Chain.validators_for_height(next_height)
         validators_last_change_height = DB.Chain.validators_last_change_height(next_height)
 
+        mmr = DB.MMR.load_or_empty()
+        if mmr.size != next_height do
+          raise "build_next root_chain: MMR size #{mmr.size} != next_height #{next_height}; refusing to build (out-of-sync root_chain would halt consensus)"
+        end
+
         header = %{
             slot: cur_entry.header.slot + 1,
             height: next_height,
@@ -279,20 +280,10 @@ defmodule Entry do
             dr: dr,
             vr: vr,
             signer: pk,
-            root_tx: root_tx(Enum.map(txus, & &1.hash), next_height),
-            root_validator: root_validator(validators, validators_last_change_height, next_height)
+            root_tx: root_tx(Enum.map(txus, & &1.hash)),
+            root_validator: root_validator(validators, validators_last_change_height),
+            root_chain: MMR.root_chain(DB.MMR.chain_id(), mmr)
         }
-
-        header =
-          if next_height >= root_chain_height() do
-            mmr = DB.MMR.load_or_empty()
-            if mmr.size != next_height do
-              raise "build_next root_chain: MMR size #{mmr.size} != next_height #{next_height}; refusing to build (out-of-sync root_chain would halt consensus)"
-            end
-            Map.put(header, :root_chain, MMR.root_chain(DB.MMR.chain_id(), mmr))
-          else
-            header
-          end
 
         %{header: header, txs: txus}
     end
@@ -316,12 +307,12 @@ defmodule Entry do
         entry.header.height
     end
 
-    defp merkle_root(kvs, height) do
-      if height >= root_chain_height(), do: RDB.hbsmt_root(kvs), else: RDB.bintree_root(kvs)
+    defp merkle_root(kvs) do
+      RDB.hbsmt_root(kvs)
     end
 
-    def root_tx(hashes, height) do
-      merkle_root(root_tx_build(hashes), height)
+    def root_tx(hashes) do
+      merkle_root(root_tx_build(hashes))
     end
     def root_tx_build(hashes) do
       by_index_hash = Enum.flat_map(Enum.with_index(hashes), fn{hash, index}->
@@ -330,8 +321,8 @@ defmodule Entry do
       by_index_hash ++ [{nil, "count", "#{length(hashes)}"}]
     end
 
-    def root_validator(validator_pks, last_change_height, height) do
-      merkle_root(root_validator_build(validator_pks, last_change_height), height)
+    def root_validator(validator_pks, last_change_height) do
+      merkle_root(root_validator_build(validator_pks, last_change_height))
     end
     def root_validator_build(validator_pks, last_change_height) do
       by_index_hash = Enum.flat_map(Enum.with_index(validator_pks), fn{hash, index}->
@@ -350,7 +341,7 @@ defmodule Entry do
       entry = DB.Entry.by_hash(entry_hash)
       tx_hashes = Enum.map(entry.txs, & &1.hash)
       kvs = root_tx_build(tx_hashes)
-      RDB.bintree_root_prove(kvs, nil, tx_hash)
+      RDB.hbsmt_root_prove(kvs, nil, tx_hash)
 
       #p = Entry.proof_tx_included Base58.decode("BzF3P2a5gMpQ2FwAuiftHC85BnDfxcmYXPfW95BmNnXU"), Base58.decode("3ySbVoruCQsGb9K1XkRbQdm5WSuxnEoVCugAUj6qouS6")
       #RDB.bintree_root_verify2(p, nil, Base58.decode("3ySbVoruCQsGb9K1XkRbQdm5WSuxnEoVCugAUj6qouS6"), "0")
@@ -365,7 +356,7 @@ defmodule Entry do
       hash = :crypto.hash(:sha256, Enum.join(validators))
 
       kvs = root_validator_build(validators, validators_last_change_height)
-      proof = RDB.bintree_root_prove(kvs, "hash")
+      proof = RDB.hbsmt_root_prove(kvs, nil, "hash")
       %{proof: proof, key: "hash", value: hash, validators: validators}
     end
 end

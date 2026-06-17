@@ -20,7 +20,8 @@ use std::sync::Mutex;
 use vecpak_ex;
 
 use crate::consensus::bic::protocol;
-use crate::consensus::{bintree, consensus_kv, consensus_muts};
+use crate::consensus::hbsmt_common::{HbsmtProof, HbsmtTerminus};
+use crate::consensus::{consensus_kv, consensus_muts, hbsmt_common};
 
 pub struct DbResource {
     pub db: TransactionDB<MultiThreaded>,
@@ -734,7 +735,7 @@ fn apply_entry<'a>(
         let write_opts = WriteOptions::default();
         let txn = db.db.transaction_opt(&write_opts, &txn_opts);
 
-        let (txn, muts, muts_rev, receipts, root_receipts, root_contractstate, root_contractstate_hbsmt) = consensus::consensus_apply::apply_entry(
+        let (txn, muts, muts_rev, receipts, root_receipts, root_contractstate) = consensus::consensus_apply::apply_entry(
             &db.db,
             txn,
             entry,
@@ -751,9 +752,6 @@ fn apply_entry<'a>(
         ob1.as_mut_slice().copy_from_slice(&root_receipts);
         let mut ob2 = OwnedBinary::new(root_contractstate.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
         ob2.as_mut_slice().copy_from_slice(&root_contractstate);
-        // SHIM: shadow HBSMT root (observation only, not consensus). Remove at hardfork.
-        let mut ob3 = OwnedBinary::new(root_contractstate_hbsmt.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
-        ob3.as_mut_slice().copy_from_slice(&root_contractstate_hbsmt);
 
         let mut receipts_list = Vec::new();
         for r in receipts {
@@ -774,7 +772,6 @@ fn apply_entry<'a>(
             receipts_list,
             Binary::from_owned(ob1, env).encode(env),
             Binary::from_owned(ob2, env).encode(env),
-            Binary::from_owned(ob3, env).encode(env),
         )
             .encode(env))
     }));
@@ -909,31 +906,11 @@ fn compute_upow<'a>(
 }
 
 #[rustler::nif]
-fn bintree_root<'a>(env: Env<'a>, proplist: Vec<(Option<Binary<'a>>, Binary<'a>, Binary<'a>)>) -> Term<'a> {
-    let mut ops = Vec::with_capacity(100);
-    for (ns, k_bin, v_bin) in &proplist {
-        let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
-        ops.push(bintree::Op::Insert(ns_vec, k_bin.to_vec(), v_bin.to_vec()));
-    }
-
-    let mut hubt = bintree::Hubt::new();
-    hubt.batch_update(ops);
-    let root = hubt.root();
-
-    let mut ob = match OwnedBinary::new(root.len()) {
-        Some(b) => b,
-        None => return atoms::error().encode(env),
-    };
-    ob.as_mut_slice().copy_from_slice(&root);
-    Binary::from_owned(ob, env).encode(env)
-}
-
-#[rustler::nif]
 fn hbsmt_root<'a>(env: Env<'a>, proplist: Vec<(Option<Binary<'a>>, Binary<'a>, Binary<'a>)>) -> Term<'a> {
     let mut ops = Vec::with_capacity(100);
     for (ns, k_bin, v_bin) in &proplist {
         let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
-        ops.push(bintree::Op::Insert(ns_vec, k_bin.to_vec(), v_bin.to_vec()));
+        ops.push(hbsmt_common::Op::Insert(ns_vec, k_bin.to_vec(), v_bin.to_vec()));
     }
 
     let mut t = crate::consensus::hbsmt::Hbsmt::new();
@@ -955,48 +932,105 @@ fn to_binary2<'a>(env: Env<'a>, data: &[u8]) -> Binary<'a> {
     binary.release(env)
 }
 
+/// Encode an `HbsmtProof` + root into the Elixir proof map:
+/// `%{root, siblings: [<<32>>...], terminus: :empty | %{path, identity_hash, value_hash}}`.
+fn encode_hbsmt_proof<'a>(env: Env<'a>, root: &[u8; 32], proof: &HbsmtProof) -> Term<'a> {
+    let siblings_list: Vec<Term> =
+        proof.siblings.iter().map(|s| to_binary2(env, s).encode(env)).collect();
+
+    let terminus_term: Term = match &proof.terminus {
+        HbsmtTerminus::Empty => atoms::empty().encode(env),
+        HbsmtTerminus::Leaf { path, identity_hash, value_hash } => {
+            let mut m = Term::map_new(env);
+            m = m.map_put(atoms::path(), to_binary2(env, path)).ok().unwrap();
+            m = m.map_put(atoms::identity_hash(), to_binary2(env, identity_hash)).ok().unwrap();
+            m = m.map_put(atoms::value_hash(), to_binary2(env, value_hash)).ok().unwrap();
+            m
+        }
+    };
+
+    let mut proof_map = Term::map_new(env);
+    proof_map = proof_map.map_put(atoms::root(), to_binary2(env, root)).ok().unwrap();
+    proof_map = proof_map.map_put(atoms::siblings(), siblings_list.encode(env)).ok().unwrap();
+    proof_map = proof_map.map_put(atoms::terminus(), terminus_term).ok().unwrap();
+    proof_map
+}
+
+/// Decode the Elixir proof map (see [`encode_hbsmt_proof`]) back into an
+/// `HbsmtProof`. The `root` field is ignored here (the caller passes the
+/// expected root separately to `verify_hbsmt`).
+fn term_to_hbsmt_proof(term: Term) -> Result<HbsmtProof, Error> {
+    let siblings_term = term.map_get(atoms::siblings())?;
+    let siblings_list: Vec<Term> = siblings_term.decode()?;
+    let siblings: Result<Vec<[u8; 32]>, Error> =
+        siblings_list.into_iter().map(term_to_fixed_array).collect();
+    let siblings = siblings?;
+
+    let terminus_term = term.map_get(atoms::terminus())?;
+    let terminus = if let Ok(a) = terminus_term.decode::<rustler::Atom>() {
+        if a == atoms::empty() {
+            HbsmtTerminus::Empty
+        } else {
+            return Err(Error::BadArg);
+        }
+    } else {
+        let path = term_to_fixed_array(terminus_term.map_get(atoms::path())?)?;
+        let identity_hash = term_to_fixed_array(terminus_term.map_get(atoms::identity_hash())?)?;
+        let value_hash = term_to_fixed_array(terminus_term.map_get(atoms::value_hash())?)?;
+        HbsmtTerminus::Leaf { path, identity_hash, value_hash }
+    };
+
+    Ok(HbsmtProof { siblings, terminus })
+}
+
 #[rustler::nif]
-fn bintree_root_prove<'a>(env: Env<'a>, proplist: Vec<(Option<Binary<'a>>, Binary<'a>, Binary<'a>)>, ns: Option<Binary<'a>>, key: Binary<'a>) -> Term<'a> {
+fn hbsmt_root_prove<'a>(env: Env<'a>, proplist: Vec<(Option<Binary<'a>>, Binary<'a>, Binary<'a>)>, ns: Option<Binary<'a>>, key: Binary<'a>) -> Term<'a> {
     let mut ops = Vec::with_capacity(100);
     for (ns, k_bin, v_bin) in &proplist {
         let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
-        ops.push(bintree::Op::Insert(ns_vec, k_bin.to_vec(), v_bin.to_vec()));
+        ops.push(hbsmt_common::Op::Insert(ns_vec, k_bin.to_vec(), v_bin.to_vec()));
     }
 
-    let mut hubt = bintree::Hubt::new();
-    hubt.batch_update(ops);
+    let mut t = crate::consensus::hbsmt::Hbsmt::new();
+    t.batch_update(ops);
+    let root = t.root();
+
     let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
-    let proof = hubt.prove(ns_vec, key.to_vec());
+    let proof = t.prove(ns_vec.as_deref(), key.as_slice());
 
-    let nodes_list: Vec<Term> = proof
-        .nodes
-        .iter()
-        .map(|node| {
-            let mut map = Term::map_new(env);
+    encode_hbsmt_proof(env, &root, &proof).encode(env)
+}
 
-            let hash_term = to_binary2(env, &node.hash);
-            let dir_term = node.direction.encode(env);
-            let len_term = node.len.encode(env);
+#[rustler::nif]
+fn hbsmt_root_verify<'a>(env: Env<'a>, expected_root: Binary<'a>, proof_ex: Term<'a>, ns: Option<Binary<'a>>, key: Binary<'a>, value: Binary<'a>) -> Term<'a> {
+    let proof = match term_to_hbsmt_proof(proof_ex) {
+        Ok(p) => p,
+        Err(_) => return (atoms::invalid()).encode(env),
+    };
+    let expected_root_arr: hbsmt_common::Hash = match expected_root.as_slice().try_into() {
+        Ok(arr) => arr,
+        Err(_) => return (atoms::invalid()).encode(env),
+    };
+    let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
+    let result = crate::consensus::hbsmt_common::verify_hbsmt(
+        &expected_root_arr, &proof, ns_vec.as_deref(), key.as_slice(), value.as_slice());
+    match result {
+        crate::consensus::hbsmt_common::HbsmtVerifyStatus::Invalid => (atoms::invalid()).encode(env),
+        crate::consensus::hbsmt_common::HbsmtVerifyStatus::Included => (atoms::included()).encode(env),
+        crate::consensus::hbsmt_common::HbsmtVerifyStatus::Mismatch => (atoms::mismatch()).encode(env),
+        crate::consensus::hbsmt_common::HbsmtVerifyStatus::NonExistence => (atoms::nonexistance()).encode(env),
+    }
+}
 
-            map = map.map_put(atoms::hash(), hash_term).ok().unwrap();
-            map = map.map_put(atoms::direction(), dir_term).ok().unwrap();
-            map = map.map_put(atoms::len(), len_term).ok().unwrap();
-            map
-        })
-        .collect();
+//rocksdb proof over the consensus contractstate HBSMT
+#[rustler::nif(schedule = "DirtyIo")]
+fn hbsmt_contractstate_root_prove<'a>(env: Env<'a>, db: ResourceArc<DbResource>, ns: Option<Binary<'a>>, key: Binary<'a>) -> Term<'a> {
+    let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
+    // Root + proof read through ONE pinned iterator → consistent point-in-time view.
+    let (root, proof) = crate::consensus::hbsmt_rdb::hbsmt_prove_and_root_db(
+        &db.db, "contractstate_tree_hbsmt", ns_vec.as_deref(), key.as_slice());
 
-    let mut proof_map = Term::map_new(env);
-
-    let root_term = to_binary2(env, &proof.root);
-    let path_term = to_binary2(env, &proof.path);
-    let hash_term = to_binary2(env, &proof.hash);
-
-    proof_map = proof_map.map_put(atoms::root(), root_term).ok().unwrap();
-    proof_map = proof_map.map_put(atoms::path(), path_term).ok().unwrap();
-    proof_map = proof_map.map_put(atoms::hash(), hash_term).ok().unwrap();
-    proof_map = proof_map.map_put(atoms::nodes(), nodes_list.encode(env)).ok().unwrap();
-
-    (proof_map).encode(env)
+    encode_hbsmt_proof(env, &root, &proof).encode(env)
 }
 
 fn term_to_fixed_array(term: Term) -> Result<[u8; 32], Error> {
@@ -1014,98 +1048,6 @@ fn term_to_fixed_array(term: Term) -> Result<[u8; 32], Error> {
     Ok(array)
 }
 
-fn term_to_proof(term: Term) -> Result<bintree::Proof, Error> {
-    // 1. Extract Top-Level Fields
-    let root_term = term.map_get(atoms::root())?;
-    let path_term = term.map_get(atoms::path())?;
-    let hash_term = term.map_get(atoms::hash())?;
-    let nodes_term = term.map_get(atoms::nodes())?;
-
-    // 2. Convert Top-Level Binaries
-    let root = term_to_fixed_array(root_term)?;
-    let path = term_to_fixed_array(path_term)?;
-    let hash = term_to_fixed_array(hash_term)?;
-
-    // 3. Decode List of Maps -> Vec<ProofNode>
-    let nodes_list: Vec<Term> = nodes_term.decode()?;
-
-    let nodes: Result<Vec<bintree::ProofNode>, Error> = nodes_list
-        .into_iter()
-        .map(|node_term| {
-            // Extract fields from the inner map
-            let n_hash_term = node_term.map_get(atoms::hash())?;
-            let n_dir_term = node_term.map_get(atoms::direction())?;
-            let n_len_term = node_term.map_get(atoms::len())?;
-
-            Ok(bintree::ProofNode { hash: term_to_fixed_array(n_hash_term)?, direction: n_dir_term.decode::<u8>()?, len: n_len_term.decode::<u16>()? })
-        })
-        .collect();
-
-    // 4. Construct the final struct
-    Ok(bintree::Proof {
-        root,
-        nodes: nodes?, // Unwraps the Result from the iterator
-        path,
-        hash,
-    })
-}
-
-#[rustler::nif]
-fn bintree_root_verify<'a>(env: Env<'a>, expected_root: Binary<'a>, proof_ex: Term<'a>, ns: Option<Binary<'a>>, key: Binary<'a>, value: Binary<'a>) -> Term<'a> {
-    let proof = term_to_proof(proof_ex).unwrap();
-    let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
-    let expected_root_arr: bintree::Hash = match expected_root.as_slice().try_into() {
-        Ok(arr) => arr,
-        Err(_) => return (atoms::invalid()).encode(env),
-    };
-    let result = bintree::Hubt::verify(&expected_root_arr, &proof, ns_vec, key.to_vec(), value.to_vec());
-    match result {
-        bintree::VerifyStatus::Invalid => (atoms::invalid()).encode(env),
-        bintree::VerifyStatus::Included => (atoms::included()).encode(env),
-        bintree::VerifyStatus::Mismatch => (atoms::mismatch()).encode(env),
-        bintree::VerifyStatus::NonExistence => (atoms::nonexistance()).encode(env),
-    }
-}
-
-//rocksdb proof
-#[rustler::nif(schedule = "DirtyIo")]
-fn bintree_contractstate_root_prove<'a>(env: Env<'a>, db: ResourceArc<DbResource>, ns: Option<Binary<'a>>, key: Binary<'a>) -> Term<'a> {
-    let cf_handle = db.db.cf_handle("contractstate_tree").unwrap();
-    let mut iter = db.db.raw_iterator_cf(&cf_handle);
-
-    //let namespace_data = consensus_kv::contractstate_namespace(&key);
-    //let namespace = namespace_data.as_deref();
-    let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
-    let proof = crate::consensus::bintree_rdb_prove::RocksHubtProveViaIterator::prove(&mut iter, ns_vec, key.as_slice());
-
-    let nodes_list: Vec<Term> = proof
-        .nodes
-        .iter()
-        .map(|node| {
-            let mut map = Term::map_new(env);
-
-            let hash_term = to_binary2(env, &node.hash);
-            let dir_term = node.direction.encode(env);
-
-            map = map.map_put(atoms::hash(), hash_term).ok().unwrap();
-            map = map.map_put(atoms::direction(), dir_term).ok().unwrap();
-            map
-        })
-        .collect();
-
-    let mut proof_map = Term::map_new(env);
-
-    let root_term = to_binary2(env, &proof.root);
-    let path_term = to_binary2(env, &proof.path);
-    let hash_term = to_binary2(env, &proof.hash);
-
-    proof_map = proof_map.map_put(atoms::root(), root_term).ok().unwrap();
-    proof_map = proof_map.map_put(atoms::path(), path_term).ok().unwrap();
-    proof_map = proof_map.map_put(atoms::hash(), hash_term).ok().unwrap();
-    proof_map = proof_map.map_put(atoms::nodes(), nodes_list.encode(env)).ok().unwrap();
-
-    (proof_map).encode(env)
-}
 /*
 #[rustler::nif(schedule = "DirtyCpu")]
 fn contract_view<'a>(env: Env<'a>, db: ResourceArc<DbResource>, cur_entry_trimmed_map: Term<'a>, as_pk: Binary,

@@ -2,10 +2,64 @@
 //! Tree. Used by the in-memory `Hbsmt` (smt.rs) and the RocksDB-backed
 //! `HbsmtRdb` (smt_rdb.rs).
 
-use crate::consensus::bintree::{
-    get_bit_be, mask_after_be, set_bit_be, sha256, Hash, Path, ZERO_HASH,
-};
 use sha2::{Digest, Sha256};
+
+// ---- Shared Compact Sparse Merkle Tree primitives ----
+// (formerly lived in bintree.rs alongside the now-removed Hubt). Used by the in-memory
+// `Hbsmt`, the RocksDB-backed `HbsmtRdb`, and the consensus apply/root path.
+
+pub type Hash = [u8; 32];
+pub type Path = [u8; 32];
+pub const ZERO_HASH: Hash = [0u8; 32];
+
+#[derive(Debug, Clone)]
+pub enum Op {
+    Insert(Option<Vec<u8>>, Vec<u8>, Vec<u8>),
+    Delete(Option<Vec<u8>>, Vec<u8>),
+}
+
+#[inline(always)]
+pub fn get_bit_be(data: &[u8], index: u16) -> u8 {
+    if index >= 256 { return 0; }
+    let byte_idx = (index >> 3) as usize;
+    let bit_offset = 7 - (index & 7);
+    (data[byte_idx] >> bit_offset) & 1
+}
+
+#[inline(always)]
+pub fn set_bit_be(data: &mut [u8], index: u16, val: u8) {
+    if index >= 256 { return; }
+    let byte_idx = (index >> 3) as usize;
+    let bit_offset = 7 - (index & 7);
+    if val == 1 {
+        data[byte_idx] |= 1 << bit_offset;
+    } else {
+        data[byte_idx] &= !(1 << bit_offset);
+    }
+}
+
+#[inline]
+pub fn mask_after_be(data: &mut [u8], len: u16) {
+    if len >= 256 { return; }
+    let byte_idx = (len >> 3) as usize;
+    let start_clean_bit = len;
+
+    for i in start_clean_bit..((byte_idx as u16 + 1) << 3) {
+        let off = 7 - (i & 7);
+        let mask = !(1 << off);
+        data[byte_idx] &= mask;
+    }
+    if byte_idx + 1 < 32 {
+        data[(byte_idx + 1)..].fill(0);
+    }
+}
+
+#[inline]
+pub fn sha256(data: &[u8]) -> Hash {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
 
 /// HBSMT path scheme: `sha256(ns)[0..4] || sha256(key)[0..28]`.
 /// "No namespace" is represented as `ns = b""` — its `sha256(b"")[0..4]`
@@ -33,9 +87,6 @@ pub fn compute_namespace_path_hbsmt(ns: &[u8], key: &[u8]) -> Path {
 // `identity_hash` pre-hashes the variable-length `ns` and `key` to fixed-size
 // digests, so the slot layout is rigid and length-confusion attacks are ruled
 // out without explicit length prefixes.
-//
-// These primitives are SMT-specific and intentionally live here, not in
-// `bintree.rs`, so the legacy Hubt (Patricia trie) is not touched.
 // ============================================================================
 
 #[inline]

@@ -1,9 +1,6 @@
 pub mod bic;
 
 pub mod aggsig;
-pub mod bintree;
-pub mod bintree_rdb;
-pub mod bintree_rdb_prove;
 pub mod hbsmt;
 pub mod hbsmt_common;
 pub mod hbsmt_rdb;

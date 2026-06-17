@@ -12,7 +12,7 @@
 //!   contract), the descent collapses the shared-prefix spine and recurses
 //!   only into the changed subtree.
 
-use crate::consensus::bintree::{
+use crate::consensus::hbsmt_common::{
     get_bit_be, mask_after_be, set_bit_be, Hash, Op, Path,
 };
 use crate::consensus::hbsmt_common::{
@@ -334,7 +334,6 @@ impl Hbsmt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::bintree::Hubt;
     use std::time::Instant;
 
     fn ins(k: &[u8], v: &[u8]) -> Op { Op::Insert(None, k.to_vec(), v.to_vec()) }
@@ -373,16 +372,6 @@ mod tests {
             }
         }
 
-        let mut h = Hubt::new();
-        h.batch_update(initial.clone());
-        let _ = h.root();
-        let t = Instant::now();
-        h.batch_update(delta.clone());
-        let hubt_apply = t.elapsed().as_micros();
-        let t = Instant::now();
-        let _ = h.root();
-        let hubt_root = t.elapsed().as_micros();
-
         let mut s = Hbsmt::new();
         s.batch_update(initial);
         let _ = s.root();
@@ -393,16 +382,12 @@ mod tests {
         let _ = s.root();
         let smt_root = t.elapsed().as_micros();
 
-        let h_total = hubt_apply + hubt_root;
         let s_total = smt_apply + smt_root;
         println!("  {} (tree={:>7}, ns={:>3}, batch={:>6}{})",
             name, tree_size, ns_count, batch_size,
             if hot_ns.is_some() { " HOT" } else { "" });
-        println!("    Hubt: apply={:>7}µs root={:>6}µs total={:>7}µs",
-            hubt_apply, hubt_root, h_total);
-        println!("    SMT : apply={:>7}µs root={:>6}µs total={:>7}µs  ratio={:.2}×",
-            smt_apply, smt_root, s_total,
-            s_total as f64 / h_total.max(1) as f64);
+        println!("    SMT : apply={:>7}µs root={:>6}µs total={:>7}µs",
+            smt_apply, smt_root, s_total);
     }
 
     #[test]

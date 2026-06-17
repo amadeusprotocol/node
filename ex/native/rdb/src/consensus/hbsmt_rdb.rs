@@ -16,7 +16,7 @@
 //!   - Length-filtered iteration so leaves and splits sharing one CF don't
 //!     confuse the leaf-count scans.
 
-use crate::consensus::bintree::{
+use crate::consensus::hbsmt_common::{
     get_bit_be, mask_after_be, set_bit_be, Hash, Op, Path, ZERO_HASH,
 };
 use crate::consensus::hbsmt_common::{
@@ -44,8 +44,11 @@ fn decode_leaf(bytes: &[u8]) -> Option<(Hash, Hash)> {
 }
 use rust_rocksdb::{
     BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DBCompressionType,
-    MultiThreaded, Options, ReadOptions, Transaction, TransactionDB, TransactionDBOptions,
+    DBRawIteratorWithThreadMode, MultiThreaded, Options, ReadOptions, Transaction, TransactionDB,
+    TransactionDBOptions,
 };
+
+type RawIter<'a> = DBRawIteratorWithThreadMode<'a, TransactionDB<MultiThreaded>>;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -100,134 +103,16 @@ impl HbsmtRdb {
 
     pub fn root(&self) -> Hash {
         let cf_leaves = self.db.cf_handle(CF_HBSMT).unwrap();
-        let key = split_key(&[0u8; 32], 0);
-        if let Some(v) = self.db.get_cf(&cf_leaves, key).ok().flatten() {
-            if v.len() == 32 {
-                return v.try_into().unwrap_or(self.empties[0]);
-            }
-        }
-        // No stored top-level split: the tree is empty, a single leaf is lifted
-        // to the root, or all leaves cluster on one side of depth 0. Walk to compute.
-        self.subtree_hash_db(&cf_leaves, [0u8; 32], 0)
+        let mut iter = self.db.raw_iterator_cf(&cf_leaves);
+        root_db_cf(&mut iter, &self.empties)
     }
 
     /// Produce a proof for `(ns, key)` against the current root. Read-only;
-    /// no transaction. Verify with [`smt_common::verify_hbsmt`].
+    /// reads through one pinned iterator. Verify with [`smt_common::verify_hbsmt`].
     pub fn prove(&self, ns: Option<&[u8]>, k: &[u8]) -> HbsmtProof {
-        let target = compute_namespace_path_hbsmt(ns.unwrap_or(b""), k);
         let cf_leaves = self.db.cf_handle(CF_HBSMT).unwrap();
-        let mut siblings = Vec::new();
-        let terminus = self.descend_for_proof(
-            &cf_leaves, &target, [0u8; 32], 0, &mut siblings);
-        HbsmtProof { siblings, terminus }
-    }
-
-    fn descend_for_proof(
-        &self,
-        cf_leaves: &Arc<BoundColumnFamily<'_>>,
-        target: &Path,
-        prefix: Path,
-        depth: u16,
-        siblings: &mut Vec<Hash>,
-    ) -> HbsmtTerminus {
-        if depth == 256 {
-            return match self.db.get_cf(cf_leaves, prefix).ok().flatten() {
-                Some(v) => match decode_leaf(&v) {
-                    Some((id, val)) => HbsmtTerminus::Leaf {
-                        path: prefix, identity_hash: id, value_hash: val,
-                    },
-                    None => HbsmtTerminus::Empty,
-                },
-                None => HbsmtTerminus::Empty,
-            };
-        }
-        let (lo, hi) = subtree_range(&prefix, depth);
-        let (first, more) = self.first_two_leaves(cf_leaves, &lo, &hi);
-        match (first, more) {
-            (None, _) => HbsmtTerminus::Empty,
-            (Some((p, id, val)), false) => HbsmtTerminus::Leaf {
-                path: p, identity_hash: id, value_hash: val,
-            },
-            _ => {
-                let bit = get_bit_be(target, depth);
-                let (lp, rp) = child_prefixes(&prefix, depth);
-                let (target_prefix, sibling_prefix) = if bit == 0 { (lp, rp) } else { (rp, lp) };
-                let sibling_hash = self.subtree_hash_db(cf_leaves, sibling_prefix, depth + 1);
-                siblings.push(sibling_hash);
-                self.descend_for_proof(cf_leaves, target, target_prefix, depth + 1, siblings)
-            }
-        }
-    }
-
-    /// Read-only subtree hash. Checks leaf count before consulting the
-    /// stored split — stored splits in a collapsed subtree are stale and
-    /// must not be trusted. Mirrors the invariant in `Ctx::subtree_hash`
-    /// and `Hbsmt::subtree_hash`.
-    fn subtree_hash_db(
-        &self,
-        cf_leaves: &Arc<BoundColumnFamily<'_>>,
-        prefix: Path,
-        depth: u16,
-    ) -> Hash {
-        if depth == 256 {
-            return match self.db.get_cf(cf_leaves, prefix).ok().flatten() {
-                Some(v) => match decode_leaf(&v) {
-                    Some((id, val)) => leaf_hash_from_components(&id, &val),
-                    None => self.empties[256],
-                },
-                None => self.empties[256],
-            };
-        }
-        let (lo, hi) = subtree_range(&prefix, depth);
-        let (first, more) = self.first_two_leaves(cf_leaves, &lo, &hi);
-        match (first, more) {
-            (None, _) => self.empties[depth as usize],
-            (Some((p, id, val)), false) => {
-                let lh = leaf_hash_from_components(&id, &val);
-                lift_single_leaf(lh, &p, depth, &self.empties)
-            }
-            _ => {
-                if let Some(v) = self.db.get_cf(cf_leaves, split_key(&prefix, depth)).ok().flatten() {
-                    return v.try_into().unwrap_or(self.empties[depth as usize]);
-                }
-                let (lp, rp) = child_prefixes(&prefix, depth);
-                let l = self.subtree_hash_db(cf_leaves, lp, depth + 1);
-                let r = self.subtree_hash_db(cf_leaves, rp, depth + 1);
-                hbsmt_node_hash(&l, &r)
-            }
-        }
-    }
-
-    fn first_two_leaves(
-        &self,
-        cf_leaves: &Arc<BoundColumnFamily<'_>>,
-        lo: &Path,
-        hi: &Path,
-    ) -> (Option<(Path, Hash, Hash)>, bool) {
-        let mut iter = self.db.raw_iterator_cf(cf_leaves);
-        iter.seek(lo);
-        let mut first: Option<(Path, Hash, Hash)> = None;
-        let mut more = false;
-        while iter.valid() {
-            let k = match iter.key() { Some(k) => k, None => break };
-            if k > hi.as_slice() { break; }
-            if k.len() != 32 { iter.next(); continue; }
-            let v = match iter.value() { Some(v) => v, None => { iter.next(); continue; } };
-            let (id, val) = match decode_leaf(v) {
-                Some(t) => t,
-                None => { iter.next(); continue; }
-            };
-            let mut path = [0u8; 32];
-            path.copy_from_slice(k);
-            if first.is_none() {
-                first = Some((path, id, val));
-                iter.next();
-            } else {
-                more = true;
-                break;
-            }
-        }
-        (first, more)
+        let mut iter = self.db.raw_iterator_cf(&cf_leaves);
+        prove_db_cf(&mut iter, &self.empties, ns, k)
     }
 
     /// Apply ops in a single transaction. Reads through the txn so intra-batch
@@ -271,6 +156,165 @@ impl HbsmtRdb {
         }
         txn.commit().unwrap();
     }
+}
+
+// ============================================================================
+// Read-only proof / root over a SINGLE pinned raw iterator. A raw iterator pins
+// one consistent superversion for its whole lifetime, so reusing ONE iterator
+// for both the root walk and the proof descent yields a point-in-time-consistent
+// view even while blocks mutate the CF concurrently — the proof always
+// reconstructs to the returned root. Point reads (split / leaf) go through that
+// same iterator via exact `seek` so they share the view (no per-read `get_cf`,
+// no snapshot object). Backs both `HbsmtRdb::prove`/`root` and the consensus
+// DB-prove helper `hbsmt_prove_and_root_db`.
+// ============================================================================
+
+/// Exact point lookup through the pinned iterator (shares its consistent view).
+#[inline]
+fn iter_get(iter: &mut RawIter, key: &[u8]) -> Option<Vec<u8>> {
+    iter.seek(key);
+    if iter.valid() && iter.key() == Some(key) {
+        iter.value().map(|v| v.to_vec())
+    } else {
+        None
+    }
+}
+
+/// Root over a pinned iterator. Same logic as the old `HbsmtRdb::root`.
+fn root_db_cf(iter: &mut RawIter, empties: &[Hash; 257]) -> Hash {
+    let key = split_key(&[0u8; 32], 0);
+    if let Some(v) = iter_get(iter, &key) {
+        if v.len() == 32 {
+            return v.try_into().unwrap_or(empties[0]);
+        }
+    }
+    // No stored top-level split: the tree is empty, a single leaf is lifted
+    // to the root, or all leaves cluster on one side of depth 0. Walk to compute.
+    subtree_hash_db(iter, [0u8; 32], 0, empties)
+}
+
+/// Proof over a pinned iterator. Same logic as the old `HbsmtRdb::prove`.
+fn prove_db_cf(iter: &mut RawIter, empties: &[Hash; 257], ns: Option<&[u8]>, k: &[u8]) -> HbsmtProof {
+    let target = compute_namespace_path_hbsmt(ns.unwrap_or(b""), k);
+    let mut siblings = Vec::new();
+    let terminus = descend_for_proof(iter, &target, [0u8; 32], 0, &mut siblings, empties);
+    HbsmtProof { siblings, terminus }
+}
+
+fn descend_for_proof(
+    iter: &mut RawIter,
+    target: &Path,
+    prefix: Path,
+    depth: u16,
+    siblings: &mut Vec<Hash>,
+    empties: &[Hash; 257],
+) -> HbsmtTerminus {
+    if depth == 256 {
+        return match iter_get(iter, &prefix) {
+            Some(v) => match decode_leaf(&v) {
+                Some((id, val)) => HbsmtTerminus::Leaf {
+                    path: prefix, identity_hash: id, value_hash: val,
+                },
+                None => HbsmtTerminus::Empty,
+            },
+            None => HbsmtTerminus::Empty,
+        };
+    }
+    let (lo, hi) = subtree_range(&prefix, depth);
+    let (first, more) = first_two_leaves_db(iter, &lo, &hi);
+    match (first, more) {
+        (None, _) => HbsmtTerminus::Empty,
+        (Some((p, id, val)), false) => HbsmtTerminus::Leaf {
+            path: p, identity_hash: id, value_hash: val,
+        },
+        _ => {
+            let bit = get_bit_be(target, depth);
+            let (lp, rp) = child_prefixes(&prefix, depth);
+            let (target_prefix, sibling_prefix) = if bit == 0 { (lp, rp) } else { (rp, lp) };
+            let sibling_hash = subtree_hash_db(iter, sibling_prefix, depth + 1, empties);
+            siblings.push(sibling_hash);
+            descend_for_proof(iter, target, target_prefix, depth + 1, siblings, empties)
+        }
+    }
+}
+
+/// Read-only subtree hash. Checks leaf count before consulting the
+/// stored split — stored splits in a collapsed subtree are stale and
+/// must not be trusted. Mirrors the invariant in `Ctx::subtree_hash`
+/// and `Hbsmt::subtree_hash`.
+fn subtree_hash_db(iter: &mut RawIter, prefix: Path, depth: u16, empties: &[Hash; 257]) -> Hash {
+    if depth == 256 {
+        return match iter_get(iter, &prefix) {
+            Some(v) => match decode_leaf(&v) {
+                Some((id, val)) => leaf_hash_from_components(&id, &val),
+                None => empties[256],
+            },
+            None => empties[256],
+        };
+    }
+    let (lo, hi) = subtree_range(&prefix, depth);
+    let (first, more) = first_two_leaves_db(iter, &lo, &hi);
+    match (first, more) {
+        (None, _) => empties[depth as usize],
+        (Some((p, id, val)), false) => {
+            let lh = leaf_hash_from_components(&id, &val);
+            lift_single_leaf(lh, &p, depth, empties)
+        }
+        _ => {
+            if let Some(v) = iter_get(iter, &split_key(&prefix, depth)) {
+                return v.try_into().unwrap_or(empties[depth as usize]);
+            }
+            let (lp, rp) = child_prefixes(&prefix, depth);
+            let l = subtree_hash_db(iter, lp, depth + 1, empties);
+            let r = subtree_hash_db(iter, rp, depth + 1, empties);
+            hbsmt_node_hash(&l, &r)
+        }
+    }
+}
+
+fn first_two_leaves_db(iter: &mut RawIter, lo: &Path, hi: &Path) -> (Option<(Path, Hash, Hash)>, bool) {
+    iter.seek(lo);
+    let mut first: Option<(Path, Hash, Hash)> = None;
+    let mut more = false;
+    while iter.valid() {
+        let k = match iter.key() { Some(k) => k, None => break };
+        if k > hi.as_slice() { break; }
+        if k.len() != 32 { iter.next(); continue; }
+        let v = match iter.value() { Some(v) => v, None => { iter.next(); continue; } };
+        let (id, val) = match decode_leaf(v) {
+            Some(t) => t,
+            None => { iter.next(); continue; }
+        };
+        let mut path = [0u8; 32];
+        path.copy_from_slice(k);
+        if first.is_none() {
+            first = Some((path, id, val));
+            iter.next();
+        } else {
+            more = true;
+            break;
+        }
+    }
+    (first, more)
+}
+
+/// Produce `(root, proof)` for `(ns, key)` over a named CF of an externally-managed
+/// `TransactionDB` — the consensus contractstate HBSMT. Root AND proof are read through a
+/// SINGLE pinned `raw_iterator`, so they reflect one consistent point-in-time view even
+/// while blocks mutate the CF concurrently (the proof always reconstructs to the returned
+/// root). Verify with [`crate::consensus::hbsmt_common::verify_hbsmt`].
+pub fn hbsmt_prove_and_root_db(
+    db: &TransactionDB<MultiThreaded>,
+    cf_name: &str,
+    ns: Option<&[u8]>,
+    k: &[u8],
+) -> (Hash, HbsmtProof) {
+    let cf = db.cf_handle(cf_name).unwrap();
+    let empties = make_empties();
+    let mut iter = db.raw_iterator_cf(&cf);
+    let root = root_db_cf(&mut iter, &empties);
+    let proof = prove_db_cf(&mut iter, &empties, ns, k);
+    (root, proof)
 }
 
 #[inline]
@@ -635,10 +679,9 @@ pub fn hbsmt_batch_update_env(env: &mut ApplyEnv, cf_name: &str, ops: Vec<Op>) {
 /// rewind-safe (the reverse muts undo it on reorg) and folds its node hashes
 /// into `mutations_hash`. The caller MUST set `env.cf` to `cf_name`'s handle and
 /// `env.cf_name` to `cf_name` first (so the mutations carry the right table), and
-/// reset `env.muts`/`env.muts_rev` around the call to scope them — exactly the
-/// pattern the legacy RocksHubt uses. Used as the consensus contractstate tree
-/// from forkheight on. `kv_put` charges no budget here because `exec_track` is
-/// off during post-tx root computation (same as RocksHubt).
+/// reset `env.muts`/`env.muts_rev` around the call to scope them. This is THE
+/// consensus contractstate tree. `kv_put` charges no budget here because
+/// `exec_track` is off during post-tx root computation.
 pub fn hbsmt_batch_update_env_muts(env: &mut ApplyEnv, cf_name: &str, ops: Vec<Op>) {
     use crate::consensus::consensus_kv::{kv_delete, kv_put};
     if ops.is_empty() { return; }

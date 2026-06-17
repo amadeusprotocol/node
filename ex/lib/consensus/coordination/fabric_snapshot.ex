@@ -130,7 +130,6 @@ defmodule FabricSnapshot do
         try do
           # Bulk CFs — full state, read through the same snapshot for mutual consistency.
           stream_cf(rtx, "contractstate",      cf.contractstate,      fd, zctx)
-          stream_cf(rtx, "contractstate_tree", cf.contractstate_tree, fd, zctx)
           stream_cf(rtx, "contractstate_tree_hbsmt", cf.contractstate_tree_hbsmt, fd, zctx)
 
           rooted_hash = RocksDB.get("rooted_tip", %{rtx: rtx, cf: cf.sysconf})
@@ -273,16 +272,14 @@ defmodule FabricSnapshot do
         raise "bundle rooted tip failed verification: #{inspect res.error}"
       end
 
-      if entry.header.height >= Entry.root_chain_height() do
-        mmr = DB.MMR.load_or_empty(%{rtx: rtx})
-        if mmr.size != entry.header.height do
-          raise "bundle rooted tip MMR size #{mmr.size} != entry height #{entry.header.height}"
-        end
-        case Entry.check_root_chain(entry.header, mmr) do
-          :ok -> :ok
-          {:mismatch, ours, theirs} ->
-            raise "bundle rooted tip root_chain mismatch at height #{entry.header.height}; ours=#{Base58.encode(ours)} theirs=#{theirs && Base58.encode(theirs)}"
-        end
+      mmr = DB.MMR.load_or_empty(%{rtx: rtx})
+      if mmr.size != entry.header.height do
+        raise "bundle rooted tip MMR size #{mmr.size} != entry height #{entry.header.height}"
+      end
+      case Entry.check_root_chain(entry.header, mmr) do
+        :ok -> :ok
+        {:mismatch, ours, theirs} ->
+          raise "bundle rooted tip root_chain mismatch at height #{entry.header.height}; ours=#{Base58.encode(ours)} theirs=#{theirs && Base58.encode(theirs)}"
       end
       :ok
     end
@@ -304,7 +301,6 @@ defmodule FabricSnapshot do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       cf_by_name = %{
         "contractstate"            => cf.contractstate,
-        "contractstate_tree"       => cf.contractstate_tree,
         "contractstate_tree_hbsmt" => cf.contractstate_tree_hbsmt,
         "sysconf"                  => cf.sysconf,
         "attestation"              => cf.attestation,

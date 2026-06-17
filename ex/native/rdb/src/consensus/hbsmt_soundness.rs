@@ -14,7 +14,7 @@
 
 #![cfg(test)]
 
-use crate::consensus::bintree::{
+use crate::consensus::hbsmt_common::{
     get_bit_be, mask_after_be, set_bit_be, Hash, Op, Path, ZERO_HASH,
 };
 use crate::consensus::consensus_apply::{ApplyEnv, CallerEnv};
@@ -1355,7 +1355,7 @@ impl TestEnv {
             cf: cf_tree.clone(),
             cf_name: b"contractstate_tree".to_vec(),
             cf_contractstate: cf_cs,
-            cf_contractstate_tree: cf_tree,
+            cf_contractstate_tree_hbsmt: cf_tree.clone(),
             txn,
             muts_final: Vec::new(),
             muts_final_rev: Vec::new(),

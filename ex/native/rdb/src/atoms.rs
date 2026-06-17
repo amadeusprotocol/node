@@ -61,6 +61,12 @@ rustler::atoms! {
     path,
     nodes,
 
+    siblings,
+    terminus,
+    empty,
+    identity_hash,
+    value_hash,
+
     invalid,
     included,
     mismatch,

@@ -199,7 +199,6 @@ defmodule DB.Chain do
       op = :"#{mut.op}"
       cf_table = case mut.table do
         "contractstate" -> cf.contractstate
-        "contractstate_tree" -> cf.contractstate_tree
         "contractstate_tree_hbsmt" -> cf.contractstate_tree_hbsmt
       end
       case op do

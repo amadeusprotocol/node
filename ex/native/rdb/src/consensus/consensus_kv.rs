@@ -45,9 +45,7 @@ pub fn storage_budget_decr(env: &mut ApplyEnv, amount: i128) {
 }
 
 fn charge_read_value(env: &mut ApplyEnv, value_len: usize) {
-    if env.caller_env.entry_height >= protocol::forkheight(env) {
-        exec_budget_decr(env, protocol::cost_db_read_byte(env) * value_len as i128);
-    }
+    exec_budget_decr(env, protocol::cost_db_read_byte(env) * value_len as i128);
 }
 
 pub fn exec_kv_size(key: &[u8], value: Option<&[u8]>) {
@@ -301,12 +299,12 @@ pub fn revert(env: &mut ApplyEnv) {
         match m {
             Mutation::Put { op, table, key, value } => match table.as_slice() {
                 b"contractstate" => env.txn.put_cf(&env.cf_contractstate, key, value).unwrap(),
-                b"contractstate_tree" => env.txn.put_cf(&env.cf_contractstate_tree, key, value).unwrap(),
+                b"contractstate_tree_hbsmt" => env.txn.put_cf(&env.cf_contractstate_tree_hbsmt, key, value).unwrap(),
                 _ => panic!("Unknown table"),
             },
             Mutation::Delete { op, table, key } => match table.as_slice() {
                 b"contractstate" => env.txn.delete_cf(&env.cf_contractstate, key).unwrap(),
-                b"contractstate_tree" => env.txn.delete_cf(&env.cf_contractstate_tree, key).unwrap(),
+                b"contractstate_tree_hbsmt" => env.txn.delete_cf(&env.cf_contractstate_tree_hbsmt, key).unwrap(),
                 _ => panic!("Unknown table"),
             },
             Mutation::SetBit { op, table, key, value, bloomsize } => {}
@@ -321,7 +319,7 @@ pub fn revert(env: &mut ApplyEnv) {
                         old[byte_idx] &= !mask;
                         match table.as_slice() {
                             b"contractstate" => env.txn.put_cf(&env.cf_contractstate, key, &old).unwrap(),
-                            b"contractstate_tree" => env.txn.put_cf(&env.cf_contractstate_tree, key, &old).unwrap(),
+                            b"contractstate_tree_hbsmt" => env.txn.put_cf(&env.cf_contractstate_tree_hbsmt, key, &old).unwrap(),
                             _ => panic!("Unknown table"),
                         }
                     }

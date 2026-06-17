@@ -2,7 +2,7 @@ use crate::{consensus, BoundColumnFamily, MultiThreaded, Transaction, Transactio
 
 use crate::consensus::bic::protocol;
 use crate::consensus::consensus_muts;
-use crate::consensus::{bintree, consensus_kv};
+use crate::consensus::{consensus_kv, hbsmt_common};
 use crate::model::tx_receipt::TXReceipt;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -85,7 +85,7 @@ pub struct ApplyEnv<'db> {
     pub cf: std::sync::Arc<BoundColumnFamily<'db>>,
     pub cf_name: Vec<u8>,
     pub cf_contractstate: std::sync::Arc<BoundColumnFamily<'db>>,
-    pub cf_contractstate_tree: std::sync::Arc<BoundColumnFamily<'db>>,
+    pub cf_contractstate_tree_hbsmt: std::sync::Arc<BoundColumnFamily<'db>>,
     pub txn: Transaction<'db, TransactionDB<MultiThreaded>>,
     pub muts_final: Vec<consensus_muts::Mutation>,
     pub muts_final_rev: Vec<consensus_muts::Mutation>,
@@ -111,10 +111,9 @@ impl<'db> ApplyEnv<'db> {
         self,
         root_receipts: [u8; 32],
         root_contractstate: [u8; 32],
-        root_contractstate_hbsmt: [u8; 32],
-    ) -> (Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32], [u8; 32])
+    ) -> (Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32])
     {
-        (self.txn, self.muts_final, self.muts_final_rev, self.receipts, root_receipts, root_contractstate, root_contractstate_hbsmt)
+        (self.txn, self.muts_final, self.muts_final_rev, self.receipts, root_receipts, root_contractstate)
     }
 }
 
@@ -124,7 +123,7 @@ pub fn make_apply_env<'db>(
     cf: std::sync::Arc<BoundColumnFamily<'db>>,
     cf_name: Vec<u8>,
     cf_contractstate: std::sync::Arc<BoundColumnFamily<'db>>,
-    cf_contractstate_tree: std::sync::Arc<BoundColumnFamily<'db>>,
+    cf_contractstate_tree_hbsmt: std::sync::Arc<BoundColumnFamily<'db>>,
     entry_signer: &[u8; 48],
     entry_prev_hash: &[u8; 32],
     entry_slot: u64,
@@ -143,7 +142,7 @@ pub fn make_apply_env<'db>(
         cf: cf,
         cf_name: cf_name,
         cf_contractstate: cf_contractstate,
-        cf_contractstate_tree: cf_contractstate_tree,
+        cf_contractstate_tree_hbsmt: cf_contractstate_tree_hbsmt,
         txn: txn,
         muts_final: Vec::new(),
         muts_final_rev: Vec::new(),
@@ -244,11 +243,11 @@ pub fn apply_entry<'db, 'a>(
     sk: &[u8],
     testnet: bool,
     testnet_peddlebikes: Vec<Vec<u8>>,
-) -> (Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32], [u8; 32]) {
+) -> (Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32]) {
 
     let cf_h = db.cf_handle("contractstate").unwrap();
     let cf2_h = db.cf_handle("contractstate").unwrap();
-    let cf_tree_h = db.cf_handle("contractstate_tree").unwrap();
+    let cf_tree_hbsmt_h = db.cf_handle("contractstate_tree_hbsmt").unwrap();
 
     let entry_signer = entry.header.signer.as_slice().try_into().unwrap_or_else(|_| panic!("entry_signer_len_wrong"));
     let entry_prev_hash = entry.header.prev_hash.as_slice().try_into().unwrap_or_else(|_| panic!("entry_prev_hash_len_wrong"));
@@ -264,7 +263,7 @@ pub fn apply_entry<'db, 'a>(
         cf_h,
         b"contractstate".to_vec(),
         cf2_h,
-        cf_tree_h,
+        cf_tree_hbsmt_h,
         entry_signer,
         entry_prev_hash,
         entry.header.slot,
@@ -407,10 +406,9 @@ pub fn apply_entry<'db, 'a>(
 
     call_exit(&mut applyenv);
 
-    let use_hbsmt = applyenv.caller_env.entry_height >= protocol::forkheight(&applyenv);
-    let root_receipts = root_receipts(txs_count, applyenv.receipts.clone(), use_hbsmt);
-    let (root_contractstate, root_contractstate_hbsmt) = update_and_root_contractstate(&mut applyenv);
-    applyenv.into_parts(root_receipts, root_contractstate, root_contractstate_hbsmt)
+    let root_receipts = root_receipts(txs_count, applyenv.receipts.clone());
+    let root_contractstate = update_and_root_contractstate(&mut applyenv);
+    applyenv.into_parts(root_receipts, root_contractstate)
 
     //println!("r{:?} {}", applyenv.caller_env.entry_height, root_receipts(txus.clone(), applyenv.result_log.clone()).iter().map(|b| format!("{:02x}", b)).collect::<String>() );
     //println!("c{:?} {}", applyenv.caller_env.entry_height, hubt_contractstate_root.iter().map(|b| format!("{:02x}", b)).collect::<String>());
@@ -427,7 +425,7 @@ pub fn contract_view<'db, 'a>(
 ) -> (bool, Vec<u8>, Vec<Vec<u8>>) {
     let cf_h = db.cf_handle("contractstate").unwrap();
     let cf2_h = db.cf_handle("contractstate").unwrap();
-    let cf_tree_h = db.cf_handle("contractstate_tree").unwrap();
+    let cf_tree_hbsmt_h = db.cf_handle("contractstate_tree_hbsmt").unwrap();
 
     let entry_signer = entry.header.signer.as_slice().try_into().unwrap_or_else(|_| panic!("entry_signer_len_wrong"));
     let entry_prev_hash = entry.header.prev_hash.as_slice().try_into().unwrap_or_else(|_| panic!("entry_prev_hash_len_wrong"));
@@ -447,7 +445,7 @@ pub fn contract_view<'db, 'a>(
         cf_h,
         b"contractstate".to_vec(),
         cf2_h,
-        cf_tree_h,
+        cf_tree_hbsmt_h,
         entry_signer,
         entry_prev_hash,
         entry.header.slot,
@@ -504,7 +502,7 @@ pub fn contract_validate<'db, 'a>(
 ) -> (Vec<u8>, Vec<Vec<u8>>) {
     let cf_h = db.cf_handle("contractstate").unwrap();
     let cf2_h = db.cf_handle("contractstate").unwrap();
-    let cf_tree_h = db.cf_handle("contractstate_tree").unwrap();
+    let cf_tree_hbsmt_h = db.cf_handle("contractstate_tree_hbsmt").unwrap();
 
     let entry_signer = entry.header.signer.as_slice().try_into().unwrap_or_else(|_| panic!("entry_signer_len_wrong"));
     let entry_prev_hash = entry.header.prev_hash.as_slice().try_into().unwrap_or_else(|_| panic!("entry_prev_hash_len_wrong"));
@@ -524,7 +522,7 @@ pub fn contract_validate<'db, 'a>(
         cf_h,
         b"contractstate".to_vec(),
         cf2_h,
-        cf_tree_h,
+        cf_tree_hbsmt_h,
         entry_signer,
         entry_prev_hash,
         entry.header.slot,
@@ -559,12 +557,9 @@ pub fn contract_validate<'db, 'a>(
     }
 }
 
-/// Returns `(consensus_root, hbsmt_root)`:
-/// - `consensus_root` is the legacy Hubt root over `contractstate_tree` (signed
-///   into the attestation; must match the network).
-/// - `hbsmt_root` is the shadow HBSMT root over `contractstate_tree_hbsmt`,
-///   surfaced to Elixir for observation only — NOT consensus-relevant yet.
-fn update_and_root_contractstate(applyenv: &mut ApplyEnv) -> ([u8; 32], [u8; 32]) {
+/// Computes the contractstate root. The HBSMT in `contractstate_tree_hbsmt` IS the
+/// consensus contractstate tree (the legacy Hubt over `contractstate_tree` is gone).
+fn update_and_root_contractstate(applyenv: &mut ApplyEnv) -> [u8; 32] {
     //Select only the last muts, rest are irrelevent for tree
     let mut map: HashMap<Vec<u8>, consensus_muts::Mutation> = HashMap::new();
     for m in applyenv.muts_final.clone() {
@@ -577,121 +572,50 @@ fn update_and_root_contractstate(applyenv: &mut ApplyEnv) -> ([u8; 32], [u8; 32]
             }
         }
     }
-    let mut ops: Vec<consensus::bintree::Op> = Vec::with_capacity(map.len());
+    let mut ops: Vec<consensus::hbsmt_common::Op> = Vec::with_capacity(map.len());
     for (key, m) in map {
         let namespace = consensus_kv::contractstate_namespace(&key);
         let op = match m {
-            consensus_muts::Mutation::Put { value, .. } => consensus::bintree::Op::Insert(namespace, key, value),
-            consensus_muts::Mutation::Delete { .. } => consensus::bintree::Op::Delete(namespace, key),
+            consensus_muts::Mutation::Put { value, .. } => consensus::hbsmt_common::Op::Insert(namespace, key, value),
+            consensus_muts::Mutation::Delete { .. } => consensus::hbsmt_common::Op::Delete(namespace, key),
             consensus_muts::Mutation::SetBit { .. } => {
                 let val = applyenv.txn.get_cf(&applyenv.cf, &key).unwrap().unwrap();
-                consensus::bintree::Op::Insert(namespace, key, val)
+                consensus::hbsmt_common::Op::Insert(namespace, key, val)
             }
             consensus_muts::Mutation::ClearBit { .. } => {
                 let val = applyenv.txn.get_cf(&applyenv.cf, &key).unwrap().unwrap();
-                consensus::bintree::Op::Insert(namespace, key, val)
+                consensus::hbsmt_common::Op::Insert(namespace, key, val)
             }
         };
         ops.push(op);
     }
 
-    if applyenv.caller_env.entry_height >= protocol::forkheight(applyenv) {
-        // --- Post-fork consensus path: the HBSMT IS the contractstate tree.
-        // The legacy RocksHubt over `contractstate_tree` is no longer computed.
-        let root = if applyenv.caller_env.entry_height == protocol::forkheight(applyenv) {
-            // EXACTLY the fork block: deterministic full rebuild of the HBSMT from
-            // the (~100MB) contractstate. This makes every node converge on the
-            // same consensus tree regardless of prior shadow state, and because it
-            // is a pure function of contractstate (not recorded in muts), a reorg
-            // that re-applies the fork block simply re-runs it (self-healing).
-            rebuild_hbsmt_from_contractstate(applyenv);
-            crate::consensus::hbsmt_rdb::hbsmt_root_env(applyenv, "contractstate_tree_hbsmt")
-        } else {
-            // After the fork: incremental update whose leaf/split writes flow
-            // through kv_put/kv_delete into the mutation set — rewind-safe AND
-            // folded into mutations_hash.
-            applyenv.cf = applyenv.db.cf_handle("contractstate_tree_hbsmt").unwrap();
-            applyenv.cf_name = b"contractstate_tree_hbsmt".to_vec();
-            applyenv.muts = Vec::new();
-            applyenv.muts_rev = Vec::new();
+    // The HBSMT in `contractstate_tree_hbsmt` IS the contractstate tree. Incremental
+    // update whose leaf/split writes flow through kv_put/kv_delete into the mutation set —
+    // rewind-safe AND folded into mutations_hash. The tree is always seeded (live nodes
+    // crossed the fork; fresh nodes import a state bundle that carries this CF).
+    applyenv.cf = applyenv.db.cf_handle("contractstate_tree_hbsmt").unwrap();
+    applyenv.cf_name = b"contractstate_tree_hbsmt".to_vec();
+    applyenv.muts = Vec::new();
+    applyenv.muts_rev = Vec::new();
 
-            if hbsmt_cf_is_empty(applyenv) {
-                panic_any("hbsmt_contractstate_tree_not_seeded");
-            }
-            crate::consensus::hbsmt_rdb::hbsmt_batch_update_env_muts(applyenv, "contractstate_tree_hbsmt", ops);
-
-            let mut muts = unique_mutations(applyenv.muts.clone(), false);
-            applyenv.muts_final.append(&mut muts);
-            let mut muts_rev = unique_mutations(applyenv.muts_rev.clone(), true);
-            applyenv.muts_final_rev.append(&mut muts_rev);
-
-            crate::consensus::hbsmt_rdb::hbsmt_root_env(applyenv, "contractstate_tree_hbsmt")
-        };
-        (root, root)
-    } else {
-        // --- Pre-fork consensus path (unchanged): the legacy Hubt trie in
-        // `contractstate_tree`. Its node writes flow through kv_put/kv_delete, so
-        // they land in `muts` and match the network's mutation set.
-        applyenv.cf = applyenv.db.cf_handle("contractstate_tree").unwrap();
-        applyenv.cf_name = b"contractstate_tree".to_vec();
-        applyenv.muts = Vec::new();
-        applyenv.muts_rev = Vec::new();
-
-        let mut hubt_contractstate = consensus::bintree_rdb::RocksHubt::new(applyenv);
-        hubt_contractstate.batch_update(ops.clone());
-        let contractstate_root = hubt_contractstate.root();
-
-        let mut muts = unique_mutations(applyenv.muts.clone(), false);
-        applyenv.muts_final.append(&mut muts);
-        let mut muts_rev = unique_mutations(applyenv.muts_rev.clone(), true);
-        applyenv.muts_final_rev.append(&mut muts_rev);
-
-        // --- Shadow path: keep the HBSMT in `contractstate_tree_hbsmt` up to date
-        // (direct txn, NOT in muts) so it is ready to become consensus at the fork.
-        if hbsmt_cf_is_empty(applyenv) {
-            seed_hbsmt_from_contractstate(applyenv);
-        } else {
-            crate::consensus::hbsmt_rdb::hbsmt_batch_update_env(applyenv, "contractstate_tree_hbsmt", ops);
-        }
-        let contractstate_root_hbsmt = crate::consensus::hbsmt_rdb::hbsmt_root_env(applyenv, "contractstate_tree_hbsmt");
-
-        (contractstate_root, contractstate_root_hbsmt)
+    if hbsmt_cf_is_empty(applyenv) {
+        panic_any("hbsmt_contractstate_tree_not_seeded");
     }
+    crate::consensus::hbsmt_rdb::hbsmt_batch_update_env_muts(applyenv, "contractstate_tree_hbsmt", ops);
+
+    let mut muts = unique_mutations(applyenv.muts.clone(), false);
+    applyenv.muts_final.append(&mut muts);
+    let mut muts_rev = unique_mutations(applyenv.muts_rev.clone(), true);
+    applyenv.muts_final_rev.append(&mut muts_rev);
+
+    crate::consensus::hbsmt_rdb::hbsmt_root_env(applyenv, "contractstate_tree_hbsmt")
 }
 
-/// Deterministic full rebuild of the HBSMT contractstate tree from the current
-/// `contractstate` CF. Run at exactly the fork block: clears any prior (possibly
-/// reorg-stale) tree entries, then re-seeds from contractstate, so the result is
-/// a pure function of contractstate and identical on every node. Writes go
-/// straight to the txn (NOT recorded in muts) — a reorg that re-applies the fork
-/// block just re-runs this. Bounded one-time cost (contractstate is ~100MB).
-fn rebuild_hbsmt_from_contractstate(env: &mut ApplyEnv) {
-    let cf = env.db.cf_handle("contractstate_tree_hbsmt").unwrap();
-
-    // 1. Clear existing tree entries so the rebuild depends only on contractstate.
-    let mut keys: Vec<Vec<u8>> = Vec::new();
-    {
-        let mut iter = env.txn.raw_iterator_cf(&cf);
-        iter.seek_to_first();
-        while iter.valid() {
-            match iter.key() {
-                Some(k) => keys.push(k.to_vec()),
-                None => break,
-            }
-            iter.next();
-        }
-    }
-    for k in &keys {
-        let _ = env.txn.delete_cf(&cf, k);
-    }
-
-    // 2. Re-seed from the full contractstate (CF is now empty).
-    seed_hbsmt_from_contractstate(env);
-}
-
-/// True when the shadow `contractstate_tree_hbsmt` CF holds no entries yet —
-/// our signal (no marker) that the HBSMT needs a one-time full rebuild from
-/// `contractstate` before incremental updates can begin.
+/// Safety guard: the `contractstate_tree_hbsmt` CF must never be empty on an applying
+/// node (live nodes seeded it crossing the fork; fresh nodes import a state bundle that
+/// carries this CF). An empty tree here means corruption — fail loud rather than commit a
+/// wrong root.
 fn hbsmt_cf_is_empty(env: &ApplyEnv) -> bool {
     let cf = match env.db.cf_handle("contractstate_tree_hbsmt") {
         Some(cf) => cf,
@@ -702,33 +626,11 @@ fn hbsmt_cf_is_empty(env: &ApplyEnv) -> bool {
     !iter.valid()
 }
 
-/// One-time seed: iterate the entire `contractstate` CF and insert every
-/// (namespace, key, value) into the shadow HBSMT held in
-/// `contractstate_tree_hbsmt`. Runs only while that CF is empty.
-fn seed_hbsmt_from_contractstate(env: &mut ApplyEnv) {
-    use crate::consensus::bintree::Op as BinOp;
-
-    let cf_cs = env.cf_contractstate.clone();
-    let mut ops: Vec<BinOp> = Vec::new();
-    {
-        let mut iter = env.txn.raw_iterator_cf(&cf_cs);
-        iter.seek_to_first();
-        while iter.valid() {
-            let key = match iter.key() { Some(k) => k.to_vec(), None => break };
-            let value = match iter.value() { Some(v) => v.to_vec(), None => break };
-            let namespace = consensus_kv::contractstate_namespace(&key);
-            ops.push(BinOp::Insert(namespace, key, value));
-            iter.next();
-        }
-    }
-    crate::consensus::hbsmt_rdb::hbsmt_batch_update_env(env, "contractstate_tree_hbsmt", ops);
-}
-
-fn root_receipts(count: usize, receipts: Vec<TXReceipt>, use_hbsmt: bool) -> [u8; 32] {
+fn root_receipts(count: usize, receipts: Vec<TXReceipt>) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut kvs = Vec::with_capacity((count * 4) + 1);
 
-    kvs.push(bintree::Op::Insert(None, b"count".to_vec(), (count as u32).to_be_bytes().to_vec()));
+    kvs.push(hbsmt_common::Op::Insert(None, b"count".to_vec(), (count as u32).to_be_bytes().to_vec()));
 
     //TODO: for parallel processing fix this later
     for (index, receipt) in receipts.into_iter().enumerate() {
@@ -743,21 +645,15 @@ fn root_receipts(count: usize, receipts: Vec<TXReceipt>, use_hbsmt: bool) -> [u8
         }
         let log_hash = log_hasher.finalize();
 
-        kvs.push(bintree::Op::Insert(Some(b"index".to_vec()), receipt.txid.to_vec(), index_bytes));
-        kvs.push(bintree::Op::Insert(Some(b"success".to_vec()), receipt.txid.to_vec(), success_bytes));
-        kvs.push(bintree::Op::Insert(Some(b"result".to_vec()), receipt.txid.to_vec(), receipt.result));
-        kvs.push(bintree::Op::Insert(Some(b"logs".to_vec()), receipt.txid.to_vec(), log_hash.to_vec()));
+        kvs.push(hbsmt_common::Op::Insert(Some(b"index".to_vec()), receipt.txid.to_vec(), index_bytes));
+        kvs.push(hbsmt_common::Op::Insert(Some(b"success".to_vec()), receipt.txid.to_vec(), success_bytes));
+        kvs.push(hbsmt_common::Op::Insert(Some(b"result".to_vec()), receipt.txid.to_vec(), receipt.result));
+        kvs.push(hbsmt_common::Op::Insert(Some(b"logs".to_vec()), receipt.txid.to_vec(), log_hash.to_vec()));
     }
 
-    if use_hbsmt {
-        let mut t = crate::consensus::hbsmt::Hbsmt::new();
-        t.batch_update(kvs);
-        t.root()
-    } else {
-        let mut hubt = bintree::Hubt::new();
-        hubt.batch_update(kvs);
-        hubt.root()
-    }
+    let mut t = crate::consensus::hbsmt::Hbsmt::new();
+    t.batch_update(kvs);
+    t.root()
 }
 
 pub trait ToTerm {
@@ -884,10 +780,6 @@ fn call_exit(env: &mut ApplyEnv) {
     if env.caller_env.entry_height % 100_000 == 99_999 {
         consensus::bic::epoch::next(env);
     }
-    if env.caller_env.entry_height == protocol::forkheight(env) {
-        //migrate_db(env);
-    }
-
     env.muts_final.append(&mut env.muts);
     env.muts_final_rev.append(&mut env.muts_rev);
 }
@@ -1037,9 +929,7 @@ pub fn call_bic(
         }
         (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
         (b"Epoch", b"slash_trainer") => {
-            if env.caller_env.entry_height >= protocol::forkheight(env) {
-                consensus_kv::exec_budget_decr(env, protocol::COST_PER_SLASH);
-            }
+            consensus_kv::exec_budget_decr(env, protocol::COST_PER_SLASH);
             consensus::bic::epoch::call_slash_trainer(env, args)
         }
 

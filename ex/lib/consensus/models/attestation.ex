@@ -45,11 +45,8 @@ defmodule Attestation do
         if !is_binary(a.signer), do: throw(%{error: :signer_not_binary})
         if byte_size(a.signer) != 48, do: throw(%{error: :signer_not_48_bytes})
 
-        #if DB.Chain.height() >= RDBProtocol.forkheight() do
-        #else
-          claim = <<a.entry_hash::binary, a.mutations_hash::binary>>
-          if !BlsEx.verify?(a.signer, a.signature, claim, BLS12AggSig.dst_att()), do: throw(%{error: :invalid_signature})
-        #end
+        claim = <<a.entry_hash::binary, a.mutations_hash::binary>>
+        if !BlsEx.verify?(a.signer, a.signature, claim, BLS12AggSig.dst_att()), do: throw(%{error: :invalid_signature})
 
         %{error: :ok, attestation: a}
       catch
