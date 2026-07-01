@@ -12,3 +12,6 @@ pub mod consensus_muts;
 
 #[cfg(test)]
 pub mod hbsmt_soundness;
+
+#[cfg(test)]
+pub mod tests;

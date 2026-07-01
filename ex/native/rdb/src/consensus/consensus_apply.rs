@@ -912,28 +912,39 @@ pub fn call_bic(
             (b"Lockup", b"unlock") => return consensus::bic::lockup::call_unlock(env, args),
             (b"Contract", b"deploy") => {
                 consensus_kv::exec_budget_decr(env, protocol::COST_PER_DEPLOY);
-                return consensus::bic::contract::call_deploy(env, args);
+                return consensus::bic::contract::call_deploy(env, args)
             }
             (b"LockupPrime", b"lock") => return consensus::bic::lockup_prime::call_lock(env, args),
             (b"LockupPrime", b"unlock") => return consensus::bic::lockup_prime::call_unlock(env, args),
             (b"LockupPrime", b"daily_checkin") => return consensus::bic::lockup_prime::call_daily_checkin(env, args),
             // FIX: Allow non-testnet logic to fall through if no match found here
+
+            (b"LockupVault", b"create") => return consensus::bic::lockup_vault::call_create(env, args),
+            (b"LockupVault", b"unlock") => return consensus::bic::lockup_vault::call_unlock(env, args),
+            (b"LockupVault", b"withdraw") => return consensus::bic::lockup_vault::call_withdraw(env, args),
+            (b"LockupVault", b"set_compound") => return consensus::bic::lockup_vault::call_set_compound(env, args),
+            (b"LockupVault", b"set_payout_address") => return consensus::bic::lockup_vault::call_set_payout_address(env, args),
+            (b"LockupVault", b"clear_payout_address") => return consensus::bic::lockup_vault::call_clear_payout_address(env, args),
+            (b"LockupVault", b"set_validator") => return consensus::bic::lockup_vault::call_set_validator(env, args),
+            (b"LockupVault", b"clear_validator") => return consensus::bic::lockup_vault::call_clear_validator(env, args),
+
             _ => {}
         }
     }
 
     match (contract.as_slice(), function.as_slice()) {
+        (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
         (b"Epoch", b"submit_sol") => {
             consensus_kv::exec_budget_decr(env, protocol::COST_PER_SOL);
             consensus::bic::epoch::call_submit_sol(env, args)
         }
-        (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
         (b"Epoch", b"slash_trainer") => {
             consensus_kv::exec_budget_decr(env, protocol::COST_PER_SLASH);
             consensus::bic::epoch::call_slash_trainer(env, args)
         }
 
         (b"Coin", b"transfer") => consensus::bic::coin::call_transfer(env, args),
+
 
         /*
         (b"Coin", b"create_and_mint") => consensus::bic::coin::call_create_and_mint(env, args),
