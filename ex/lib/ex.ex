@@ -155,7 +155,12 @@ defmodule Ama do
         current = DB.MMR.load() || %{size: 0, peaks: []}
         if current.size != expected_size do
           IO.puts "MMR not synced with chain (have size=#{current.size}, expected #{expected_size}) — rebuilding"
-          MMR.Bootstrap.rebuild_from_checkpoint()
+          if Application.fetch_env!(:ama, :testnet) && current.size == 0 do
+            IO.puts "MMR: testnet with no MMR — rebuilding from genesis (height 0)"
+            MMR.Bootstrap.rebuild_from_genesis()
+          else
+            MMR.Bootstrap.rebuild_from_checkpoint()
+          end
         end
     end
   end
