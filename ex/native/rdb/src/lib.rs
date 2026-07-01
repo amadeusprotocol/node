@@ -1119,7 +1119,7 @@ fn protocol_constants<'a>(env: Env<'a>) -> Term<'a> {
 
 #[rustler::nif]
 fn protocol_epoch_emission<'a>(env: Env<'a>, epoch: u64) -> i128 {
-    crate::consensus::bic::epoch::epoch_emission(epoch)
+    crate::consensus::bic::epoch::epoch_emission_active(epoch)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]

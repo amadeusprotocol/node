@@ -26,6 +26,7 @@ thiserror = "2.0.17"
 group = "0.13.0"
 rayon = "1"
 serde = { version = "1.0", features = ["derive"] }
+num-bigint = "0.4"
 vecpak = { git = "https://github.com/amadeusprotocol/chain", package = "vecpak" }
 vecpak_ex = { git = "https://github.com/amadeusprotocol/chain", package = "vecpak_ex" }
 wasmer = "7.1.0"

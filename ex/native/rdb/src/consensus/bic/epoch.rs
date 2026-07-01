@@ -1,5 +1,6 @@
 use crate::consensus::aggsig::DST_MOTION;
 use crate::{bcat, consensus};
+use num_bigint::BigUint;
 use std::collections::HashSet;
 use std::panic::panic_any;
 
@@ -33,10 +34,57 @@ pub fn circulating_without_burn(epoch: u64) -> i128 {
         if n == 0 {
             acc
         } else {
-            rec(n - 1, acc + epoch_emission(n))
+            rec(n - 1, acc + epoch_emission_active(n))
         }
     }
     rec(epoch, 0)
+}
+
+//---- emission curve v2 (Shenron), active from EMISSION2_EPOCH ----
+//the documented total per-epoch emission, 1,430,936,428 / (epoch - 20)^1.3,
+//with the +72 offset anchoring the epoch 750 activation at the documented
+//curve's epoch 842 value (~232.4k AMA). from EMISSION2_EPOCH on this replaces
+//the legacy geometric decay as the per-epoch total; distribution is unchanged.
+pub const EMISSION2_EPOCH: u64 = 750;
+pub const EMISSION2_NUMERATOR: i128 = 1_430_936_428 * 1_000_000_000;
+pub const EMISSION2_OFFSET: u64 = 72;
+
+//x^1.3 computed exactly in integers as floor((x^13)^(1/10))
+pub fn emission2_total(epoch: u64) -> i128 {
+    let x = BigUint::from(epoch.saturating_add(EMISSION2_OFFSET));
+    let denom = x.pow(13).nth_root(10);
+    let total = BigUint::from(EMISSION2_NUMERATOR as u128) / denom;
+    u128::try_from(total).map(|v| v.min(i128::MAX as u128) as i128).unwrap_or(i128::MAX)
+}
+
+//the per-epoch emission active at `epoch`: the v2 curve from EMISSION2_EPOCH
+//on, the legacy decay before it. single source of truth for minting, supply
+//accounting, and the emission API so the switch is uniform.
+pub fn epoch_emission_active(epoch: u64) -> i128 {
+    if epoch >= EMISSION2_EPOCH {
+        emission2_total(epoch)
+    } else {
+        epoch_emission(epoch)
+    }
+}
+
+#[cfg(test)]
+mod emission2_curve_tests {
+    use super::*;
+
+    #[test]
+    fn curve_activates_at_750_and_decays() {
+        //the documented 1,430,936,428/(epoch-20)^1.3 total, anchored (+72) so the
+        //epoch 750 activation emits the agreed ~232.4k AMA
+        assert_eq!(emission2_total(750) / 1_000_000_000, 232_445);
+        assert_eq!(emission2_total(1200) / 1_000_000_000, 131_762);
+        //strictly decreasing after activation
+        assert!(emission2_total(751) < emission2_total(750));
+        assert!(emission2_total(5000) < emission2_total(1200));
+        //the router switches exactly at EMISSION2_EPOCH, legacy curve before it
+        assert_eq!(epoch_emission_active(749), epoch_emission(749));
+        assert_eq!(epoch_emission_active(750), emission2_total(750));
+    }
 }
 
 const PEDDLEBIKE67_B58: &[&str] = &[
@@ -544,7 +592,7 @@ pub fn next(env: &mut ApplyEnv) {
     let trainers_to_recv_emissions: Vec<(Vec<u8>, i128)> =
         leaders.iter().cloned().filter(|(pk, _)| trainers_map.contains(pk) && !peddlebike67_map.contains(pk)).take(99).collect();
 
-    let epoch_total_emission = epoch_emission(epoch_cur);
+    let epoch_total_emission = epoch_emission_active(epoch_cur);
     let epoch_early_adopter_emission = epoch_total_emission / 7;
     let epoch_communityfund_emission = epoch_total_emission - epoch_early_adopter_emission;
 
