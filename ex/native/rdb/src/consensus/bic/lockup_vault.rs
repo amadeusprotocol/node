@@ -1,7 +1,7 @@
 use crate::bcat;
 use crate::consensus::bic::coin::balance;
 use crate::consensus::consensus_apply::ApplyEnv;
-use crate::consensus::consensus_kv::{kv_delete, kv_get, kv_get_next, kv_increment, kv_put};
+use crate::consensus::consensus_kv::{kv_delete, kv_exists, kv_get, kv_get_next, kv_increment, kv_put};
 use std::collections::{BTreeMap, HashSet};
 use std::panic::panic_any;
 use vecpak::{decode, encode, Term};
@@ -269,7 +269,7 @@ pub fn pay_epoch_yield(
         let due = base.checked_mul(vault.rate_bps as i128).unwrap_or_else(|| panic_any("yield_overflow")) / APY_EPOCH_DENOM;
         let due = due.checked_mul(reduction_pct.min(100) as i128).unwrap_or_else(|| panic_any("yield_overflow")) / 100;
         if due > 0 {
-            due_total += due;
+            due_total = due_total.checked_add(due).unwrap_or_else(|| panic_any("yield_overflow"));
             entries.push((bcat(&[VAULT_KEY_PREFIX, &suffix]), vault, due));
         }
     }
@@ -294,7 +294,7 @@ pub fn pay_epoch_yield(
             let addr = vault.payout_address.as_ref().unwrap_or_else(|| panic_any("invalid_vault_data")).clone();
             kv_increment(env, &bcat(&[b"account:", &addr, b":balance:AMA"]), pay);
         }
-        paid_total += pay;
+        paid_total = paid_total.checked_add(pay).unwrap_or_else(|| panic_any("yield_overflow"));
     }
     paid_total
 }
@@ -339,6 +339,13 @@ fn load_caller_vault(env: &mut ApplyEnv, vault_index: &[u8]) -> (Vec<u8>, Vault)
 fn validate_pk(pk: &[u8], error: &'static str) {
     if pk.len() != 48 || !crate::consensus::bls12_381::validate_public_key(pk) {
         panic_any(error)
+    }
+}
+
+fn init_balance_if_missing(env: &mut ApplyEnv, address: &[u8]) {
+    let key = bcat(&[b"account:", address, b":balance:AMA"]);
+    if !kv_exists(env, &key) {
+        kv_increment(env, &key, 0);
     }
 }
 
@@ -456,29 +463,7 @@ pub fn call_create(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         None => tier_duration,
     };
 
-    let validator = match map.opt_bin(b"validator", "invalid_validator_pk") {
-        Some(pk) => {
-            validate_pk(&pk, "invalid_validator_pk");
-            Some(pk)
-        }
-        None => None,
-    };
-    let payout_address = match map.opt_bin(b"payout_address", "invalid_payout_pk") {
-        Some(addr) => {
-            validate_pk(&addr, "invalid_payout_pk");
-            Some(addr)
-        }
-        None => None,
-    };
-    //the caller always pays; the vault is keyed under the owner (caller by default)
     let caller = env.caller_env.account_caller.clone();
-    let owner = match map.opt_bin(b"owner", "invalid_owner_pk") {
-        Some(pk) => {
-            validate_pk(&pk, "invalid_owner_pk");
-            pk
-        }
-        None => caller.clone(),
-    };
 
     if amount < MIN_VAULT_AMOUNT {
         panic_any("vault_amount_below_minimum")
@@ -486,6 +471,30 @@ pub fn call_create(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if amount > balance(env, &caller, b"AMA") {
         panic_any("insufficient_funds")
     }
+
+    let validator = match map.opt_bin(b"validator", "invalid_validator_pk") {
+        Some(pk) => {
+            validate_pk(&pk, "invalid_validator_pk");
+            init_balance_if_missing(env, &pk);
+            Some(pk)
+        }
+        None => None,
+    };
+    let payout_address = match map.opt_bin(b"payout_address", "invalid_payout_pk") {
+        Some(addr) => {
+            validate_pk(&addr, "invalid_payout_pk");
+            init_balance_if_missing(env, &addr);
+            Some(addr)
+        }
+        None => None,
+    };
+    let owner = match map.opt_bin(b"owner", "invalid_owner_pk") {
+        Some(pk) => {
+            validate_pk(&pk, "invalid_owner_pk");
+            pk
+        }
+        None => caller.clone(),
+    };
 
     let entry_epoch = env.caller_env.entry_epoch;
     //the tier schedule is the floor; unlock_epoch can only extend maturity later
@@ -583,6 +592,7 @@ pub fn call_set_payout_address(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         panic_any("vault_is_unlocking")
     }
     validate_pk(&args[1], "invalid_payout_pk");
+    init_balance_if_missing(env, &args[1]);
     vault.payout_address = Some(args[1].to_vec());
     store_vault(env, &key, &vault);
 }
@@ -609,6 +619,7 @@ pub fn call_set_validator(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     }
     let validator = args[1].as_slice();
     validate_pk(validator, "invalid_validator_pk");
+    init_balance_if_missing(env, validator);
     //the validator the vault is already heading toward: the queued one if a change
     //is in flight, otherwise the active one. re-selecting it is a no-op so the
     //2-epoch clock is not reset
