@@ -778,7 +778,11 @@ fn call_exit(env: &mut ApplyEnv) {
         consensus_kv::kv_put(env, b"bic:epoch:segment_vr_hash", digest.as_bytes());
     }
     if env.caller_env.entry_height % 100_000 == 99_999 {
-        consensus::bic::epoch::next(env);
+        if env.testnet || env.caller_env.entry_epoch >= consensus::bic::lockup_vault::VAULT_ACTIVATION_EPOCH {
+            consensus::bic::epoch::next2(env);
+        } else {
+            consensus::bic::epoch::next(env);
+        }
     }
     env.muts_final.append(&mut env.muts);
     env.muts_final_rev.append(&mut env.muts_rev);
@@ -917,8 +921,12 @@ pub fn call_bic(
             (b"LockupPrime", b"lock") => return consensus::bic::lockup_prime::call_lock(env, args),
             (b"LockupPrime", b"unlock") => return consensus::bic::lockup_prime::call_unlock(env, args),
             (b"LockupPrime", b"daily_checkin") => return consensus::bic::lockup_prime::call_daily_checkin(env, args),
-            // FIX: Allow non-testnet logic to fall through if no match found here
+            _ => {}
+        }
+    }
 
+    if env.testnet || env.caller_env.entry_epoch >= consensus::bic::lockup_vault::VAULT_ACTIVATION_EPOCH {
+        match (contract.as_slice(), function.as_slice()) {
             (b"LockupVault", b"create") => return consensus::bic::lockup_vault::call_create(env, args),
             (b"LockupVault", b"unlock") => return consensus::bic::lockup_vault::call_unlock(env, args),
             (b"LockupVault", b"withdraw") => return consensus::bic::lockup_vault::call_withdraw(env, args),
@@ -927,7 +935,8 @@ pub fn call_bic(
             (b"LockupVault", b"clear_payout_address") => return consensus::bic::lockup_vault::call_clear_payout_address(env, args),
             (b"LockupVault", b"set_validator") => return consensus::bic::lockup_vault::call_set_validator(env, args),
             (b"LockupVault", b"clear_validator") => return consensus::bic::lockup_vault::call_clear_validator(env, args),
-
+            (b"LockupVault", b"change_owner") => return consensus::bic::lockup_vault::call_change_owner(env, args),
+            (b"LockupVault", b"extend_lock") => return consensus::bic::lockup_vault::call_extend_lock(env, args),
             _ => {}
         }
     }

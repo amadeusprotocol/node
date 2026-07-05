@@ -3,9 +3,9 @@
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND noninteractive
 
-ENV SSL_VERSION=3.6.2
-ENV OTP_VERSION=OTP-28.5
-ENV ELIXIR_VERSION=v1.19.5
+ENV SSL_VERSION=3.6.3
+ENV OTP_VERSION=OTP-29.0.3
+ENV ELIXIR_VERSION=v1.20.2
 
 RUN apt-get update && apt-get install -y vim git curl locate wget apt-transport-https apt-utils locales
 ENV LANGUAGE en_US.UTF-8

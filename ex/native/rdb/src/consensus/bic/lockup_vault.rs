@@ -11,7 +11,6 @@ pub const EPOCH_INTERVAL: u64 = crate::consensus::bic::epoch::EPOCH_INTERVAL as 
 pub const DAYS_PER_MONTH: u64 = 30;
 
 pub const fn days_to_epochs(days: u64) -> u64 {
-    //saturating so absurd inputs cap out instead of wrapping (release) or panicking
     days.saturating_mul(BLOCKS_PER_DAY).saturating_add(EPOCH_INTERVAL - 1) / EPOCH_INTERVAL
 }
 
@@ -19,7 +18,7 @@ pub const UNLOCK_PERIOD_EPOCHS: u64 = days_to_epochs(21);
 
 pub const MIN_VAULT_AMOUNT: i128 = 1000 * 1_000_000_000; //1000 AMA
 
-pub const MAX_OG_LOCK_MONTHS: u64 = 1200; //og `months` cap (100 years); bounds months_to_epochs well clear of overflow
+pub const MAX_LOCK_MONTHS: u64 = 1200;
 
 pub const BONUS_RATE_BPS: u64 = 500; //additive, 12month vaults only
 pub const BONUS_END_EPOCH: u64 = 1150; //12m vaults created from this epoch on no longer lock the bonus
@@ -29,6 +28,8 @@ pub const VALIDATOR_CHANGE_QUEUE_EPOCHS: u64 = 2;
 pub const VALIDATOR_MIN_STAKE: i128 = 1_000_000 * 1_000_000_000; //1m AMA
 
 pub const APY_EPOCH_DENOM: i128 = 6_307_200; //10_000 bps x 630.72 epochs per 365 day year
+
+pub const VAULT_ACTIVATION_EPOCH: u64 = 750;
 
 const VAULT_KEY_PREFIX: &[u8] = b"bic:lockup_vault:vault:";
 
@@ -40,12 +41,6 @@ pub fn months_to_epochs(months: u64) -> u64 {
 pub fn tier_params(tier: &[u8], epoch: u64) -> (u64, u64) {
     let bonus = if epoch < BONUS_END_EPOCH { BONUS_RATE_BPS } else { 0 };
     match tier {
-        //TEMPORARY test tier: 1% APY, matures immediately, 0 epoch unlock window
-        //(see unlock_window_epochs) for fast end-to-end testing. remove before mainnet.
-        b"test" => (100, 0),
-        //og: 0 APY, caller-chosen lock length (the `months` create arg; default 0
-        //= immediate maturity). unlike test it serves the full UNLOCK_PERIOD_EPOCHS
-        //window. duration here is the default; call_create applies `months`.
         b"og" => (0, 0),
         b"3m" => (500, months_to_epochs(3)),
         b"6m" => (1000, months_to_epochs(6)),
@@ -54,17 +49,8 @@ pub fn tier_params(tier: &[u8], epoch: u64) -> (u64, u64) {
     }
 }
 
-//epochs between queuing unlock and being able to withdraw. every real tier
-//serves the full period; the TEMPORARY test tier exits in the same epoch.
-fn unlock_window_epochs(tier: &[u8]) -> u64 {
-    match tier {
-        b"test" => 0,
-        _ => UNLOCK_PERIOD_EPOCHS,
-    }
-}
-
 pub struct Vault {
-    pub vault_type: Vec<u8>, //tier string: "test" | "og" | "3m" | "6m" | "12m"
+    pub vault_type: Vec<u8>, //tier string: "og" | "3m" | "6m" | "12m"
     pub amount: i128,
     pub accrued: i128,
     pub rate_bps: u64,
@@ -80,18 +66,11 @@ pub struct Vault {
 }
 
 impl Vault {
-    //compound vaults always accrue into the vault; non-compound vaults accrue
-    //only while no payout address is set, otherwise they distribute to it
+    //yield accrues into the vault unless a payout address is set. create/set_compound/
+    //set_payout_address enforce that compound and a payout address never coexist; the
+    //compound check remains as defense for any pre-invariant state.
     pub fn accrues_to_vault(&self) -> bool {
         self.compound || self.payout_address.is_none()
-    }
-
-    //yield accrues from created_epoch until unlock is queued
-    pub fn accrual_end_epoch(&self, current_epoch: u64) -> u64 {
-        match self.unlock_start_epoch {
-            Some(start) => start.min(current_epoch),
-            None => current_epoch,
-        }
     }
 
     //validator changes (set or clear) queue for VALIDATOR_CHANGE_QUEUE_EPOCHS;
@@ -228,19 +207,17 @@ pub fn vaults_by_owner(env: &mut ApplyEnv, owner: &[u8]) -> Vec<(Vec<u8>, Vault)
     vaults
 }
 
-//pays the ending epoch's yield for every eligible vault: not unlocking, and
-//the validator it backed this epoch is in the epoch's set and unslashed.
-//compound vaults accrue on amount+accrued, others on amount alone; payouts
-//route per accrues_to_vault. reduction_pct scales payouts (100 = full). pays
-//at most budget, pro rata if the dues exceed it. returns the total paid.
-pub fn pay_epoch_yield(
-    env: &mut ApplyEnv,
-    epoch: u64,
-    validators: &HashSet<Vec<u8>>,
-    slashed: &HashSet<Vec<u8>>,
-    reduction_pct: u64,
-    budget: i128,
-) -> i128 {
+//pays the ending epoch's yield for every vault whose backing validator is in the
+//epoch's set (the set already excludes validators slashed during the epoch).
+//promotion has already run (promote_pending_validators is first in epoch::next2),
+//so this reads vault.validator directly. unlocking vaults still earn (they keep
+//backing their validator until withdrawn). yield is due on amount+accrued —
+//everything locked in the vault earns, regardless of compound history. payouts
+//route per accrues_to_vault: to the payout address if one is set, else accruing
+//into the vault. reduction_pct scales payouts (100 = full). pays at most budget,
+//pro rata if the dues exceed it. returns the total paid, which draws down the
+//budget; the caller handles the network tax and accrued-pool accounting.
+pub fn pay_epoch_yield(env: &mut ApplyEnv, validators: &HashSet<Vec<u8>>, reduction_pct: u64, budget: i128) -> i128 {
     if budget <= 0 || reduction_pct == 0 {
         return 0;
     }
@@ -251,21 +228,14 @@ pub fn pay_epoch_yield(
         cursor = suffix.clone();
         let term = decode(&bytes).unwrap_or_else(|_| panic_any("invalid_vault_data"));
         let vault = Vault::from_term(&term);
-        if vault.unlock_start_epoch.is_some() {
-            continue;
-        }
-        let backed = match vault.validator_for_epoch(epoch) {
+        let backed = match &vault.validator {
             Some(v) => v.clone(),
             None => continue,
         };
-        if !validators.contains(&backed) || slashed.contains(&backed) {
+        if !validators.contains(&backed) {
             continue;
         }
-        let base = if vault.compound {
-            vault.amount.checked_add(vault.accrued).unwrap_or_else(|| panic_any("vault_amount_overflow"))
-        } else {
-            vault.amount
-        };
+        let base = vault.amount.checked_add(vault.accrued).unwrap_or_else(|| panic_any("vault_amount_overflow"));
         let due = base.checked_mul(vault.rate_bps as i128).unwrap_or_else(|| panic_any("yield_overflow")) / APY_EPOCH_DENOM;
         let due = due.checked_mul(reduction_pct.min(100) as i128).unwrap_or_else(|| panic_any("yield_overflow")) / 100;
         if due > 0 {
@@ -287,6 +257,7 @@ pub fn pay_epoch_yield(
         if pay <= 0 {
             continue;
         }
+        //pay the vault its full yield (no deduction); the tax is handled by the caller
         if vault.accrues_to_vault() {
             vault.accrued = vault.accrued.checked_add(pay).unwrap_or_else(|| panic_any("vault_amount_overflow"));
             store_vault(env, &key, &vault);
@@ -299,27 +270,37 @@ pub fn pay_epoch_yield(
     paid_total
 }
 
-//epoch boundary scan over every vault: skips unlocking vaults, persists due
-//pending validator changes, and sums amount+accrued per live validator.
-//BTreeMap keeps iteration deterministic across nodes. phase 3 reward accrual
-//for the ending epoch must run BEFORE this (promotion rewrites the validator
-//the vault was backing during the ending epoch).
-pub fn validator_stakes(env: &mut ApplyEnv, epoch: u64) -> BTreeMap<Vec<u8>, i128> {
-    let mut stakes: BTreeMap<Vec<u8>, i128> = BTreeMap::new();
+//posts every queued validator change due by `epoch` (the epoch being entered).
+//this is the ONLY place promotion persists — it runs FIRST in epoch::next2, so
+//mid-epoch state never carries a due-but-unposted change and everything downstream
+//(yield, stakes, user calls) reads vault.validator / the pending fields directly.
+pub fn promote_pending_validators(env: &mut ApplyEnv, epoch: u64) {
     let mut cursor: Vec<u8> = Vec::new();
     while let Some((suffix, bytes)) = kv_get_next(env, VAULT_KEY_PREFIX, &cursor) {
         cursor = suffix.clone();
         let term = decode(&bytes).unwrap_or_else(|_| panic_any("invalid_vault_data"));
         let mut vault = Vault::from_term(&term);
-        if vault.unlock_start_epoch.is_some() {
-            continue;
-        }
         if vault.validator_pending_epoch.is_some() {
             vault.promote_validator(epoch);
             if vault.validator_pending_epoch.is_none() {
                 store_vault(env, &bcat(&[VAULT_KEY_PREFIX, &suffix]), &vault);
             }
         }
+    }
+}
+
+//epoch boundary scan: sums amount+accrued per backing validator. unlocking vaults
+//still count toward their validator's stake (they keep backing it until withdrawn),
+//matching pay_epoch_yield. promotion has already run (promote_pending_validators is
+//first in epoch::next2), so this just reads vault.validator. BTreeMap keeps
+//iteration deterministic across nodes.
+pub fn validator_stakes(env: &mut ApplyEnv) -> BTreeMap<Vec<u8>, i128> {
+    let mut stakes: BTreeMap<Vec<u8>, i128> = BTreeMap::new();
+    let mut cursor: Vec<u8> = Vec::new();
+    while let Some((suffix, bytes)) = kv_get_next(env, VAULT_KEY_PREFIX, &cursor) {
+        cursor = suffix;
+        let term = decode(&bytes).unwrap_or_else(|_| panic_any("invalid_vault_data"));
+        let vault = Vault::from_term(&term);
         if let Some(validator) = &vault.validator {
             let total = vault.amount.checked_add(vault.accrued).unwrap_or_else(|| panic_any("vault_amount_overflow"));
             let stake = stakes.entry(validator.clone()).or_insert(0);
@@ -331,8 +312,7 @@ pub fn validator_stakes(env: &mut ApplyEnv, epoch: u64) -> BTreeMap<Vec<u8>, i12
 
 fn load_caller_vault(env: &mut ApplyEnv, vault_index: &[u8]) -> (Vec<u8>, Vault) {
     let key = vault_key(&env.caller_env.account_caller.clone(), vault_index);
-    let mut vault = load_vault(env, &key);
-    vault.promote_validator(env.caller_env.entry_epoch);
+    let vault = load_vault(env, &key);
     (key, vault)
 }
 
@@ -349,12 +329,6 @@ fn init_balance_if_missing(env: &mut ApplyEnv, address: &[u8]) {
     }
 }
 
-//strict reader for a single vecpak map argument (tag 7). the codec already
-//guarantees the map is canonical and duplicate-free (decode rejects anything
-//else), so this layer only adds the policy the codec can't know: an allow-list
-//of recognized keys (unknown keys are a hard error, so expanding the set is a
-//consensus change to gate behind a forkheight), plus required-key presence and
-//per-key value typing.
 struct ArgMap {
     pairs: Vec<(Vec<u8>, Term)>,
 }
@@ -430,7 +404,7 @@ const CREATE_KEYS: &[&[u8]] = &[b"amount", b"tier", b"compound", b"validator", b
 
 //args: a single vecpak map (tag 7) with keys:
 //  amount         (int,  required)
-//  tier           (bin,  required) — "test" | "og" | "3m" | "6m" | "12m"
+//  tier           (bin,  required) — "og" | "3m" | "6m" | "12m"
 //  compound       (bool, required)
 //  validator      (bin pk, optional) — enters the 2-epoch validator queue, same
 //                 as a later set_validator (not live until it posts)
@@ -448,14 +422,15 @@ pub fn call_create(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let amount = map.require_int(b"amount", "invalid_amount");
     let tier = map.require_bin(b"tier", "invalid_vault_type");
     let compound = map.require_bool(b"compound", "invalid_compound");
+    if compound && map.get(b"payout_address").is_some() {
+        panic_any("payout_not_allowed_with_compound")
+    }
     let (rate_bps, tier_duration) = tier_params(&tier, env.caller_env.entry_epoch);
-    //og takes a caller-chosen lock length via `months` (default 0 = immediate
-    //maturity); every other tier's duration is fixed and rejects a `months` arg
     let duration_epochs = match map.opt_int(b"months", "invalid_months") {
         Some(_) if tier.as_slice() != b"og" => panic_any("months_not_allowed"),
         Some(m) => {
             let m = u64::try_from(m).unwrap_or_else(|_| panic_any("invalid_months"));
-            if m > MAX_OG_LOCK_MONTHS {
+            if m > MAX_LOCK_MONTHS {
                 panic_any("invalid_months")
             }
             months_to_epochs(m)
@@ -497,7 +472,6 @@ pub fn call_create(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     };
 
     let entry_epoch = env.caller_env.entry_epoch;
-    //the tier schedule is the floor; unlock_epoch can only extend maturity later
     let tier_mature = entry_epoch.saturating_add(duration_epochs);
     let mature_epoch = match map.opt_int(b"unlock_epoch", "invalid_unlock_epoch") {
         Some(v) if v > tier_mature as i128 => u64::try_from(v).unwrap_or_else(|_| panic_any("invalid_unlock_epoch")),
@@ -545,9 +519,8 @@ pub fn call_unlock(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         panic_any("vault_is_locked")
     }
 
-    //the unlock window runs from the moment unlock is queued; per-tier
     vault.unlock_start_epoch = Some(entry_epoch);
-    vault.unlock_at_epoch = Some(entry_epoch.saturating_add(unlock_window_epochs(&vault.vault_type)));
+    vault.unlock_at_epoch = Some(entry_epoch.saturating_add(UNLOCK_PERIOD_EPOCHS));
     store_vault(env, &key, &vault);
 }
 
@@ -580,6 +553,9 @@ pub fn call_set_compound(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         b"false" => false,
         _ => panic_any("invalid_compound"),
     };
+    if vault.compound {
+        vault.payout_address = None;
+    }
     store_vault(env, &key, &vault);
 }
 
@@ -590,6 +566,9 @@ pub fn call_set_payout_address(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let (key, mut vault) = load_caller_vault(env, &args[0]);
     if vault.unlock_start_epoch.is_some() {
         panic_any("vault_is_unlocking")
+    }
+    if vault.compound {
+        panic_any("payout_not_allowed_with_compound")
     }
     validate_pk(&args[1], "invalid_payout_pk");
     init_balance_if_missing(env, &args[1]);
@@ -620,9 +599,6 @@ pub fn call_set_validator(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let validator = args[1].as_slice();
     validate_pk(validator, "invalid_validator_pk");
     init_balance_if_missing(env, validator);
-    //the validator the vault is already heading toward: the queued one if a change
-    //is in flight, otherwise the active one. re-selecting it is a no-op so the
-    //2-epoch clock is not reset
     let heading_to = if vault.validator_pending_epoch.is_some() {
         vault.validator_pending.as_deref()
     } else {
@@ -644,10 +620,6 @@ pub fn call_clear_validator(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if vault.unlock_start_epoch.is_some() {
         panic_any("vault_is_unlocking")
     }
-    //if a validator change is still queuing — a queued set to a (necessarily
-    //different) validator, or any queue while none is active yet — just drop the
-    //queue, reverting to the active validator (or to none). otherwise queue
-    //removal of the active validator.
     if vault.validator_pending_epoch.is_some() && (vault.validator.is_none() || vault.validator_pending.is_some()) {
         vault.validator_pending = None;
         vault.validator_pending_epoch = None;
@@ -657,5 +629,37 @@ pub fn call_clear_validator(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     } else {
         return;
     }
+    store_vault(env, &key, &vault);
+}
+
+pub fn call_change_owner(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    if args.len() != 2 {
+        panic_any("invalid_args")
+    }
+    let (key, vault) = load_caller_vault(env, &args[0]);
+    if vault.unlock_start_epoch.is_some() {
+        panic_any("vault_is_unlocking")
+    }
+    validate_pk(&args[1], "invalid_owner_pk");
+    init_balance_if_missing(env, &args[1]);
+
+    let new_key = vault_key(&args[1], &args[0]);
+    kv_delete(env, &key);
+    store_vault(env, &new_key, &vault);
+}
+
+pub fn call_extend_lock(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    if args.len() != 2 {
+        panic_any("invalid_args")
+    }
+    let (key, mut vault) = load_caller_vault(env, &args[0]);
+    if vault.unlock_start_epoch.is_some() {
+        panic_any("vault_is_unlocking")
+    }
+    let extra = std::str::from_utf8(&args[1]).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_epochs"));
+    if extra == 0 || extra > months_to_epochs(MAX_LOCK_MONTHS) {
+        panic_any("invalid_epochs")
+    }
+    vault.mature_epoch = vault.mature_epoch.saturating_add(extra);
     store_vault(env, &key, &vault);
 }
