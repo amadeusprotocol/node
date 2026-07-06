@@ -930,7 +930,6 @@ pub fn call_bic(
             (b"LockupVault", b"create") => return consensus::bic::lockup_vault::call_create(env, args),
             (b"LockupVault", b"unlock") => return consensus::bic::lockup_vault::call_unlock(env, args),
             (b"LockupVault", b"withdraw") => return consensus::bic::lockup_vault::call_withdraw(env, args),
-            (b"LockupVault", b"set_compound") => return consensus::bic::lockup_vault::call_set_compound(env, args),
             (b"LockupVault", b"set_payout_address") => return consensus::bic::lockup_vault::call_set_payout_address(env, args),
             (b"LockupVault", b"clear_payout_address") => return consensus::bic::lockup_vault::call_clear_payout_address(env, args),
             (b"LockupVault", b"set_validator") => return consensus::bic::lockup_vault::call_set_validator(env, args),

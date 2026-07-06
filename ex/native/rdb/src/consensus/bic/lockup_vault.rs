@@ -56,7 +56,6 @@ pub struct Vault {
     pub rate_bps: u64,
     pub created_epoch: u64,
     pub mature_epoch: u64,
-    pub compound: bool,
     pub payout_address: Option<Vec<u8>>,
     pub validator: Option<Vec<u8>>,
     pub validator_pending: Option<Vec<u8>>,
@@ -66,11 +65,10 @@ pub struct Vault {
 }
 
 impl Vault {
-    //yield accrues into the vault unless a payout address is set. create/set_compound/
-    //set_payout_address enforce that compound and a payout address never coexist; the
-    //compound check remains as defense for any pre-invariant state.
+    //the payout address alone decides yield routing: unset, yield accrues (compounds)
+    //into the vault; set, it distributes there
     pub fn accrues_to_vault(&self) -> bool {
-        self.compound || self.payout_address.is_none()
+        self.payout_address.is_none()
     }
 
     //validator changes (set or clear) queue for VALIDATOR_CHANGE_QUEUE_EPOCHS;
@@ -107,7 +105,6 @@ impl Vault {
             (Term::Binary(b"rate_bps".to_vec()), Term::VarInt(self.rate_bps as i128)),
             (Term::Binary(b"created_epoch".to_vec()), Term::VarInt(self.created_epoch as i128)),
             (Term::Binary(b"mature_epoch".to_vec()), Term::VarInt(self.mature_epoch as i128)),
-            (Term::Binary(b"compound".to_vec()), Term::Bool(self.compound)),
             (Term::Binary(b"payout_address".to_vec()), opt_bin(&self.payout_address)),
             (Term::Binary(b"validator".to_vec()), opt_bin(&self.validator)),
             (Term::Binary(b"validator_pending".to_vec()), opt_bin(&self.validator_pending)),
@@ -153,10 +150,6 @@ impl Vault {
             rate_bps: uint(b"rate_bps"),
             created_epoch: uint(b"created_epoch"),
             mature_epoch: uint(b"mature_epoch"),
-            compound: match get(b"compound") {
-                Term::Bool(b) => *b,
-                _ => panic_any("invalid_vault_data"),
-            },
             payout_address: match get(b"payout_address") {
                 Term::Nil() => None,
                 Term::Binary(b) => Some(b.clone()),
@@ -212,9 +205,9 @@ pub fn vaults_by_owner(env: &mut ApplyEnv, owner: &[u8]) -> Vec<(Vec<u8>, Vault)
 //promotion has already run (promote_pending_validators is first in epoch::next2),
 //so this reads vault.validator directly. unlocking vaults still earn (they keep
 //backing their validator until withdrawn). yield is due on amount+accrued —
-//everything locked in the vault earns, regardless of compound history. payouts
-//route per accrues_to_vault: to the payout address if one is set, else accruing
-//into the vault. reduction_pct scales payouts (100 = full). pays at most budget,
+//everything locked in the vault earns. payouts route per accrues_to_vault: to the
+//payout address if one is set, else compounding into the vault.
+//reduction_pct scales payouts (100 = full). pays at most budget,
 //pro rata if the dues exceed it. returns the total paid, which draws down the
 //budget; the caller handles the network tax and accrued-pool accounting.
 pub fn pay_epoch_yield(env: &mut ApplyEnv, validators: &HashSet<Vec<u8>>, reduction_pct: u64, budget: i128) -> i128 {
@@ -400,15 +393,15 @@ impl ArgMap {
     }
 }
 
-const CREATE_KEYS: &[&[u8]] = &[b"amount", b"tier", b"compound", b"validator", b"payout_address", b"owner", b"unlock_epoch", b"months"];
+const CREATE_KEYS: &[&[u8]] = &[b"amount", b"tier", b"validator", b"payout_address", b"owner", b"unlock_epoch", b"months"];
 
 //args: a single vecpak map (tag 7) with keys:
 //  amount         (int,  required)
 //  tier           (bin,  required) — "og" | "3m" | "6m" | "12m"
-//  compound       (bool, required)
 //  validator      (bin pk, optional) — enters the 2-epoch validator queue, same
 //                 as a later set_validator (not live until it posts)
-//  payout_address (bin pk, optional)
+//  payout_address (bin pk, optional) — where yield distributes; when unset, yield
+//                 accrues (compounds) into the vault
 //  owner          (bin pk, optional) — who the vault is keyed under and controlled
 //                 by; defaults to the caller. lets a treasury fund a vault held by
 //                 a beneficiary. the caller is always the one debited.
@@ -421,10 +414,6 @@ pub fn call_create(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
 
     let amount = map.require_int(b"amount", "invalid_amount");
     let tier = map.require_bin(b"tier", "invalid_vault_type");
-    let compound = map.require_bool(b"compound", "invalid_compound");
-    if compound && map.get(b"payout_address").is_some() {
-        panic_any("payout_not_allowed_with_compound")
-    }
     let (rate_bps, tier_duration) = tier_params(&tier, env.caller_env.entry_epoch);
     let duration_epochs = match map.opt_int(b"months", "invalid_months") {
         Some(_) if tier.as_slice() != b"og" => panic_any("months_not_allowed"),
@@ -491,7 +480,6 @@ pub fn call_create(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         rate_bps,
         created_epoch: entry_epoch,
         mature_epoch,
-        compound,
         payout_address,
         validator: None,
         validator_pending: validator,
@@ -540,25 +528,6 @@ pub fn call_withdraw(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     kv_delete(env, &key);
 }
 
-pub fn call_set_compound(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
-    if args.len() != 2 {
-        panic_any("invalid_args")
-    }
-    let (key, mut vault) = load_caller_vault(env, &args[0]);
-    if vault.unlock_start_epoch.is_some() {
-        panic_any("vault_is_unlocking")
-    }
-    vault.compound = match args[1].as_slice() {
-        b"true" => true,
-        b"false" => false,
-        _ => panic_any("invalid_compound"),
-    };
-    if vault.compound {
-        vault.payout_address = None;
-    }
-    store_vault(env, &key, &vault);
-}
-
 pub fn call_set_payout_address(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if args.len() != 2 {
         panic_any("invalid_args")
@@ -566,9 +535,6 @@ pub fn call_set_payout_address(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let (key, mut vault) = load_caller_vault(env, &args[0]);
     if vault.unlock_start_epoch.is_some() {
         panic_any("vault_is_unlocking")
-    }
-    if vault.compound {
-        panic_any("payout_not_allowed_with_compound")
     }
     validate_pk(&args[1], "invalid_payout_pk");
     init_balance_if_missing(env, &args[1]);

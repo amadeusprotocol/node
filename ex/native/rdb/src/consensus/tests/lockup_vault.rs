@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use crate::bcat;
-use crate::consensus::bic::coin::to_flat;
+use crate::consensus::bic::coin::{from_flat, to_flat};
 use crate::consensus::bic::lockup_vault::{
     days_to_epochs, months_to_epochs, promote_pending_validators, tier_params, vaults_by_owner, Vault, BONUS_END_EPOCH, MAX_LOCK_MONTHS,
     MIN_VAULT_AMOUNT, UNLOCK_PERIOD_EPOCHS, VALIDATOR_CHANGE_QUEUE_EPOCHS,
@@ -23,14 +23,13 @@ fn create_call(chain: &Chain, w: &Wallet, pairs: Vec<(&[u8], Term)>) -> Result<(
     chain.call(w, LV, b"create", &[&blob])
 }
 
-fn create(chain: &Chain, w: &Wallet, amount: i128, tier: &[u8], compound: bool) -> Result<(), String> {
+fn create(chain: &Chain, w: &Wallet, amount: i128, tier: &[u8]) -> Result<(), String> {
     create_call(
         chain,
         w,
         vec![
             (b"amount", Term::VarInt(amount)),
             (b"tier", Term::Binary(tier.to_vec())),
-            (b"compound", Term::Bool(compound)),
         ],
     )
 }
@@ -85,16 +84,16 @@ fn bonus_locked_before_cutoff_is_kept_forever() {
     let w = chain.wallet(to_flat(5000));
 
     //created before the cutoff: bonus rate locks in
-    create(&chain, &w, to_flat(1000), b"12m", true).unwrap();
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
     assert_eq!(get_vault(&chain, &w.pk, 1).rate_bps, 2000);
 
     //long past the cutoff the old vault keeps its locked rate, even after writes
     chain.advance_epochs(BONUS_END_EPOCH);
-    chain.call(&w, LV, b"set_compound", &[b"1", b"false"]).unwrap();
+    chain.call(&w, LV, b"clear_payout_address", &[b"1"]).unwrap();
     assert_eq!(get_vault(&chain, &w.pk, 1).rate_bps, 2000);
 
     //a fresh 12m vault created from the cutoff on locks the base rate
-    create(&chain, &w, to_flat(1000), b"12m", true).unwrap();
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
     assert_eq!(get_vault(&chain, &w.pk, 2).rate_bps, 1500);
 }
 
@@ -103,7 +102,7 @@ fn create_happy_path() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
 
-    create(&chain, &w, to_flat(1000), b"12m", true).unwrap();
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
     assert_eq!(chain.balance(&w.pk), to_flat(4000));
 
     let vault = get_vault(&chain, &w.pk, 1);
@@ -113,8 +112,7 @@ fn create_happy_path() {
     assert_eq!(vault.rate_bps, 2000); //15% + 5% bonus, locked in
     assert_eq!(vault.created_epoch, 0);
     assert_eq!(vault.mature_epoch, 623);
-    assert!(vault.compound);
-    assert_eq!(vault.payout_address, None);
+    assert_eq!(vault.payout_address, None); //no payout address: yield compounds
     assert_eq!(vault.validator, None);
     assert_eq!(vault.unlock_start_epoch, None);
     assert_eq!(vault.unlock_at_epoch, None);
@@ -138,11 +136,11 @@ fn create_enforces_minimum() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
 
-    let r = create(&chain, &w, to_flat(1000) - 1, b"3m", false);
+    let r = create(&chain, &w, to_flat(1000) - 1, b"3m");
     assert_eq!(r, Err("vault_amount_below_minimum".to_string()));
     assert_eq!(chain.balance(&w.pk), to_flat(5000));
 
-    create(&chain, &w, to_flat(1000), b"3m", false).unwrap();
+    create(&chain, &w, to_flat(1000), b"3m").unwrap();
     assert_eq!(chain.balance(&w.pk), to_flat(4000));
 }
 
@@ -151,7 +149,7 @@ fn create_insufficient_funds() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(500));
 
-    let r = create(&chain, &w, to_flat(1000), b"3m", false);
+    let r = create(&chain, &w, to_flat(1000), b"3m");
     assert_eq!(r, Err("insufficient_funds".to_string()));
     assert_eq!(chain.balance(&w.pk), to_flat(500));
 }
@@ -161,10 +159,10 @@ fn rates_lock_per_tier() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(10_000));
 
-    create(&chain, &w, to_flat(1000), b"og", true).unwrap();
-    create(&chain, &w, to_flat(1000), b"3m", true).unwrap();
-    create(&chain, &w, to_flat(1000), b"6m", true).unwrap();
-    create(&chain, &w, to_flat(1000), b"12m", true).unwrap();
+    create(&chain, &w, to_flat(1000), b"og").unwrap();
+    create(&chain, &w, to_flat(1000), b"3m").unwrap();
+    create(&chain, &w, to_flat(1000), b"6m").unwrap();
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
 
     assert_eq!(get_vault(&chain, &w.pk, 1).rate_bps, 0);
     assert_eq!(get_vault(&chain, &w.pk, 2).rate_bps, 500);
@@ -187,7 +185,6 @@ fn create_map_strict_decode() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(b"3m".to_vec())),
-                (b"compound", Term::Bool(false)),
                 (b"bogus", Term::VarInt(1)),
             ]
         ),
@@ -203,7 +200,6 @@ fn create_map_strict_decode() {
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"amount", Term::VarInt(to_flat(2000))),
                 (b"tier", Term::Binary(b"3m".to_vec())),
-                (b"compound", Term::Bool(false)),
             ]
         ),
         Err("invalid_args".to_string())
@@ -226,7 +222,6 @@ fn create_map_strict_decode() {
             vec![
                 (b"amount", Term::Binary(b"1000".to_vec())), //should be VarInt
                 (b"tier", Term::Binary(b"3m".to_vec())),
-                (b"compound", Term::Bool(false)),
             ]
         ),
         Err("invalid_amount".to_string())
@@ -238,11 +233,11 @@ fn create_map_strict_decode() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::VarInt(1)), //should be Binary
-                (b"compound", Term::Bool(false)),
             ]
         ),
         Err("invalid_vault_type".to_string())
     );
+    //the retired compound key is no longer recognized
     assert_eq!(
         create_call(
             &chain,
@@ -250,10 +245,10 @@ fn create_map_strict_decode() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(b"3m".to_vec())),
-                (b"compound", Term::VarInt(1)), //should be Bool
+                (b"compound", Term::Bool(true)),
             ]
         ),
-        Err("invalid_compound".to_string())
+        Err("unknown_arg".to_string())
     );
 
     //missing required keys
@@ -261,7 +256,7 @@ fn create_map_strict_decode() {
         create_call(
             &chain,
             &w,
-            vec![(b"tier", Term::Binary(b"3m".to_vec())), (b"compound", Term::Bool(false))]
+            vec![(b"tier", Term::Binary(b"3m".to_vec()))]
         ),
         Err("invalid_amount".to_string())
     );
@@ -280,7 +275,6 @@ fn create_amount_bounds() {
             vec![
                 (b"amount", Term::VarInt(v)),
                 (b"tier", Term::Binary(b"3m".to_vec())),
-                (b"compound", Term::Bool(false)),
             ],
         )
     };
@@ -306,7 +300,7 @@ fn create_amount_bounds() {
 }
 
 #[test]
-fn create_tier_and_compound_validation() {
+fn create_tier_validation() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(10_000));
     let try_tier = |t: &[u8]| {
@@ -316,7 +310,6 @@ fn create_tier_and_compound_validation() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(t.to_vec())),
-                (b"compound", Term::Bool(false)),
             ],
         )
     };
@@ -349,7 +342,6 @@ fn create_validates_optional_pks() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(b"3m".to_vec())),
-                (b"compound", Term::Bool(false)),
                 (key, Term::Binary(pk)),
             ],
         )
@@ -359,7 +351,7 @@ fn create_validates_optional_pks() {
     assert_eq!(mk(b"owner", burn.to_vec()), Err("invalid_owner_pk".to_string()));
     assert_eq!(chain.balance(&w.pk), to_flat(5000)); //nothing committed
 
-    //all three together, valid (compound off, since payout can't coexist with compound)
+    //all three together, valid
     let payee = new_wallet();
     let owner = new_wallet();
     create_call(
@@ -368,7 +360,6 @@ fn create_validates_optional_pks() {
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"12m".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"validator", Term::Binary(v.pk.to_vec())),
             (b"payout_address", Term::Binary(payee.pk.to_vec())),
             (b"owner", Term::Binary(owner.pk.to_vec())),
@@ -399,7 +390,6 @@ fn create_for_beneficiary_owner() {
         vec![
             (b"amount", Term::VarInt(to_flat(1500))),
             (b"tier", Term::Binary(b"3m".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"owner", Term::Binary(investor.pk.to_vec())),
         ],
     )
@@ -412,7 +402,7 @@ fn create_for_beneficiary_owner() {
 
     //the funder cannot touch a vault it does not own
     assert_eq!(chain.call(&treasury, LV, b"unlock", &[b"1"]), Err("invalid_vault".to_string()));
-    assert_eq!(chain.call(&treasury, LV, b"set_compound", &[b"1", b"true"]), Err("invalid_vault".to_string()));
+    assert_eq!(chain.call(&treasury, LV, b"extend_lock", &[b"1", b"300"]), Err("invalid_vault".to_string()));
 
     //the investor controls it; after the 3m schedule + unlock window, withdraw
     //returns the principal to the investor, never to the treasury (no clawback)
@@ -439,7 +429,6 @@ fn og_tier_custom_lock_owner_and_zero_apy() {
         vec![
             (b"amount", Term::VarInt(to_flat(2000))),
             (b"tier", Term::Binary(b"og".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"months", Term::VarInt(6)),
             (b"owner", Term::Binary(investor.pk.to_vec())),
         ],
@@ -470,7 +459,7 @@ fn og_defaults_to_immediate_maturity_with_full_window() {
     let w = chain.wallet(to_flat(5000));
 
     //no months => matures immediately (like the retired 0m), 0 APY
-    create(&chain, &w, to_flat(1000), b"og", false).unwrap();
+    create(&chain, &w, to_flat(1000), b"og").unwrap();
     let vault = get_vault(&chain, &w.pk, 1);
     assert_eq!(vault.rate_bps, 0);
     assert_eq!(vault.mature_epoch, 0);
@@ -497,7 +486,6 @@ fn months_arg_rejected_off_og_and_validated() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(b"3m".to_vec())),
-                (b"compound", Term::Bool(false)),
                 (b"months", Term::VarInt(6)),
             ]
         ),
@@ -512,7 +500,6 @@ fn months_arg_rejected_off_og_and_validated() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(b"og".to_vec())),
-                (b"compound", Term::Bool(false)),
                 (b"months", Term::VarInt(-1)),
             ]
         ),
@@ -525,7 +512,6 @@ fn months_arg_rejected_off_og_and_validated() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(b"og".to_vec())),
-                (b"compound", Term::Bool(false)),
                 (b"months", Term::Binary(b"6".to_vec())),
             ]
         ),
@@ -540,7 +526,6 @@ fn months_arg_rejected_off_og_and_validated() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(b"og".to_vec())),
-                (b"compound", Term::Bool(false)),
                 (b"months", Term::VarInt(MAX_LOCK_MONTHS as i128 + 1)),
             ]
         ),
@@ -562,7 +547,6 @@ fn og_months_cap_boundary_accepts() {
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"og".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"months", Term::VarInt(MAX_LOCK_MONTHS as i128)),
         ],
     )
@@ -584,7 +568,6 @@ fn unlock_epoch_extends_but_never_shortens_maturity() {
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"3m".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"unlock_epoch", Term::VarInt(200)),
         ],
     )
@@ -599,7 +582,6 @@ fn unlock_epoch_extends_but_never_shortens_maturity() {
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"6m".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"unlock_epoch", Term::VarInt(10)),
         ],
     )
@@ -614,7 +596,6 @@ fn unlock_epoch_extends_but_never_shortens_maturity() {
             vec![
                 (b"amount", Term::VarInt(to_flat(1000))),
                 (b"tier", Term::Binary(b"3m".to_vec())),
-                (b"compound", Term::Bool(false)),
                 (b"unlock_epoch", Term::Binary(b"100".to_vec())),
             ]
         ),
@@ -634,7 +615,6 @@ fn unlock_blocked_until_extended_epoch() {
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"3m".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"unlock_epoch", Term::VarInt(300)),
         ],
     )
@@ -656,7 +636,7 @@ fn unlock_blocked_until_extended_epoch() {
 fn unlock_respects_maturity() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(1000), b"3m", false).unwrap();
+    create(&chain, &w, to_flat(1000), b"3m").unwrap();
 
     assert_eq!(chain.call(&w, LV, b"unlock", &[b"1"]), Err("vault_is_locked".to_string()));
 
@@ -675,8 +655,8 @@ fn unlock_respects_maturity() {
 fn unlock_window_is_full_regardless_of_hold() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(1000), b"3m", false).unwrap();
-    create(&chain, &w, to_flat(1000), b"3m", false).unwrap();
+    create(&chain, &w, to_flat(1000), b"3m").unwrap();
+    create(&chain, &w, to_flat(1000), b"3m").unwrap();
     chain.advance_epochs(156); //both mature
 
     //unlocked at maturity: full 37 epoch period from the unlock point
@@ -693,7 +673,7 @@ fn unlock_window_is_full_regardless_of_hold() {
 fn unlock_twice_fails() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(1000), b"og", false).unwrap();
+    create(&chain, &w, to_flat(1000), b"og").unwrap();
 
     chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
     assert_eq!(chain.call(&w, LV, b"unlock", &[b"1"]), Err("vault_already_unlocking".to_string()));
@@ -703,7 +683,7 @@ fn unlock_twice_fails() {
 fn withdraw_flow() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(1500), b"3m", false).unwrap();
+    create(&chain, &w, to_flat(1500), b"3m").unwrap();
     assert_eq!(chain.balance(&w.pk), to_flat(3500));
 
     assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1"]), Err("vault_not_unlocking".to_string()));
@@ -730,14 +710,13 @@ fn payout_address_lifecycle() {
     let payee = new_wallet();
     let payee2 = new_wallet();
 
-    //non-compound with an explicit payout address: distributes
+    //created with an explicit payout address: yield distributes there
     create_call(
         &chain,
         &w,
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"3m".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"payout_address", Term::Binary(payee.pk.to_vec())),
         ],
     )
@@ -746,66 +725,20 @@ fn payout_address_lifecycle() {
     assert_eq!(vault.payout_address, Some(payee.pk.to_vec()));
     assert!(!vault.accrues_to_vault());
 
-    //cleared: accrues into the vault
+    //cleared: yield accrues (compounds) into the vault
     chain.call(&w, LV, b"clear_payout_address", &[b"1"]).unwrap();
     let vault = get_vault(&chain, &w.pk, 1);
     assert_eq!(vault.payout_address, None);
     assert!(vault.accrues_to_vault());
 
-    //set/updated again
-    chain.call(&w, LV, b"set_payout_address", &[b"1", &payee2.pk]).unwrap();
-    assert_eq!(get_vault(&chain, &w.pk, 1).payout_address, Some(payee2.pk.to_vec()));
-
-    let junk_pk = [7u8; 48];
-    assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1", &junk_pk]), Err("invalid_payout_pk".to_string()));
-
-    //compound and payout are mutually exclusive: turning compound on clears the payout
-    //address, and yield then accrues into the vault
-    chain.call(&w, LV, b"set_compound", &[b"1", b"true"]).unwrap();
-    let vault = get_vault(&chain, &w.pk, 1);
-    assert!(vault.compound);
-    assert_eq!(vault.payout_address, None);
-    assert!(vault.accrues_to_vault());
-
-    //a payout address can't be set while compounding
-    assert_eq!(
-        chain.call(&w, LV, b"set_payout_address", &[b"1", &payee2.pk]),
-        Err("payout_not_allowed_with_compound".to_string())
-    );
-
-    //turn compound off, then a payout address is settable again and distributes
-    chain.call(&w, LV, b"set_compound", &[b"1", b"false"]).unwrap();
+    //set/updated again: distributes to the new address
     chain.call(&w, LV, b"set_payout_address", &[b"1", &payee2.pk]).unwrap();
     let vault = get_vault(&chain, &w.pk, 1);
     assert_eq!(vault.payout_address, Some(payee2.pk.to_vec()));
     assert!(!vault.accrues_to_vault());
 
-    assert_eq!(chain.call(&w, LV, b"set_compound", &[b"1", b"maybe"]), Err("invalid_compound".to_string()));
-}
-
-#[test]
-fn create_rejects_compound_with_payout() {
-    let chain = Chain::new();
-    let w = chain.wallet(to_flat(5000));
-    let payee = new_wallet();
-
-    //compound and a payout address can't both be set at creation
-    assert_eq!(
-        create_call(
-            &chain,
-            &w,
-            vec![
-                (b"amount", Term::VarInt(to_flat(1000))),
-                (b"tier", Term::Binary(b"12m".to_vec())),
-                (b"compound", Term::Bool(true)),
-                (b"payout_address", Term::Binary(payee.pk.to_vec())),
-            ],
-        ),
-        Err("payout_not_allowed_with_compound".to_string())
-    );
-    //nothing was created and the caller wasn't debited
-    assert!(!vault_exists(&chain, &w.pk, 1));
-    assert_eq!(chain.balance(&w.pk), to_flat(5000));
+    let junk_pk = [7u8; 48];
+    assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1", &junk_pk]), Err("invalid_payout_pk".to_string()));
 }
 
 // ---- validator queue ---------------------------------------------------------
@@ -815,7 +748,7 @@ fn set_validator_queues_two_epochs() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let validator = new_wallet();
-    create(&chain, &w, to_flat(1000), b"12m", true).unwrap();
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
 
     chain.call(&w, LV, b"set_validator", &[b"1", &validator.pk]).unwrap();
 
@@ -851,7 +784,7 @@ fn clear_validator_queues_two_epochs() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let validator = new_wallet();
-    create(&chain, &w, to_flat(1000), b"12m", true).unwrap();
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
 
     chain.call(&w, LV, b"set_validator", &[b"1", &validator.pk]).unwrap();
     chain.advance_epochs(VALIDATOR_CHANGE_QUEUE_EPOCHS);
@@ -890,7 +823,6 @@ fn create_validator_enters_queue() {
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"12m".to_vec())),
-            (b"compound", Term::Bool(true)),
             (b"validator", Term::Binary(v.pk.to_vec())),
         ],
     )
@@ -910,7 +842,6 @@ fn create_validator_enters_queue() {
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"3m".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"validator", Term::Binary(v.pk.to_vec())),
             (b"payout_address", Term::Binary(payee.pk.to_vec())),
         ],
@@ -935,7 +866,7 @@ fn set_validator_same_address_is_noop() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let v = new_wallet();
-    create(&chain, &w, to_flat(1000), b"12m", true).unwrap();
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
 
     //queue v at epoch 0 -> posts at epoch 2
     chain.call(&w, LV, b"set_validator", &[b"1", &v.pk]).unwrap();
@@ -980,7 +911,6 @@ fn clear_validator_while_queuing_cancels_the_queue() {
         vec![
             (b"amount", Term::VarInt(to_flat(1000))),
             (b"tier", Term::Binary(b"12m".to_vec())),
-            (b"compound", Term::Bool(true)),
             (b"validator", Term::Binary(v.pk.to_vec())),
         ],
     )
@@ -1014,7 +944,7 @@ fn unlocking_vault_rejects_all_mutations() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let validator = new_wallet();
-    create(&chain, &w, to_flat(1000), b"og", false).unwrap();
+    create(&chain, &w, to_flat(1000), b"og").unwrap();
 
     let junk_pk = [7u8; 48];
     assert_eq!(chain.call(&w, LV, b"set_validator", &[b"1", &junk_pk]), Err("invalid_validator_pk".to_string()));
@@ -1024,7 +954,6 @@ fn unlocking_vault_rejects_all_mutations() {
     let unlocking = Err("vault_is_unlocking".to_string());
     assert_eq!(chain.call(&w, LV, b"set_validator", &[b"1", &validator.pk]), unlocking);
     assert_eq!(chain.call(&w, LV, b"clear_validator", &[b"1"]), unlocking);
-    assert_eq!(chain.call(&w, LV, b"set_compound", &[b"1", b"true"]), unlocking);
     assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1", &validator.pk]), unlocking);
     assert_eq!(chain.call(&w, LV, b"clear_payout_address", &[b"1"]), unlocking);
     assert_eq!(chain.call(&w, LV, b"change_owner", &[b"1", &validator.pk]), unlocking);
@@ -1036,18 +965,18 @@ fn vaults_are_owner_scoped() {
     let chain = Chain::new();
     let alice = chain.wallet(to_flat(5000));
     let mallory = chain.wallet(to_flat(5000));
-    create(&chain, &alice, to_flat(1000), b"3m", false).unwrap();
+    create(&chain, &alice, to_flat(1000), b"3m").unwrap();
 
     assert_eq!(chain.call(&mallory, LV, b"unlock", &[b"1"]), Err("invalid_vault".to_string()));
     assert_eq!(chain.call(&mallory, LV, b"withdraw", &[b"1"]), Err("invalid_vault".to_string()));
-    assert_eq!(chain.call(&mallory, LV, b"set_compound", &[b"1", b"true"]), Err("invalid_vault".to_string()));
+    assert_eq!(chain.call(&mallory, LV, b"extend_lock", &[b"1", b"300"]), Err("invalid_vault".to_string()));
 }
 
 #[test]
 fn rate_stays_locked_past_maturity_and_through_unlock() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(1000), b"12m", true).unwrap();
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
 
     //long past maturity (epoch 623) the locked rate is untouched
     chain.advance_epochs(1000);
@@ -1070,10 +999,10 @@ fn vaults_by_owner_prefix_scan() {
     let alice = chain.wallet(to_flat(10_000));
     let bob = chain.wallet(to_flat(5000));
 
-    create(&chain, &alice, to_flat(1000), b"3m", false).unwrap();
-    create(&chain, &alice, to_flat(1100), b"3m", false).unwrap();
-    create(&chain, &alice, to_flat(1200), b"12m", true).unwrap();
-    create(&chain, &bob, to_flat(1300), b"6m", false).unwrap();
+    create(&chain, &alice, to_flat(1000), b"3m").unwrap();
+    create(&chain, &alice, to_flat(1100), b"3m").unwrap();
+    create(&chain, &alice, to_flat(1200), b"12m").unwrap();
+    create(&chain, &bob, to_flat(1300), b"6m").unwrap();
 
     let alice_vaults = chain.with_env(&alice.pk, |env| vaults_by_owner(env, &alice.pk));
     assert_eq!(alice_vaults.len(), 3);
@@ -1099,12 +1028,12 @@ fn vaults_by_owner_prefix_scan() {
 fn failed_tx_leaves_state_untouched() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(1000), b"3m", false).unwrap();
+    create(&chain, &w, to_flat(1000), b"3m").unwrap();
 
     let before = chain.state_digest();
     assert!(chain.call(&w, LV, b"unlock", &[b"1"]).is_err());
-    assert!(create(&chain, &w, to_flat(9999), b"3m", false).is_err());
-    assert!(chain.call(&w, LV, b"set_compound", &[b"1", b"maybe"]).is_err());
+    assert!(create(&chain, &w, to_flat(9999), b"3m").is_err());
+    assert!(chain.call(&w, LV, b"extend_lock", &[b"1", b"maybe"]).is_err());
     assert_eq!(chain.state_digest(), before);
 }
 
@@ -1112,7 +1041,7 @@ fn failed_tx_leaves_state_untouched() {
 fn audit_index_args_and_unknown_function() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(1000), b"og", false).unwrap();
+    create(&chain, &w, to_flat(1000), b"og").unwrap();
 
     //only the canonical decimal index hits; alias spellings miss
     let invalid_vault = Err("invalid_vault".to_string());
@@ -1125,8 +1054,9 @@ fn audit_index_args_and_unknown_function() {
     assert_eq!(chain.call(&w, LV, b"unlock", &[]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"unlock", &[b"1", b"1"]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"withdraw", &[]), invalid_args);
-    assert_eq!(chain.call(&w, LV, b"set_compound", &[b"1"]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1"]), invalid_args);
+    assert_eq!(chain.call(&w, LV, b"extend_lock", &[b"1"]), invalid_args);
+    assert_eq!(chain.call(&w, LV, b"change_owner", &[b"1"]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"clear_payout_address", &[]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"set_validator", &[b"1"]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"clear_validator", &[b"1", b"x"]), invalid_args);
@@ -1138,8 +1068,9 @@ fn audit_index_args_and_unknown_function() {
     assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1", &burn]), Err("invalid_payout_pk".to_string()));
     assert_eq!(chain.call(&w, LV, b"set_validator", &[b"1", &burn]), Err("invalid_validator_pk".to_string()));
 
-    //unknown function falls through dispatch
+    //unknown functions fall through dispatch, including the retired set_compound
     assert_eq!(chain.call(&w, LV, b"steal", &[b"1"]), Err("invalid_bic_action".to_string()));
+    assert_eq!(chain.call(&w, LV, b"set_compound", &[b"1", b"true"]), Err("invalid_bic_action".to_string()));
 
     //the vault survived every failure above and still works
     chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
@@ -1152,14 +1083,13 @@ fn full_lifecycle_replay() {
     let bob = chain.wallet(to_flat(2_000));
     let payee = new_wallet();
 
-    create(&chain, &alice, to_flat(5000), b"12m", true).unwrap();
+    create(&chain, &alice, to_flat(5000), b"12m").unwrap();
     create_call(
         &chain,
         &bob,
         vec![
             (b"amount", Term::VarInt(to_flat(1500))),
             (b"tier", Term::Binary(b"3m".to_vec())),
-            (b"compound", Term::Bool(false)),
             (b"payout_address", Term::Binary(payee.pk.to_vec())),
         ],
     )
@@ -1204,7 +1134,6 @@ fn cluster_of_validators_stays_in_sync() {
         let blob = vp_map(vec![
             (b"amount", Term::VarInt(to_flat(1000 + i as i128 * 100))),
             (b"tier", Term::Binary(tier.to_vec())),
-            (b"compound", Term::Bool(true)),
         ]);
         cluster.call_as(&v.pk, LV, b"create", &[&blob]).unwrap();
         cluster.advance_blocks(3);
@@ -1234,5 +1163,75 @@ fn cluster_of_validators_stays_in_sync() {
     let final_digest = cluster.nodes[0].state_digest();
     for node in &cluster.nodes[1..] {
         assert_eq!(node.state_digest(), final_digest);
+    }
+}
+
+//end-to-end emission snapshot: the real epoch::next2 boundary at epoch 751 with
+//100m AMA staked across 100 vaults at 20% APY, at net phash 1, 5, and 50.
+//prints the full money flow; run with --nocapture to see it.
+#[test]
+fn epoch_751_emission_scenarios_100m_stake() {
+    use crate::consensus::bic::epoch::{emission2_total, next2, SOLVER_ACCRUED_POOL_KEY, TREASURY_DONATION_ADDRESS, VAULT_ACCRUED_POOL_KEY};
+
+    for &target_phash in &[1i128, 5, 50] {
+        let mut chain = Chain::new();
+        let creator = chain.wallet(to_flat(200_000_000));
+        let payee = new_wallet();
+        let validator = new_wallet();
+        let solver = new_wallet();
+
+        //100 vaults x 1m AMA, 12m tier (locks 2000 bps = 20% pre-1150), yield
+        //distributes to payee, all backing `validator`
+        for _ in 0..100 {
+            create_call(
+                &chain,
+                &creator,
+                vec![
+                    (b"amount", Term::VarInt(to_flat(1_000_000))),
+                    (b"tier", Term::Binary(b"12m".to_vec())),
+                    (b"payout_address", Term::Binary(payee.pk.to_vec())),
+                    (b"validator", Term::Binary(validator.pk.to_vec())),
+                ],
+            )
+            .unwrap();
+        }
+
+        //epoch's validator set: the vault-backed validator plus the solver
+        let set = crate::consensus::bic::list_of_binaries_to_vecpak(vec![validator.pk.to_vec(), solver.pk.to_vec()]);
+        chain.put(&bcat(&[b"bic:epoch:validators:height:", format!("{:012}", 0).as_bytes()]), &set);
+        chain.put(b"bic:epoch:diff_bits", b"24");
+
+        //sol count that lands net phash exactly on target at the 751 boundary
+        //(phash = sols * 2^diff_bits * OPS / ((height_in_epoch + 2) * 5e14), floored)
+        let per_sol: i128 = (1i128 << 24) * 25_722_880;
+        let denom: i128 = (99_999 + 2) * 500_000_000_000_000;
+        let sols = target_phash * denom / per_sol + 1;
+        chain.put(&bcat(&[b"bic:epoch:solutions_count:", &solver.pk]), sols.to_string().as_bytes());
+
+        //run the real epoch 751 boundary
+        chain.advance_epochs(751);
+        chain.advance_blocks(99_999);
+        chain.with_env(&[0u8; 48], |env| next2(env));
+
+        let total = emission2_total(751);
+        let vault_paid = chain.balance(&payee.pk);
+        let solver_paid = chain.balance(&solver.pk);
+        let treasury = chain.balance(TREASURY_DONATION_ADDRESS.as_slice());
+        let vault_pool = chain.get(VAULT_ACCRUED_POOL_KEY).and_then(|v| atoi::atoi::<i128>(&v)).unwrap_or(0);
+        let solver_pool = chain.get(SOLVER_ACCRUED_POOL_KEY).and_then(|v| atoi::atoi::<i128>(&v)).unwrap_or(0);
+
+        println!("=== epoch 751 boundary, net phash {} ===", target_phash);
+        println!("  total emission curve: {:>12.3} AMA", from_flat(total));
+        println!("  vault half:           {:>12.3} AMA", from_flat(total / 2));
+        println!("  solver half:          {:>12.3} AMA", from_flat(total - total / 2));
+        println!("  vault APY paid:       {:>12.3} AMA (100m at 20%, phash-independent until epoch 1150)", from_flat(vault_paid));
+        println!("  solver paid:          {:>12.3} AMA ({}% participation)", from_flat(solver_paid), target_phash.min(100));
+        println!("  treasury tax (25%):   {:>12.3} AMA", from_flat(treasury));
+        println!("  vault pool carry:     {:>12.3} AMA", from_flat(vault_pool));
+        println!("  solver pool carry:    {:>12.3} AMA", from_flat(solver_pool));
+        println!("  minted this epoch:    {:>12.3} AMA (paid + tax; pools stay unminted)", from_flat(vault_paid + solver_paid + treasury));
+
+        //conservation: paid + tax + carried pools == the emission curve, exactly
+        assert_eq!(vault_paid + solver_paid + treasury + vault_pool + solver_pool, total);
     }
 }
