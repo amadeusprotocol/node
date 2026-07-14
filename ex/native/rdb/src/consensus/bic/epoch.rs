@@ -571,61 +571,6 @@ pub fn call_slash_trainer(env: &mut crate::consensus::consensus_apply::ApplyEnv,
     kv_put(env, &bcat(&[b"bic:epoch:validators:height:", &height_next]), term_trainers.as_slice());
 }
 
-pub fn next(env: &mut ApplyEnv) {
-    let epoch_cur = env.caller_env.entry_epoch;
-    let epoch_next = env.caller_env.entry_epoch + 1;
-
-    let mut peddlebike67_map: HashSet<Vec<u8>> = PEDDLEBIKE67.iter().map(|pk| pk.to_vec()).collect();
-    if env.testnet {
-        peddlebike67_map = env.testnet_peddlebikes.iter().map(|pk| pk.to_vec()).collect();
-    }
-
-    // slash sols for malicious trainers
-    //let trainers = kv_get_trainers(env, &bcat(&[b"bic:epoch:trainers:", epoch_cur.to_string().as_bytes()]));
-    let trainers = kv_get_trainers(env, env.caller_env.entry_height);
-    let trainers_map: HashSet<Vec<u8>> = trainers.into_iter().collect();
-    let trainers_removed = kv_get_trainers_removed(env);
-    let trainers_removed_map: HashSet<Vec<u8>> = trainers_removed.into_iter().collect();
-    let mut leaders: Vec<(Vec<u8>, i128)> = Vec::new();
-    let mut cursor: Vec<u8> = Vec::new();
-    while let Some((next_key_wo_prefix, val)) = kv_get_next(env, b"bic:epoch:solutions_count:", &cursor) {
-        if !trainers_removed_map.contains(&next_key_wo_prefix) {
-            let count = std::str::from_utf8(&val).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_solutions_count"));
-            leaders.push((next_key_wo_prefix.clone(), count));
-        }
-        cursor = next_key_wo_prefix;
-    }
-    // sort descending; Highest score first; tiebreak on PK
-    leaders.sort_unstable_by(|(ka, ca), (kb, cb)| match cb.cmp(ca) {
-        std::cmp::Ordering::Equal => kb.cmp(ka),
-        other => other,
-    });
-
-    let trainers_to_recv_emissions: Vec<(Vec<u8>, i128)> =
-        leaders.iter().cloned().filter(|(pk, _)| trainers_map.contains(pk) && !peddlebike67_map.contains(pk)).take(99).collect();
-
-    let epoch_total_emission = epoch_emission_active(epoch_cur);
-    let epoch_early_adopter_emission = epoch_total_emission / 7;
-    let epoch_communityfund_emission = epoch_total_emission - epoch_early_adopter_emission;
-
-    distribute_peddlebike67_community_fund(env, epoch_communityfund_emission);
-
-    let total_sols: i128 = trainers_to_recv_emissions.iter().map(|(_, count)| count).sum();
-    distribute_emissions_to_trainers(env, &trainers_to_recv_emissions, epoch_early_adopter_emission, total_sols);
-
-    //Update validators for next epoch
-    let new_validators = build_and_shuffle_new_validators(env, &leaders);
-    let new_validators = consensus::bic::list_of_binaries_to_vecpak(new_validators);
-    let height_next = format!("{:012}", env.caller_env.entry_height.saturating_add(1)).into_bytes();
-    let _ = kv_put(env, &bcat(&[b"bic:epoch:validators:height:", &height_next]), &new_validators);
-
-    update_difficulty_and_log_sols(env, epoch_cur, epoch_next, total_sols);
-    clear_epoch_data(env);
-}
-
-//epoch boundary from VAULT_ACTIVATION_EPOCH on (and always on testnet): the vault
-//engine plus the reworked emission model. same backbone as next() — collect
-//leaders, set next epoch's validators, adjust difficulty, clear epoch data — with:
 //  * queued vault validator changes post once, first thing (the only promotion site)
 //  * emission split in half: vault APY vs solvers
 //  * vault APY paid from (this half + carried pool); leftover carries on
@@ -636,7 +581,7 @@ pub fn next(env: &mut ApplyEnv) {
 //    vault APY too from PARTICIPATION_VAULT_EPOCH on
 //  * validator set = peddlebike67 + every >=1m-stake vault validator + top 33 solvers
 //  * no community-fund payout (peddlebike67 only enter the validator set)
-pub fn next2(env: &mut ApplyEnv) {
+pub fn next(env: &mut ApplyEnv) {
     let epoch_cur = env.caller_env.entry_epoch;
     let epoch_next = env.caller_env.entry_epoch + 1;
 
@@ -771,47 +716,10 @@ fn distribute_emissions_to_trainers(env: &mut ApplyEnv, trainers_to_recv: &Vec<(
     paid
 }
 
-//legacy (pre-VAULT_ACTIVATION_EPOCH) community-fund split. from the fork on,
-//peddlebike67 receive no emission payout — they only enter the validator set.
-fn distribute_peddlebike67_community_fund(env: &mut ApplyEnv, total_emission: i128) {
-    let n_count = PEDDLEBIKE67.len() as i128;
-    let q = total_emission / n_count;
-    let r = total_emission % n_count;
-
-    for (i, peddle_pk) in PEDDLEBIKE67.iter().enumerate() {
-        let coins = if (i as i128) < r { q + 1 } else { q };
-
-        let emission_address = kv_get(env, &bcat(&[b"account:", peddle_pk, b":attribute:emission_address"]));
-        let balance_key =
-            if let Some(addr) = emission_address { bcat(&[b"account:", &addr, b":balance:AMA"]) } else { bcat(&[b"account:", peddle_pk, b":balance:AMA"]) };
-
-        let _ = kv_increment(env, &balance_key, coins);
-    }
-}
-
-//number of top solvers admitted to the validator set from the fork on
+//number of top solvers admitted to the validator set
 const SOLVER_VALIDATOR_SLOTS: usize = 33;
 
-//legacy (pre-fork) validator set: peddlebike67 + all leaders, capped at 99.
-fn build_and_shuffle_new_validators(env: &ApplyEnv, leaders: &Vec<(Vec<u8>, i128)>) -> Vec<Vec<u8>> {
-    let PEDDLEBIKE_LOCAL: Vec<[u8; 48]> = if env.testnet {
-        env.testnet_peddlebikes.iter().map(|pk| pk.as_slice().try_into().expect("Testnet key was not 48 bytes long")).collect()
-    } else {
-        PEDDLEBIKE67.to_vec()
-    };
-
-    let leader_pks: Vec<Vec<u8>> = leaders.iter().map(|(pk, _)| pk.clone()).collect();
-    let filtered_leaders: Vec<Vec<u8>> = leader_pks.into_iter().filter(|pk| !PEDDLEBIKE_LOCAL.iter().any(|p| p.as_slice() == pk.as_slice())).collect();
-
-    let mut new_validators: Vec<Vec<u8>> = PEDDLEBIKE_LOCAL.iter().map(|p| p.to_vec()).collect();
-    new_validators.extend(filtered_leaders);
-    new_validators.truncate(99);
-
-    shuffle_validators(env, &mut new_validators);
-    new_validators
-}
-
-//fork validator set: peddlebike67 + every >=1m-stake vault validator + top 33 solvers,
+//validator set: peddlebike67 + every >=1m-stake vault validator + top 33 solvers,
 //deduped, no fixed size cap.
 fn build_and_shuffle_new_validators2(env: &ApplyEnv, leaders: &Vec<(Vec<u8>, i128)>, vault_stakes: &BTreeMap<Vec<u8>, i128>) -> Vec<Vec<u8>> {
     let PEDDLEBIKE_LOCAL: Vec<[u8; 48]> = if env.testnet {

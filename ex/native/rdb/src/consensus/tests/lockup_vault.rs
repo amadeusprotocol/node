@@ -48,8 +48,6 @@ fn vault_exists(chain: &Chain, owner: &[u8], index: u64) -> bool {
     chain.get(&vault_key(owner, index)).is_some()
 }
 
-//run the epoch-boundary promotion pass exactly as epoch::next2 does first thing,
-//posting queued validator changes due by the chain's current epoch
 fn promote_due(chain: &Chain) {
     let epoch = chain.epoch();
     chain.with_env(&[0u8; 48], |env| promote_pending_validators(env, epoch));
@@ -704,6 +702,39 @@ fn withdraw_flow() {
 }
 
 #[test]
+fn partial_withdraw_flow() {
+    let mut chain = Chain::new();
+    let w = chain.wallet(to_flat(5000));
+    create(&chain, &w, to_flat(2000), b"og").unwrap();
+    assert_eq!(chain.balance(&w.pk), to_flat(3000));
+
+    //partial withdrawals serve the same unlock window as full ones
+    chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
+    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", b"1"]), Err("vault_is_unlocking".to_string()));
+    chain.advance_epochs(UNLOCK_PERIOD_EPOCHS);
+
+    //amount must be a positive decimal no larger than the vault's amount+accrued
+    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", b"0"]), Err("invalid_amount".to_string()));
+    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", b"-5"]), Err("invalid_amount".to_string()));
+    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", b"nope"]), Err("invalid_amount".to_string()));
+    let over = (to_flat(2000) + 1).to_string();
+    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", over.as_bytes()]), Err("amount_exceeds_vault".to_string()));
+
+    //partial: funds return, the vault stays open with the remainder
+    let part = to_flat(500).to_string();
+    chain.call(&w, LV, b"withdraw", &[b"1", part.as_bytes()]).unwrap();
+    assert_eq!(chain.balance(&w.pk), to_flat(3500));
+    assert!(vault_exists(&chain, &w.pk, 1));
+    assert_eq!(get_vault(&chain, &w.pk, 1).amount, to_flat(1500));
+
+    //withdrawing the exact remaining total closes the vault
+    let rest = to_flat(1500).to_string();
+    chain.call(&w, LV, b"withdraw", &[b"1", rest.as_bytes()]).unwrap();
+    assert_eq!(chain.balance(&w.pk), to_flat(5000));
+    assert!(!vault_exists(&chain, &w.pk, 1));
+}
+
+#[test]
 fn payout_address_lifecycle() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
@@ -1166,12 +1197,12 @@ fn cluster_of_validators_stays_in_sync() {
     }
 }
 
-//end-to-end emission snapshot: the real epoch::next2 boundary at epoch 751 with
+//end-to-end emission snapshot: the real epoch::next boundary at epoch 751 with
 //100m AMA staked across 100 vaults at 20% APY, at net phash 1, 5, and 50.
 //prints the full money flow; run with --nocapture to see it.
 #[test]
 fn epoch_751_emission_scenarios_100m_stake() {
-    use crate::consensus::bic::epoch::{emission2_total, next2, SOLVER_ACCRUED_POOL_KEY, TREASURY_DONATION_ADDRESS, VAULT_ACCRUED_POOL_KEY};
+    use crate::consensus::bic::epoch::{emission2_total, next, SOLVER_ACCRUED_POOL_KEY, TREASURY_DONATION_ADDRESS, VAULT_ACCRUED_POOL_KEY};
 
     for &target_phash in &[1i128, 5, 50] {
         let mut chain = Chain::new();
@@ -1211,7 +1242,7 @@ fn epoch_751_emission_scenarios_100m_stake() {
         //run the real epoch 751 boundary
         chain.advance_epochs(751);
         chain.advance_blocks(99_999);
-        chain.with_env(&[0u8; 48], |env| next2(env));
+        chain.with_env(&[0u8; 48], |env| next(env));
 
         let total = emission2_total(751);
         let vault_paid = chain.balance(&payee.pk);

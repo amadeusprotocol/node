@@ -29,8 +29,6 @@ pub const VALIDATOR_MIN_STAKE: i128 = 1_000_000 * 1_000_000_000; //1m AMA
 
 pub const APY_EPOCH_DENOM: i128 = 6_307_200; //10_000 bps x 630.72 epochs per 365 day year
 
-pub const VAULT_ACTIVATION_EPOCH: u64 = 750;
-
 const VAULT_KEY_PREFIX: &[u8] = b"bic:lockup_vault:vault:";
 
 pub fn months_to_epochs(months: u64) -> u64 {
@@ -202,7 +200,7 @@ pub fn vaults_by_owner(env: &mut ApplyEnv, owner: &[u8]) -> Vec<(Vec<u8>, Vault)
 
 //pays the ending epoch's yield for every vault whose backing validator is in the
 //epoch's set (the set already excludes validators slashed during the epoch).
-//promotion has already run (promote_pending_validators is first in epoch::next2),
+//promotion has already run (promote_pending_validators is first in epoch::next),
 //so this reads vault.validator directly. unlocking vaults still earn (they keep
 //backing their validator until withdrawn). yield is due on amount+accrued —
 //everything locked in the vault earns. payouts route per accrues_to_vault: to the
@@ -264,7 +262,7 @@ pub fn pay_epoch_yield(env: &mut ApplyEnv, validators: &HashSet<Vec<u8>>, reduct
 }
 
 //posts every queued validator change due by `epoch` (the epoch being entered).
-//this is the ONLY place promotion persists — it runs FIRST in epoch::next2, so
+//this is the ONLY place promotion persists — it runs FIRST in epoch::next, so
 //mid-epoch state never carries a due-but-unposted change and everything downstream
 //(yield, stakes, user calls) reads vault.validator / the pending fields directly.
 pub fn promote_pending_validators(env: &mut ApplyEnv, epoch: u64) {
@@ -285,7 +283,7 @@ pub fn promote_pending_validators(env: &mut ApplyEnv, epoch: u64) {
 //epoch boundary scan: sums amount+accrued per backing validator. unlocking vaults
 //still count toward their validator's stake (they keep backing it until withdrawn),
 //matching pay_epoch_yield. promotion has already run (promote_pending_validators is
-//first in epoch::next2), so this just reads vault.validator. BTreeMap keeps
+//first in epoch::next), so this just reads vault.validator. BTreeMap keeps
 //iteration deterministic across nodes.
 pub fn validator_stakes(env: &mut ApplyEnv) -> BTreeMap<Vec<u8>, i128> {
     let mut stakes: BTreeMap<Vec<u8>, i128> = BTreeMap::new();
@@ -512,11 +510,12 @@ pub fn call_unlock(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     store_vault(env, &key, &vault);
 }
 
+//args: [vault_index] or [vault_index, amount].
 pub fn call_withdraw(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
-    if args.len() != 1 {
+    if args.len() != 1 && args.len() != 2 {
         panic_any("invalid_args")
     }
-    let (key, vault) = load_caller_vault(env, &args[0]);
+    let (key, mut vault) = load_caller_vault(env, &args[0]);
 
     let unlock_at = vault.unlock_at_epoch.unwrap_or_else(|| panic_any("vault_not_unlocking"));
     if env.caller_env.entry_epoch < unlock_at {
@@ -524,8 +523,30 @@ pub fn call_withdraw(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     }
 
     let total = vault.amount.checked_add(vault.accrued).unwrap_or_else(|| panic_any("vault_amount_overflow"));
-    kv_increment(env, &bcat(&[b"account:", &env.caller_env.account_caller, b":balance:AMA"]), total);
-    kv_delete(env, &key);
+    let amount = match args.get(1) {
+        None => total,
+        Some(a) => {
+            let a = std::str::from_utf8(a).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_amount"));
+            if a <= 0 {
+                panic_any("invalid_amount")
+            }
+            if a > total {
+                panic_any("amount_exceeds_vault")
+            }
+            a
+        }
+    };
+
+    let from_accrued = amount.min(vault.accrued);
+    vault.accrued -= from_accrued;
+    vault.amount -= amount - from_accrued;
+
+    kv_increment(env, &bcat(&[b"account:", &env.caller_env.account_caller, b":balance:AMA"]), amount);
+
+    match vault.amount == 0 && vault.accrued == 0 {
+        true => kv_delete(env, &key),
+        false => store_vault(env, &key, &vault),
+    }
 }
 
 pub fn call_set_payout_address(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {

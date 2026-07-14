@@ -778,11 +778,7 @@ fn call_exit(env: &mut ApplyEnv) {
         consensus_kv::kv_put(env, b"bic:epoch:segment_vr_hash", digest.as_bytes());
     }
     if env.caller_env.entry_height % 100_000 == 99_999 {
-        if env.testnet || env.caller_env.entry_epoch >= consensus::bic::lockup_vault::VAULT_ACTIVATION_EPOCH {
-            consensus::bic::epoch::next2(env);
-        } else {
-            consensus::bic::epoch::next(env);
-        }
+        consensus::bic::epoch::next(env);
     }
     env.muts_final.append(&mut env.muts);
     env.muts_final_rev.append(&mut env.muts_rev);
@@ -925,22 +921,17 @@ pub fn call_bic(
         }
     }
 
-    if env.testnet || env.caller_env.entry_epoch >= consensus::bic::lockup_vault::VAULT_ACTIVATION_EPOCH {
-        match (contract.as_slice(), function.as_slice()) {
-            (b"LockupVault", b"create") => return consensus::bic::lockup_vault::call_create(env, args),
-            (b"LockupVault", b"unlock") => return consensus::bic::lockup_vault::call_unlock(env, args),
-            (b"LockupVault", b"withdraw") => return consensus::bic::lockup_vault::call_withdraw(env, args),
-            (b"LockupVault", b"set_payout_address") => return consensus::bic::lockup_vault::call_set_payout_address(env, args),
-            (b"LockupVault", b"clear_payout_address") => return consensus::bic::lockup_vault::call_clear_payout_address(env, args),
-            (b"LockupVault", b"set_validator") => return consensus::bic::lockup_vault::call_set_validator(env, args),
-            (b"LockupVault", b"clear_validator") => return consensus::bic::lockup_vault::call_clear_validator(env, args),
-            (b"LockupVault", b"change_owner") => return consensus::bic::lockup_vault::call_change_owner(env, args),
-            (b"LockupVault", b"extend_lock") => return consensus::bic::lockup_vault::call_extend_lock(env, args),
-            _ => {}
-        }
-    }
-
     match (contract.as_slice(), function.as_slice()) {
+        (b"LockupVault", b"create") => consensus::bic::lockup_vault::call_create(env, args),
+        (b"LockupVault", b"unlock") => consensus::bic::lockup_vault::call_unlock(env, args),
+        (b"LockupVault", b"withdraw") => consensus::bic::lockup_vault::call_withdraw(env, args),
+        (b"LockupVault", b"set_payout_address") => consensus::bic::lockup_vault::call_set_payout_address(env, args),
+        (b"LockupVault", b"clear_payout_address") => consensus::bic::lockup_vault::call_clear_payout_address(env, args),
+        (b"LockupVault", b"set_validator") => consensus::bic::lockup_vault::call_set_validator(env, args),
+        (b"LockupVault", b"clear_validator") => consensus::bic::lockup_vault::call_clear_validator(env, args),
+        (b"LockupVault", b"change_owner") => consensus::bic::lockup_vault::call_change_owner(env, args),
+        (b"LockupVault", b"extend_lock") => consensus::bic::lockup_vault::call_extend_lock(env, args),
+
         (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
         (b"Epoch", b"submit_sol") => {
             consensus_kv::exec_budget_decr(env, protocol::COST_PER_SOL);
