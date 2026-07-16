@@ -3,8 +3,8 @@
 use crate::bcat;
 use crate::consensus::bic::coin::{from_flat, to_flat};
 use crate::consensus::bic::lockup_vault::{
-    days_to_epochs, months_to_epochs, promote_pending_validators, tier_params, vaults_by_owner, Vault, BONUS_END_EPOCH, MAX_LOCK_MONTHS,
-    MIN_VAULT_AMOUNT, UNLOCK_PERIOD_EPOCHS, VALIDATOR_CHANGE_QUEUE_EPOCHS,
+    commission_bps_for_epoch, days_to_epochs, months_to_epochs, promote_pending_validators, tier_params, vaults_by_owner, Vault, BONUS_END_EPOCH,
+    COMMISSION_RAISE_QUEUE_EPOCHS, MAX_LOCK_MONTHS, MIN_VAULT_AMOUNT, UNLOCK_PERIOD_EPOCHS, VALIDATOR_CHANGE_QUEUE_EPOCHS,
 };
 use crate::consensus::tests::chain_harness::{new_wallet, Chain, Cluster, Wallet};
 use vecpak::{encode, Term};
@@ -51,6 +51,15 @@ fn vault_exists(chain: &Chain, owner: &[u8], index: u64) -> bool {
 fn promote_due(chain: &Chain) {
     let epoch = chain.epoch();
     chain.with_env(&[0u8; 48], |env| promote_pending_validators(env, epoch));
+}
+
+//run the epoch boundary's auto-withdraw over the current epoch: closes every
+//unlocked vault whose window has elapsed, crediting the owner (as epoch::next does)
+fn sweep_matured(chain: &Chain) {
+    let epoch = chain.epoch();
+    chain.with_env(&[0u8; 48], |env| {
+        crate::consensus::bic::lockup_vault::close_matured_and_sum_stakes(env, epoch);
+    });
 }
 
 #[test]
@@ -402,12 +411,13 @@ fn create_for_beneficiary_owner() {
     assert_eq!(chain.call(&treasury, LV, b"unlock", &[b"1"]), Err("invalid_vault".to_string()));
     assert_eq!(chain.call(&treasury, LV, b"extend_lock", &[b"1", b"300"]), Err("invalid_vault".to_string()));
 
-    //the investor controls it; after the 3m schedule + unlock window, withdraw
-    //returns the principal to the investor, never to the treasury (no clawback)
+    //the investor controls it; after the 3m schedule + unlock window, the boundary
+    //auto-returns the principal to the investor, never to the treasury (no clawback)
     chain.advance_epochs(months_to_epochs(3));
     chain.call(&investor, LV, b"unlock", &[b"1"]).unwrap();
     chain.advance_epochs(UNLOCK_PERIOD_EPOCHS);
-    chain.call(&investor, LV, b"withdraw", &[b"1"]).unwrap();
+    sweep_matured(&chain);
+    assert!(!vault_exists(&chain, &investor.pk, 1));
     assert_eq!(chain.balance(&investor.pk), to_flat(1500));
     assert_eq!(chain.balance(&treasury.pk), to_flat(3500));
 }
@@ -447,7 +457,8 @@ fn og_tier_custom_lock_owner_and_zero_apy() {
     //og follows UNLOCK_PERIOD_EPOCHS (unlike test's 0 window)
     assert_eq!(get_vault(&chain, &investor.pk, 1).unlock_at_epoch, Some(months_to_epochs(6) + UNLOCK_PERIOD_EPOCHS));
     chain.advance_epochs(UNLOCK_PERIOD_EPOCHS);
-    chain.call(&investor, LV, b"withdraw", &[b"1"]).unwrap();
+    sweep_matured(&chain);
+    assert!(!vault_exists(&chain, &investor.pk, 1));
     assert_eq!(chain.balance(&investor.pk), to_flat(2000));
 }
 
@@ -462,12 +473,12 @@ fn og_defaults_to_immediate_maturity_with_full_window() {
     assert_eq!(vault.rate_bps, 0);
     assert_eq!(vault.mature_epoch, 0);
 
-    //but it still serves the full UNLOCK_PERIOD_EPOCHS window (not 0 like test)
+    //but it still serves the full UNLOCK_PERIOD_EPOCHS window before auto-close
     chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
     assert_eq!(get_vault(&chain, &w.pk, 1).unlock_at_epoch, Some(UNLOCK_PERIOD_EPOCHS));
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1"]), Err("vault_is_unlocking".to_string()));
     chain.advance_epochs(UNLOCK_PERIOD_EPOCHS);
-    chain.call(&w, LV, b"withdraw", &[b"1"]).unwrap();
+    sweep_matured(&chain);
+    assert!(!vault_exists(&chain, &w.pk, 1));
     assert_eq!(chain.balance(&w.pk), to_flat(5000));
 }
 
@@ -675,63 +686,6 @@ fn unlock_twice_fails() {
 
     chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
     assert_eq!(chain.call(&w, LV, b"unlock", &[b"1"]), Err("vault_already_unlocking".to_string()));
-}
-
-#[test]
-fn withdraw_flow() {
-    let mut chain = Chain::new();
-    let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(1500), b"3m").unwrap();
-    assert_eq!(chain.balance(&w.pk), to_flat(3500));
-
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1"]), Err("vault_not_unlocking".to_string()));
-
-    chain.advance_epochs(156); //maturity
-    chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1"]), Err("vault_is_unlocking".to_string()));
-
-    chain.advance_epochs(36);
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1"]), Err("vault_is_unlocking".to_string()));
-
-    chain.advance_epochs(1); //epoch 193 = unlock_at (156 + 37)
-    chain.call(&w, LV, b"withdraw", &[b"1"]).unwrap();
-    assert_eq!(chain.balance(&w.pk), to_flat(5000));
-    assert!(!vault_exists(&chain, &w.pk, 1));
-
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1"]), Err("invalid_vault".to_string()));
-}
-
-#[test]
-fn partial_withdraw_flow() {
-    let mut chain = Chain::new();
-    let w = chain.wallet(to_flat(5000));
-    create(&chain, &w, to_flat(2000), b"og").unwrap();
-    assert_eq!(chain.balance(&w.pk), to_flat(3000));
-
-    //partial withdrawals serve the same unlock window as full ones
-    chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", b"1"]), Err("vault_is_unlocking".to_string()));
-    chain.advance_epochs(UNLOCK_PERIOD_EPOCHS);
-
-    //amount must be a positive decimal no larger than the vault's amount+accrued
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", b"0"]), Err("invalid_amount".to_string()));
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", b"-5"]), Err("invalid_amount".to_string()));
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", b"nope"]), Err("invalid_amount".to_string()));
-    let over = (to_flat(2000) + 1).to_string();
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1", over.as_bytes()]), Err("amount_exceeds_vault".to_string()));
-
-    //partial: funds return, the vault stays open with the remainder
-    let part = to_flat(500).to_string();
-    chain.call(&w, LV, b"withdraw", &[b"1", part.as_bytes()]).unwrap();
-    assert_eq!(chain.balance(&w.pk), to_flat(3500));
-    assert!(vault_exists(&chain, &w.pk, 1));
-    assert_eq!(get_vault(&chain, &w.pk, 1).amount, to_flat(1500));
-
-    //withdrawing the exact remaining total closes the vault
-    let rest = to_flat(1500).to_string();
-    chain.call(&w, LV, b"withdraw", &[b"1", rest.as_bytes()]).unwrap();
-    assert_eq!(chain.balance(&w.pk), to_flat(5000));
-    assert!(!vault_exists(&chain, &w.pk, 1));
 }
 
 #[test]
@@ -971,7 +925,7 @@ fn clear_validator_while_queuing_cancels_the_queue() {
 }
 
 #[test]
-fn unlocking_vault_rejects_all_mutations() {
+fn unlocking_vault_allows_repoint_freezes_the_rest() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let validator = new_wallet();
@@ -982,9 +936,16 @@ fn unlocking_vault_rejects_all_mutations() {
     assert_eq!(chain.call(&w, LV, b"set_validator", &[b"1", b"short"]), Err("invalid_validator_pk".to_string()));
 
     chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
+
+    //re-pointing IS allowed while unlocking, so a backer can flee a commission raise:
+    //set queues the new validator, clear drops it — both succeed
+    chain.call(&w, LV, b"set_validator", &[b"1", &validator.pk]).unwrap();
+    assert_eq!(get_vault(&chain, &w.pk, 1).validator_pending, Some(validator.pk.to_vec()));
+    chain.call(&w, LV, b"clear_validator", &[b"1"]).unwrap();
+    assert_eq!(get_vault(&chain, &w.pk, 1).validator_pending, None);
+
+    //every other mutation stays frozen during unlock
     let unlocking = Err("vault_is_unlocking".to_string());
-    assert_eq!(chain.call(&w, LV, b"set_validator", &[b"1", &validator.pk]), unlocking);
-    assert_eq!(chain.call(&w, LV, b"clear_validator", &[b"1"]), unlocking);
     assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1", &validator.pk]), unlocking);
     assert_eq!(chain.call(&w, LV, b"clear_payout_address", &[b"1"]), unlocking);
     assert_eq!(chain.call(&w, LV, b"change_owner", &[b"1", &validator.pk]), unlocking);
@@ -999,7 +960,6 @@ fn vaults_are_owner_scoped() {
     create(&chain, &alice, to_flat(1000), b"3m").unwrap();
 
     assert_eq!(chain.call(&mallory, LV, b"unlock", &[b"1"]), Err("invalid_vault".to_string()));
-    assert_eq!(chain.call(&mallory, LV, b"withdraw", &[b"1"]), Err("invalid_vault".to_string()));
     assert_eq!(chain.call(&mallory, LV, b"extend_lock", &[b"1", b"300"]), Err("invalid_vault".to_string()));
 }
 
@@ -1084,7 +1044,6 @@ fn audit_index_args_and_unknown_function() {
     let invalid_args = Err("invalid_args".to_string());
     assert_eq!(chain.call(&w, LV, b"unlock", &[]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"unlock", &[b"1", b"1"]), invalid_args);
-    assert_eq!(chain.call(&w, LV, b"withdraw", &[]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1"]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"extend_lock", &[b"1"]), invalid_args);
     assert_eq!(chain.call(&w, LV, b"change_owner", &[b"1"]), invalid_args);
@@ -1099,9 +1058,10 @@ fn audit_index_args_and_unknown_function() {
     assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1", &burn]), Err("invalid_payout_pk".to_string()));
     assert_eq!(chain.call(&w, LV, b"set_validator", &[b"1", &burn]), Err("invalid_validator_pk".to_string()));
 
-    //unknown functions fall through dispatch, including the retired set_compound
+    //unknown functions fall through dispatch, including the retired set_compound/withdraw
     assert_eq!(chain.call(&w, LV, b"steal", &[b"1"]), Err("invalid_bic_action".to_string()));
     assert_eq!(chain.call(&w, LV, b"set_compound", &[b"1", b"true"]), Err("invalid_bic_action".to_string()));
+    assert_eq!(chain.call(&w, LV, b"withdraw", &[b"1"]), Err("invalid_bic_action".to_string()));
 
     //the vault survived every failure above and still works
     chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
@@ -1128,21 +1088,21 @@ fn full_lifecycle_replay() {
     assert_eq!(chain.balance(&alice.pk), to_flat(5000));
     assert_eq!(chain.balance(&bob.pk), to_flat(500));
 
-    //bob exits: 3m vault matures at 156, then the 37 epoch unlock window
+    //bob exits: 3m vault matures at 156, then the 37 epoch unlock window auto-closes it
     chain.advance_epochs(156);
     chain.call(&bob, LV, b"unlock", &[b"2"]).unwrap();
     chain.advance_epochs(37);
-    chain.call(&bob, LV, b"withdraw", &[b"2"]).unwrap();
+    sweep_matured(&chain);
     assert_eq!(chain.balance(&bob.pk), to_flat(2_000));
 
     //alice still locked at epoch 193
     assert_eq!(chain.call(&alice, LV, b"unlock", &[b"1"]), Err("vault_is_locked".to_string()));
 
-    //matures at 623, exits after the 21 day queue
+    //matures at 623, auto-closes after the 21 day queue
     chain.advance_epochs(623 - 193);
     chain.call(&alice, LV, b"unlock", &[b"1"]).unwrap();
     chain.advance_epochs(37);
-    chain.call(&alice, LV, b"withdraw", &[b"1"]).unwrap();
+    sweep_matured(&chain);
     assert_eq!(chain.balance(&alice.pk), to_flat(10_000));
 
     assert!(!vault_exists(&chain, &alice.pk, 1));
@@ -1181,14 +1141,11 @@ fn cluster_of_validators_stays_in_sync() {
     assert_eq!(cluster.call_as(&validators[0].pk, LV, b"unlock", &[b"99"]), Err("invalid_vault".to_string()));
     cluster.assert_in_sync();
 
-    //step past maturity; the og holders queue exits
+    //step past maturity; the og holders queue exits (they auto-close at the boundary)
     cluster.advance_epochs(10);
     cluster.call_as(&validators[0].pk, LV, b"unlock", &[b"1"]).unwrap();
     cluster.call_as(&validators[2].pk, LV, b"unlock", &[b"3"]).unwrap();
-    cluster.assert_in_sync();
-
-    cluster.advance_epochs(UNLOCK_PERIOD_EPOCHS); //serve the full unlock window, then withdraw vault 1
-    cluster.call_as(&validators[0].pk, LV, b"withdraw", &[b"1"]).unwrap();
+    cluster.advance_epochs(UNLOCK_PERIOD_EPOCHS);
     cluster.assert_in_sync();
 
     let final_digest = cluster.nodes[0].state_digest();
@@ -1265,4 +1222,161 @@ fn epoch_751_emission_scenarios_100m_stake() {
         //conservation: paid + tax + carried pools == the emission curve, exactly
         assert_eq!(vault_paid + solver_paid + treasury + vault_pool + solver_pool, total);
     }
+}
+
+#[test]
+fn commission_raise_queues_cut_is_instant() {
+    let mut chain = Chain::new();
+    let v = new_wallet();
+    let bps_at = |chain: &Chain, epoch: u64| chain.with_env(&v.pk, |env| commission_bps_for_epoch(env, &v.pk, epoch));
+
+    //no record = 0 commission; bounds and arg strictness
+    assert_eq!(bps_at(&chain, 0), 0);
+    assert_eq!(chain.call_as(&v.pk, LV, b"set_commission", &[]), Err("invalid_args".to_string()));
+    assert_eq!(chain.call_as(&v.pk, LV, b"set_commission", &[b"10001"]), Err("invalid_commission".to_string()));
+    assert_eq!(chain.call_as(&v.pk, LV, b"set_commission", &[b"nope"]), Err("invalid_commission".to_string()));
+    assert_eq!(chain.call_as(&v.pk, LV, b"set_commission", &[b"-1"]), Err("invalid_commission".to_string()));
+
+    //a raise from 0 queues for COMMISSION_RAISE_QUEUE_EPOCHS (one longer than a
+    //vault's validator switch, so backers can always re-point first)
+    chain.call_as(&v.pk, LV, b"set_commission", &[b"2500"]).unwrap();
+    assert_eq!(COMMISSION_RAISE_QUEUE_EPOCHS, VALIDATOR_CHANGE_QUEUE_EPOCHS + 1);
+    assert_eq!(bps_at(&chain, 0), 0);
+    assert_eq!(bps_at(&chain, COMMISSION_RAISE_QUEUE_EPOCHS - 1), 0);
+    assert_eq!(bps_at(&chain, COMMISSION_RAISE_QUEUE_EPOCHS), 2500);
+
+    //once live, a cut applies instantly
+    chain.advance_epochs(COMMISSION_RAISE_QUEUE_EPOCHS);
+    chain.call_as(&v.pk, LV, b"set_commission", &[b"1000"]).unwrap();
+    assert_eq!(bps_at(&chain, chain.epoch()), 1000);
+
+    //a raise from the live rate queues again; re-setting the live rate cancels it
+    chain.call_as(&v.pk, LV, b"set_commission", &[b"10000"]).unwrap();
+    assert_eq!(bps_at(&chain, chain.epoch()), 1000);
+    assert_eq!(bps_at(&chain, chain.epoch() + COMMISSION_RAISE_QUEUE_EPOCHS), 10000);
+    chain.call_as(&v.pk, LV, b"set_commission", &[b"1000"]).unwrap();
+    assert_eq!(bps_at(&chain, chain.epoch() + COMMISSION_RAISE_QUEUE_EPOCHS), 1000);
+}
+
+#[test]
+fn commission_skims_vault_yield_at_boundary() {
+    let mut chain = Chain::new();
+    let w = chain.wallet(to_flat(2_000_000));
+    let payee = new_wallet();
+    let validator = new_wallet();
+    let emis = new_wallet();
+
+    //1m AMA at 20% (12m tier), yield to payee, backing `validator`
+    create_call(
+        &chain,
+        &w,
+        vec![
+            (b"amount", Term::VarInt(to_flat(1_000_000))),
+            (b"tier", Term::Binary(b"12m".to_vec())),
+            (b"payout_address", Term::Binary(payee.pk.to_vec())),
+            (b"validator", Term::Binary(validator.pk.to_vec())),
+        ],
+    )
+    .unwrap();
+
+    //validator prices a 25% commission (live from epoch 3) routed to its emission address
+    chain.call_as(&validator.pk, LV, b"set_commission", &[b"2500"]).unwrap();
+    chain.call_as(&validator.pk, b"Epoch", b"set_emission_address", &[&emis.pk]).unwrap();
+
+    let set = crate::consensus::bic::list_of_binaries_to_vecpak(vec![validator.pk.to_vec()]);
+    chain.put(&bcat(&[b"bic:epoch:validators:height:", format!("{:012}", 0).as_bytes()]), &set);
+    chain.put(b"bic:epoch:diff_bits", b"24");
+
+    //run the boundary ending epoch 3: the queued validator posted long ago and the
+    //raised commission is live for exactly this payout
+    chain.advance_epochs(COMMISSION_RAISE_QUEUE_EPOCHS);
+    chain.advance_blocks(99_999);
+    chain.with_env(&[0u8; 48], |env| crate::consensus::bic::epoch::next(env));
+
+    let per_epoch = to_flat(1_000_000) * 2000 / 6_307_200;
+    let commission = per_epoch * 2500 / 10_000;
+    assert_eq!(chain.balance(&emis.pk), commission);
+    assert_eq!(chain.balance(&payee.pk), per_epoch - commission);
+    assert_eq!(chain.balance(&validator.pk), 0); //routed to emission_address, not the pk
+}
+
+//Finding 2 regression: a validator slashed at the exact boundary height posts its
+//trimmed set to <B+1>; next() must read trainers there (not the pre-slash set at
+//<=B>) so the slashed validator earns nothing this epoch. Staged without BLS by
+//placing the validator lists directly. With the fix, reading at entry_height+1
+//sees the boundary slash; without it (reading entry_height) the slashed validator
+//would still be paid.
+#[test]
+fn boundary_slash_denies_yield_to_slashed_validators_backers() {
+    let mut chain = Chain::new();
+    let w = chain.wallet(to_flat(1_000_000));
+    let good = new_wallet(); //stays a validator through the boundary
+    let bad = new_wallet(); //"slashed" at the boundary block
+    let payee_good = new_wallet();
+    let payee_bad = new_wallet();
+
+    //two 5000 AMA / 12m vaults (below the 1m stake threshold, so bad can't re-enter
+    //the set via the vault-stake path); each distributes yield to its payee
+    for (validator, payee) in [(&good.pk, &payee_good.pk), (&bad.pk, &payee_bad.pk)] {
+        create_call(
+            &chain,
+            &w,
+            vec![
+                (b"amount", Term::VarInt(to_flat(5000))),
+                (b"tier", Term::Binary(b"12m".to_vec())),
+                (b"payout_address", Term::Binary(payee.to_vec())),
+                (b"validator", Term::Binary(validator.to_vec())),
+            ],
+        )
+        .unwrap();
+    }
+
+    //epoch 1's standing validator set (key 100_000) has both; the boundary slash
+    //(key 200_000 == B+1 for the boundary at B=199_999) drops bad
+    let key = |h: u64| bcat(&[b"bic:epoch:validators:height:", format!("{:012}", h).as_bytes()]);
+    chain.put(&key(100_000), &crate::consensus::bic::list_of_binaries_to_vecpak(vec![good.pk.to_vec(), bad.pk.to_vec()]));
+    chain.put(&key(200_000), &crate::consensus::bic::list_of_binaries_to_vecpak(vec![good.pk.to_vec()]));
+    chain.put(b"bic:epoch:diff_bits", b"24");
+
+    //run the boundary ending epoch 1 (height 199_999); both vaults' validators
+    //promote at epoch_next=2 first thing in next()
+    chain.advance_epochs(1);
+    chain.advance_blocks(99_999);
+    chain.with_env(&[0u8; 48], |env| crate::consensus::bic::epoch::next(env));
+
+    //good is in the (post-slash) set -> its backer is paid the full epoch yield;
+    //bad was slashed at the boundary -> its backer gets nothing
+    let due = to_flat(5000) * 2000 / 6_307_200;
+    assert_eq!(chain.balance(&payee_good.pk), due);
+    assert_eq!(chain.balance(&payee_bad.pk), 0);
+}
+
+//once an unlocked vault's window elapses, the boundary entering unlock_at_epoch
+//auto-closes it: full contents to the owner, no manual withdraw needed.
+#[test]
+fn matured_vault_auto_closes_to_owner_at_boundary() {
+    let mut chain = Chain::new();
+    let w = chain.wallet(to_flat(5000));
+    create(&chain, &w, to_flat(5000), b"og").unwrap(); //og: matures immediately, 0 APY
+    assert_eq!(chain.balance(&w.pk), 0);
+
+    chain.call(&w, LV, b"unlock", &[b"1"]).unwrap();
+    let unlock_at = get_vault(&chain, &w.pk, 1).unlock_at_epoch.unwrap();
+    assert_eq!(unlock_at, UNLOCK_PERIOD_EPOCHS); //0 + 37
+
+    chain.put(b"bic:epoch:diff_bits", b"24");
+    let run_boundary = |chain: &Chain| chain.with_env(&[0u8; 48], |env| crate::consensus::bic::epoch::next(env));
+
+    //boundary entering epoch unlock_at-1 (window not yet elapsed): the vault survives
+    chain.advance_epochs(unlock_at - 2); //-> epoch 35
+    chain.advance_blocks(99_999); //last block of epoch 35, entering 36
+    run_boundary(&chain);
+    assert!(vault_exists(&chain, &w.pk, 1));
+    assert_eq!(chain.balance(&w.pk), 0);
+
+    //next boundary enters epoch unlock_at (37): auto-close, principal returns to owner
+    chain.advance_blocks(100_000); //-> last block of epoch 36, entering 37
+    run_boundary(&chain);
+    assert!(!vault_exists(&chain, &w.pk, 1));
+    assert_eq!(chain.balance(&w.pk), to_flat(5000));
 }

@@ -2,7 +2,7 @@ use crate::bcat;
 use crate::consensus::bic::coin::balance;
 use crate::consensus::consensus_apply::ApplyEnv;
 use crate::consensus::consensus_kv::{kv_delete, kv_exists, kv_get, kv_get_next, kv_increment, kv_put};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::panic_any;
 use vecpak::{decode, encode, Term};
 
@@ -25,11 +25,14 @@ pub const BONUS_END_EPOCH: u64 = 1150; //12m vaults created from this epoch on n
 
 pub const VALIDATOR_CHANGE_QUEUE_EPOCHS: u64 = 2;
 
+pub const COMMISSION_RAISE_QUEUE_EPOCHS: u64 = VALIDATOR_CHANGE_QUEUE_EPOCHS + 1;
+
 pub const VALIDATOR_MIN_STAKE: i128 = 1_000_000 * 1_000_000_000; //1m AMA
 
 pub const APY_EPOCH_DENOM: i128 = 6_307_200; //10_000 bps x 630.72 epochs per 365 day year
 
 const VAULT_KEY_PREFIX: &[u8] = b"bic:lockup_vault:vault:";
+const VALIDATOR_COMMISSION_KEY_PREFIX: &[u8] = b"bic:lockup_vault:validator_commission:";
 
 pub fn months_to_epochs(months: u64) -> u64 {
     days_to_epochs(months.saturating_mul(DAYS_PER_MONTH))
@@ -198,17 +201,64 @@ pub fn vaults_by_owner(env: &mut ApplyEnv, owner: &[u8]) -> Vec<(Vec<u8>, Vault)
     vaults
 }
 
+fn commission_key(validator: &[u8]) -> Vec<u8> {
+    bcat(&[VALIDATOR_COMMISSION_KEY_PREFIX, validator])
+}
+
+fn load_commission(env: &mut ApplyEnv, key: &[u8]) -> (u64, u64, u64) {
+    let bytes = match kv_get(env, key) {
+        Some(b) => b,
+        None => return (0, 0, 0),
+    };
+    let term = decode(&bytes).unwrap_or_else(|_| panic_any("invalid_commission_data"));
+    let pairs = match term {
+        Term::PropList(pairs) => pairs,
+        _ => panic_any("invalid_commission_data"),
+    };
+    let get = |key: &[u8]| -> u64 {
+        pairs
+            .iter()
+            .find(|(k, _)| matches!(k, Term::Binary(b) if b.as_slice() == key))
+            .and_then(|(_, v)| match v {
+                Term::VarInt(n) => u64::try_from(*n).ok(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic_any("invalid_commission_data"))
+    };
+    (get(b"bps"), get(b"pending_bps"), get(b"pending_epoch"))
+}
+
+fn store_commission(env: &mut ApplyEnv, key: &[u8], bps: u64, pending_bps: u64, pending_epoch: u64) {
+    let term = Term::PropList(vec![
+        (Term::Binary(b"bps".to_vec()), Term::VarInt(bps as i128)),
+        (Term::Binary(b"pending_bps".to_vec()), Term::VarInt(pending_bps as i128)),
+        (Term::Binary(b"pending_epoch".to_vec()), Term::VarInt(pending_epoch as i128)),
+    ]);
+    kv_put(env, key, &encode(term));
+}
+
+pub fn commission_bps_for_epoch(env: &mut ApplyEnv, validator: &[u8], epoch: u64) -> u64 {
+    let (bps, pending_bps, pending_epoch) = load_commission(env, &commission_key(validator));
+    if epoch >= pending_epoch {
+        pending_bps
+    } else {
+        bps
+    }
+}
+
 //pays the ending epoch's yield for every vault whose backing validator is in the
 //epoch's set (the set already excludes validators slashed during the epoch).
 //promotion has already run (promote_pending_validators is first in epoch::next),
 //so this reads vault.validator directly. unlocking vaults still earn (they keep
 //backing their validator until withdrawn). yield is due on amount+accrued —
-//everything locked in the vault earns. payouts route per accrues_to_vault: to the
-//payout address if one is set, else compounding into the vault.
-//reduction_pct scales payouts (100 = full). pays at most budget,
-//pro rata if the dues exceed it. returns the total paid, which draws down the
-//budget; the caller handles the network tax and accrued-pool accounting.
-pub fn pay_epoch_yield(env: &mut ApplyEnv, validators: &HashSet<Vec<u8>>, reduction_pct: u64, budget: i128) -> i128 {
+//everything locked in the vault earns. the backing validator's commission is
+//skimmed off each payout (routed via its emission_address when set); the net
+//routes per accrues_to_vault: to the payout address if one is set, else
+//compounding into the vault. reduction_pct scales payouts (100 = full). pays at
+//most budget, pro rata if the dues exceed it. returns the total GROSS paid
+//(net + commission), which draws down the budget; the caller handles the network
+//tax and accrued-pool accounting.
+pub fn pay_epoch_yield(env: &mut ApplyEnv, epoch: u64, validators: &HashSet<Vec<u8>>, reduction_pct: u64, budget: i128) -> i128 {
     if budget <= 0 || reduction_pct == 0 {
         return 0;
     }
@@ -238,6 +288,7 @@ pub fn pay_epoch_yield(env: &mut ApplyEnv, validators: &HashSet<Vec<u8>>, reduct
         return 0;
     }
 
+    let mut commissions: HashMap<Vec<u8>, u64> = HashMap::new();
     let mut paid_total: i128 = 0;
     for (key, mut vault, due) in entries {
         let pay = if due_total > budget {
@@ -248,13 +299,33 @@ pub fn pay_epoch_yield(env: &mut ApplyEnv, validators: &HashSet<Vec<u8>>, reduct
         if pay <= 0 {
             continue;
         }
-        //pay the vault its full yield (no deduction); the tax is handled by the caller
-        if vault.accrues_to_vault() {
-            vault.accrued = vault.accrued.checked_add(pay).unwrap_or_else(|| panic_any("vault_amount_overflow"));
-            store_vault(env, &key, &vault);
-        } else {
-            let addr = vault.payout_address.as_ref().unwrap_or_else(|| panic_any("invalid_vault_data")).clone();
-            kv_increment(env, &bcat(&[b"account:", &addr, b":balance:AMA"]), pay);
+
+        let validator = vault.validator.as_ref().unwrap_or_else(|| panic_any("invalid_vault_data")).clone();
+        let bps = match commissions.get(&validator) {
+            Some(bps) => *bps,
+            None => {
+                let bps = commission_bps_for_epoch(env, &validator, epoch).min(10_000);
+                commissions.insert(validator.clone(), bps);
+                bps
+            }
+        };
+        let commission = pay.checked_mul(bps as i128).unwrap_or_else(|| panic_any("yield_overflow")) / 10_000;
+        if commission > 0 {
+            let emission_address = kv_get(env, &bcat(&[b"account:", &validator, b":attribute:emission_address"]));
+            let balance_key =
+                if let Some(addr) = emission_address { bcat(&[b"account:", &addr, b":balance:AMA"]) } else { bcat(&[b"account:", &validator, b":balance:AMA"]) };
+            kv_increment(env, &balance_key, commission);
+        }
+
+        let net = pay - commission;
+        if net > 0 {
+            if vault.accrues_to_vault() {
+                vault.accrued = vault.accrued.checked_add(net).unwrap_or_else(|| panic_any("vault_amount_overflow"));
+                store_vault(env, &key, &vault);
+            } else {
+                let addr = vault.payout_address.as_ref().unwrap_or_else(|| panic_any("invalid_vault_data")).clone();
+                kv_increment(env, &bcat(&[b"account:", &addr, b":balance:AMA"]), net);
+            }
         }
         paid_total = paid_total.checked_add(pay).unwrap_or_else(|| panic_any("yield_overflow"));
     }
@@ -280,22 +351,38 @@ pub fn promote_pending_validators(env: &mut ApplyEnv, epoch: u64) {
     }
 }
 
-//epoch boundary scan: sums amount+accrued per backing validator. unlocking vaults
-//still count toward their validator's stake (they keep backing it until withdrawn),
-//matching pay_epoch_yield. promotion has already run (promote_pending_validators is
-//first in epoch::next), so this just reads vault.validator. BTreeMap keeps
-//iteration deterministic across nodes.
-pub fn validator_stakes(env: &mut ApplyEnv) -> BTreeMap<Vec<u8>, i128> {
+//single post-pay boundary scan: closes every unlocked vault whose window has elapsed
+//(unlock_at_epoch <= `epoch`, the epoch being entered) by crediting amount+accrued to
+//its owner and deleting it, and sums amount+accrued per backing validator over the
+//vaults that remain — matured vaults are closed and thus excluded from stake in the
+//same pass. promotion has already run, so this reads vault.validator directly.
+//BTreeMap keeps iteration deterministic across nodes.
+pub fn close_matured_and_sum_stakes(env: &mut ApplyEnv, epoch: u64) -> BTreeMap<Vec<u8>, i128> {
     let mut stakes: BTreeMap<Vec<u8>, i128> = BTreeMap::new();
     let mut cursor: Vec<u8> = Vec::new();
     while let Some((suffix, bytes)) = kv_get_next(env, VAULT_KEY_PREFIX, &cursor) {
-        cursor = suffix;
+        cursor = suffix.clone();
         let term = decode(&bytes).unwrap_or_else(|_| panic_any("invalid_vault_data"));
         let vault = Vault::from_term(&term);
-        if let Some(validator) = &vault.validator {
-            let total = vault.amount.checked_add(vault.accrued).unwrap_or_else(|| panic_any("vault_amount_overflow"));
-            let stake = stakes.entry(validator.clone()).or_insert(0);
-            *stake = stake.checked_add(total).unwrap_or_else(|| panic_any("validator_stake_overflow"));
+        let total = vault.amount.checked_add(vault.accrued).unwrap_or_else(|| panic_any("vault_amount_overflow"));
+        match vault.unlock_at_epoch {
+            Some(at) if epoch >= at => {
+                //matured: auto-close to the owner (leading 48 bytes of the key suffix)
+                if suffix.len() < 48 {
+                    panic_any("invalid_vault_key")
+                }
+                if total > 0 {
+                    kv_increment(env, &bcat(&[b"account:", &suffix[0..48], b":balance:AMA"]), total);
+                }
+                kv_delete(env, &bcat(&[VAULT_KEY_PREFIX, &suffix]));
+            }
+            _ => {
+                //still open: count its stake toward its backing validator
+                if let Some(validator) = &vault.validator {
+                    let stake = stakes.entry(validator.clone()).or_insert(0);
+                    *stake = stake.checked_add(total).unwrap_or_else(|| panic_any("validator_stake_overflow"));
+                }
+            }
         }
     }
     stakes
@@ -510,45 +597,6 @@ pub fn call_unlock(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     store_vault(env, &key, &vault);
 }
 
-//args: [vault_index] or [vault_index, amount].
-pub fn call_withdraw(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
-    if args.len() != 1 && args.len() != 2 {
-        panic_any("invalid_args")
-    }
-    let (key, mut vault) = load_caller_vault(env, &args[0]);
-
-    let unlock_at = vault.unlock_at_epoch.unwrap_or_else(|| panic_any("vault_not_unlocking"));
-    if env.caller_env.entry_epoch < unlock_at {
-        panic_any("vault_is_unlocking")
-    }
-
-    let total = vault.amount.checked_add(vault.accrued).unwrap_or_else(|| panic_any("vault_amount_overflow"));
-    let amount = match args.get(1) {
-        None => total,
-        Some(a) => {
-            let a = std::str::from_utf8(a).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_amount"));
-            if a <= 0 {
-                panic_any("invalid_amount")
-            }
-            if a > total {
-                panic_any("amount_exceeds_vault")
-            }
-            a
-        }
-    };
-
-    let from_accrued = amount.min(vault.accrued);
-    vault.accrued -= from_accrued;
-    vault.amount -= amount - from_accrued;
-
-    kv_increment(env, &bcat(&[b"account:", &env.caller_env.account_caller, b":balance:AMA"]), amount);
-
-    match vault.amount == 0 && vault.accrued == 0 {
-        true => kv_delete(env, &key),
-        false => store_vault(env, &key, &vault),
-    }
-}
-
 pub fn call_set_payout_address(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if args.len() != 2 {
         panic_any("invalid_args")
@@ -580,9 +628,6 @@ pub fn call_set_validator(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         panic_any("invalid_args")
     }
     let (key, mut vault) = load_caller_vault(env, &args[0]);
-    if vault.unlock_start_epoch.is_some() {
-        panic_any("vault_is_unlocking")
-    }
     let validator = args[1].as_slice();
     validate_pk(validator, "invalid_validator_pk");
     init_balance_if_missing(env, validator);
@@ -604,9 +649,6 @@ pub fn call_clear_validator(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         panic_any("invalid_args")
     }
     let (key, mut vault) = load_caller_vault(env, &args[0]);
-    if vault.unlock_start_epoch.is_some() {
-        panic_any("vault_is_unlocking")
-    }
     if vault.validator_pending_epoch.is_some() && (vault.validator.is_none() || vault.validator_pending.is_some()) {
         vault.validator_pending = None;
         vault.validator_pending_epoch = None;
@@ -649,4 +691,29 @@ pub fn call_extend_lock(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     }
     vault.mature_epoch = vault.mature_epoch.saturating_add(extra);
     store_vault(env, &key, &vault);
+}
+
+//sets the caller's validator commission in bps (0..=10000), skimmed off the yield
+//of every vault backing it. cuts (and no-ops) apply instantly; raises queue for
+//COMMISSION_RAISE_QUEUE_EPOCHS. re-setting the current rate cancels a queued raise.
+//args: [bps].
+pub fn call_set_commission(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    if args.len() != 1 {
+        panic_any("invalid_args")
+    }
+    let bps = std::str::from_utf8(&args[0]).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_commission"));
+    if bps > 10_000 {
+        panic_any("invalid_commission")
+    }
+    let caller = env.caller_env.account_caller.clone();
+    init_balance_if_missing(env, &caller);
+
+    let epoch = env.caller_env.entry_epoch;
+    let key = commission_key(&caller);
+    let current = commission_bps_for_epoch(env, &caller, epoch);
+    if bps <= current {
+        store_commission(env, &key, bps, bps, epoch);
+    } else {
+        store_commission(env, &key, current, bps, epoch.saturating_add(COMMISSION_RAISE_QUEUE_EPOCHS));
+    }
 }

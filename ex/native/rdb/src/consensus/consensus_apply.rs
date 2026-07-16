@@ -924,13 +924,13 @@ pub fn call_bic(
     match (contract.as_slice(), function.as_slice()) {
         (b"LockupVault", b"create") => consensus::bic::lockup_vault::call_create(env, args),
         (b"LockupVault", b"unlock") => consensus::bic::lockup_vault::call_unlock(env, args),
-        (b"LockupVault", b"withdraw") => consensus::bic::lockup_vault::call_withdraw(env, args),
         (b"LockupVault", b"set_payout_address") => consensus::bic::lockup_vault::call_set_payout_address(env, args),
         (b"LockupVault", b"clear_payout_address") => consensus::bic::lockup_vault::call_clear_payout_address(env, args),
         (b"LockupVault", b"set_validator") => consensus::bic::lockup_vault::call_set_validator(env, args),
         (b"LockupVault", b"clear_validator") => consensus::bic::lockup_vault::call_clear_validator(env, args),
         (b"LockupVault", b"change_owner") => consensus::bic::lockup_vault::call_change_owner(env, args),
         (b"LockupVault", b"extend_lock") => consensus::bic::lockup_vault::call_extend_lock(env, args),
+        (b"LockupVault", b"set_commission") => consensus::bic::lockup_vault::call_set_commission(env, args),
 
         (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
         (b"Epoch", b"submit_sol") => {

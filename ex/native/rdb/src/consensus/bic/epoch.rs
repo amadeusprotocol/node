@@ -523,7 +523,7 @@ pub fn kv_get_trainers(env: &mut crate::consensus::consensus_apply::ApplyEnv, he
 
 pub fn kv_get_trainers_removed(env: &mut crate::consensus::consensus_apply::ApplyEnv) -> Vec<Vec<u8>> {
     let trainers_start = kv_get_trainers(env, env.caller_env.entry_epoch * 100_000);
-    let trainers_now = kv_get_trainers(env, env.caller_env.entry_height);
+    let trainers_now = kv_get_trainers(env, env.caller_env.entry_height.saturating_add(1));
 
     let trainers_now_set: HashSet<Vec<u8>> = trainers_now.into_iter().collect();
     trainers_start.into_iter().filter(|t| !trainers_now_set.contains(t)).collect()
@@ -593,13 +593,13 @@ pub fn next(env: &mut ApplyEnv) {
         PEDDLEBIKE67.iter().map(|pk| pk.to_vec()).collect()
     };
 
-    let trainers = kv_get_trainers(env, env.caller_env.entry_height);
+    let trainers = kv_get_trainers(env, env.caller_env.entry_height.saturating_add(1));
     let trainers_map: HashSet<Vec<u8>> = trainers.into_iter().collect();
     let trainers_removed = kv_get_trainers_removed(env);
     let trainers_removed_map: HashSet<Vec<u8>> = trainers_removed.into_iter().collect();
 
     //total_score_all sums EVERY sol submitter (matching the stats `score()` used by
-    //pflops); leaders excludes slashed (removed) trainers, as in next().
+    //pflops); leaders excludes slashed (removed) trainers.
     let mut leaders: Vec<(Vec<u8>, i128)> = Vec::new();
     let mut total_score_all: i128 = 0;
     let mut cursor: Vec<u8> = Vec::new();
@@ -642,9 +642,9 @@ pub fn next(env: &mut ApplyEnv) {
     //--- vault APY ---
     let vault_pool = kv_get(env, VAULT_ACCRUED_POOL_KEY).and_then(|v| std::str::from_utf8(&v).ok().and_then(|s| s.parse::<i128>().ok())).unwrap_or(0);
     let vault_budget = vault_half.checked_add(vault_pool).unwrap_or_else(|| panic_any("vault_budget_overflow"));
-    let vault_paid = consensus::bic::lockup_vault::pay_epoch_yield(env, &trainers_map, vault_reduction_pct, vault_budget);
+    let vault_paid = consensus::bic::lockup_vault::pay_epoch_yield(env, epoch_cur, &trainers_map, vault_reduction_pct, vault_budget);
     let vault_leftover = vault_budget.checked_sub(vault_paid).unwrap_or_else(|| panic_any("vault_pool_underflow"));
-    let vault_stakes = consensus::bic::lockup_vault::validator_stakes(env);
+    let vault_stakes = consensus::bic::lockup_vault::close_matured_and_sum_stakes(env, epoch_next);
 
     //--- solver emission, curbed by participation ---
     let solver_budget = solver_half.checked_mul(participation).unwrap_or_else(|| panic_any("emission_overflow")) / SOLVER_PARTICIPATION_TARGET;
@@ -669,7 +669,7 @@ pub fn next(env: &mut ApplyEnv) {
     kv_put(env, VAULT_ACCRUED_POOL_KEY, new_vault_pool.to_string().as_bytes());
 
     //--- validators for next epoch: peddlebike67 + >=1m vault validators + top 33 solvers ---
-    let new_validators = build_and_shuffle_new_validators2(env, &leaders, &vault_stakes);
+    let new_validators = build_and_shuffle_new_validators(env, &leaders, &vault_stakes);
     let new_validators = consensus::bic::list_of_binaries_to_vecpak(new_validators);
     let height_next = format!("{:012}", env.caller_env.entry_height.saturating_add(1)).into_bytes();
     let _ = kv_put(env, &bcat(&[b"bic:epoch:validators:height:", &height_next]), &new_validators);
@@ -721,7 +721,7 @@ const SOLVER_VALIDATOR_SLOTS: usize = 33;
 
 //validator set: peddlebike67 + every >=1m-stake vault validator + top 33 solvers,
 //deduped, no fixed size cap.
-fn build_and_shuffle_new_validators2(env: &ApplyEnv, leaders: &Vec<(Vec<u8>, i128)>, vault_stakes: &BTreeMap<Vec<u8>, i128>) -> Vec<Vec<u8>> {
+fn build_and_shuffle_new_validators(env: &ApplyEnv, leaders: &Vec<(Vec<u8>, i128)>, vault_stakes: &BTreeMap<Vec<u8>, i128>) -> Vec<Vec<u8>> {
     let PEDDLEBIKE_LOCAL: Vec<[u8; 48]> = if env.testnet {
         env.testnet_peddlebikes.iter().map(|pk| pk.as_slice().try_into().expect("Testnet key was not 48 bytes long")).collect()
     } else {
@@ -786,6 +786,7 @@ fn clear_epoch_data(env: &mut ApplyEnv) {
     }
 
     let prefix = b"bic:epoch:solutions_count:";
+    cursor = Vec::new();
     while let Some((next_key_wo_prefix, _val)) = kv_get_next(env, prefix, &cursor) {
         let mut key = Vec::with_capacity(prefix.len() + next_key_wo_prefix.len());
         key.extend_from_slice(prefix);
