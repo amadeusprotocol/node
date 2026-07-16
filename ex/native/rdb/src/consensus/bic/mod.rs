@@ -2,6 +2,7 @@ pub mod coin;
 pub mod coin_symbol_reserved;
 pub mod contract;
 pub mod epoch;
+pub mod epoch_report;
 pub mod exsss;
 pub mod lockup;
 pub mod lockup_prime;

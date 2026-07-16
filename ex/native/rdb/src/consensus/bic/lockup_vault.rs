@@ -258,7 +258,14 @@ pub fn commission_bps_for_epoch(env: &mut ApplyEnv, validator: &[u8], epoch: u64
 //most budget, pro rata if the dues exceed it. returns the total GROSS paid
 //(net + commission), which draws down the budget; the caller handles the network
 //tax and accrued-pool accounting.
-pub fn pay_epoch_yield(env: &mut ApplyEnv, epoch: u64, validators: &HashSet<Vec<u8>>, reduction_pct: u64, budget: i128) -> i128 {
+pub fn pay_epoch_yield(
+    env: &mut ApplyEnv,
+    epoch: u64,
+    validators: &HashSet<Vec<u8>>,
+    reduction_pct: u64,
+    budget: i128,
+    report: &mut crate::consensus::bic::epoch_report::Report,
+) -> i128 {
     if budget <= 0 || reduction_pct == 0 {
         return 0;
     }
@@ -312,9 +319,10 @@ pub fn pay_epoch_yield(env: &mut ApplyEnv, epoch: u64, validators: &HashSet<Vec<
         let commission = pay.checked_mul(bps as i128).unwrap_or_else(|| panic_any("yield_overflow")) / 10_000;
         if commission > 0 {
             let emission_address = kv_get(env, &bcat(&[b"account:", &validator, b":attribute:emission_address"]));
-            let balance_key =
-                if let Some(addr) = emission_address { bcat(&[b"account:", &addr, b":balance:AMA"]) } else { bcat(&[b"account:", &validator, b":balance:AMA"]) };
+            let credited = emission_address.unwrap_or_else(|| validator.clone());
+            let balance_key = bcat(&[b"account:", &credited, b":balance:AMA"]);
             kv_increment(env, &balance_key, commission);
+            report.add(&credited, "commission", commission);
         }
 
         let net = pay - commission;
@@ -322,9 +330,14 @@ pub fn pay_epoch_yield(env: &mut ApplyEnv, epoch: u64, validators: &HashSet<Vec<
             if vault.accrues_to_vault() {
                 vault.accrued = vault.accrued.checked_add(net).unwrap_or_else(|| panic_any("vault_amount_overflow"));
                 store_vault(env, &key, &vault);
+                let owner_end = VAULT_KEY_PREFIX.len() + 48;
+                if key.len() >= owner_end {
+                    report.add(&key[VAULT_KEY_PREFIX.len()..owner_end], "interest_compounded", net);
+                }
             } else {
                 let addr = vault.payout_address.as_ref().unwrap_or_else(|| panic_any("invalid_vault_data")).clone();
                 kv_increment(env, &bcat(&[b"account:", &addr, b":balance:AMA"]), net);
+                report.add(&addr, "interest", net);
             }
         }
         paid_total = paid_total.checked_add(pay).unwrap_or_else(|| panic_any("yield_overflow"));

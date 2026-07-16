@@ -639,16 +639,18 @@ pub fn next(env: &mut ApplyEnv) {
     //are curbed; after it, low solver participation heavily reduces vault APY too.
     let vault_reduction_pct: u64 = if epoch_cur >= PARTICIPATION_VAULT_EPOCH { participation as u64 } else { 100 };
 
+    let mut report = consensus::bic::epoch_report::Report::new();
+
     //--- vault APY ---
     let vault_pool = kv_get(env, VAULT_ACCRUED_POOL_KEY).and_then(|v| std::str::from_utf8(&v).ok().and_then(|s| s.parse::<i128>().ok())).unwrap_or(0);
     let vault_budget = vault_half.checked_add(vault_pool).unwrap_or_else(|| panic_any("vault_budget_overflow"));
-    let vault_paid = consensus::bic::lockup_vault::pay_epoch_yield(env, epoch_cur, &trainers_map, vault_reduction_pct, vault_budget);
+    let vault_paid = consensus::bic::lockup_vault::pay_epoch_yield(env, epoch_cur, &trainers_map, vault_reduction_pct, vault_budget, &mut report);
     let vault_leftover = vault_budget.checked_sub(vault_paid).unwrap_or_else(|| panic_any("vault_pool_underflow"));
     let vault_stakes = consensus::bic::lockup_vault::close_matured_and_sum_stakes(env, epoch_next);
 
     //--- solver emission, curbed by participation ---
     let solver_budget = solver_half.checked_mul(participation).unwrap_or_else(|| panic_any("emission_overflow")) / SOLVER_PARTICIPATION_TARGET;
-    let solver_paid = distribute_emissions_to_trainers(env, &solvers, solver_budget, total_sols);
+    let solver_paid = distribute_emissions_to_trainers(env, &solvers, solver_budget, total_sols, &mut report);
     //the part of the solver half not paid (participation shortfall + rounding) accrues
     let solver_accrued = solver_half.checked_sub(solver_paid).unwrap_or_else(|| panic_any("emission_overflow"));
     if solver_accrued > 0 {
@@ -664,9 +666,13 @@ pub fn next(env: &mut ApplyEnv) {
     let tax = nominal_tax.min(vault_leftover);
     if tax > 0 {
         let _ = kv_increment(env, &bcat(&[b"account:", TREASURY_DONATION_ADDRESS.as_slice(), b":balance:AMA"]), tax);
+        report.add(TREASURY_DONATION_ADDRESS.as_slice(), "tax", tax);
     }
     let new_vault_pool = vault_leftover - tax;
     kv_put(env, VAULT_ACCRUED_POOL_KEY, new_vault_pool.to_string().as_bytes());
+    if !env.readonly {
+        report.write(epoch_cur);
+    }
 
     //--- validators for next epoch: peddlebike67 + >=1m vault validators + top 33 solvers ---
     let new_validators = build_and_shuffle_new_validators(env, &leaders, &vault_stakes);
@@ -694,7 +700,13 @@ fn net_phash(env: &mut ApplyEnv, total_sols: i128, height_in_epoch: i128) -> i12
 
 //distributes `total_emission` to solvers pro rata by sol count (paid in full);
 //returns the total actually paid, which the caller uses for tax accounting.
-fn distribute_emissions_to_trainers(env: &mut ApplyEnv, trainers_to_recv: &Vec<(Vec<u8>, i128)>, total_emission: i128, total_sols: i128) -> i128 {
+fn distribute_emissions_to_trainers(
+    env: &mut ApplyEnv,
+    trainers_to_recv: &Vec<(Vec<u8>, i128)>,
+    total_emission: i128,
+    total_sols: i128,
+    report: &mut consensus::bic::epoch_report::Report,
+) -> i128 {
     if total_sols == 0 {
         return 0;
     }
@@ -707,10 +719,11 @@ fn distribute_emissions_to_trainers(env: &mut ApplyEnv, trainers_to_recv: &Vec<(
             / total_sols;
 
         let emission_address = kv_get(env, &bcat(&[b"account:", trainer, b":attribute:emission_address"]));
-        let balance_key =
-            if let Some(addr) = emission_address { bcat(&[b"account:", &addr, b":balance:AMA"]) } else { bcat(&[b"account:", trainer, b":balance:AMA"]) };
+        let credited = emission_address.unwrap_or_else(|| trainer.clone());
+        let balance_key = bcat(&[b"account:", &credited, b":balance:AMA"]);
 
         let _ = kv_increment(env, &balance_key, coins);
+        report.add(&credited, "emission", coins);
         paid = paid.checked_add(coins).unwrap_or_else(|| panic_any("emission_overflow"));
     }
     paid
