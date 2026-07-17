@@ -14,6 +14,11 @@ pub const NETWORK_TAX_BPS: i128 = 2_500; //25%
 
 pub const SOLVER_PARTICIPATION_TARGET: i128 = 100;
 
+//from PARTICIPATION_FLOOR_EPOCH on, participation never drops below this floor, so a
+//low/idle network still pays out at least this percentage
+pub const SOLVER_PARTICIPATION_FLOOR: i128 = 10;
+pub const PARTICIPATION_FLOOR_EPOCH: u64 = 758;
+
 pub const PARTICIPATION_VAULT_EPOCH: u64 = 1150;
 
 //per-epoch emission not disbursed carries over in these pools: the vault pool feeds
@@ -632,7 +637,9 @@ pub fn next(env: &mut ApplyEnv) {
     //can't take the lion's share of easy emissions.
     let height_in_epoch = (env.caller_env.entry_height % 100_000) as i128;
     let pflops = net_pflops(env, total_score_all, height_in_epoch);
-    let participation = pflops.clamp(0, SOLVER_PARTICIPATION_TARGET); //0..=100
+    //floor the participation from PARTICIPATION_FLOOR_EPOCH on; before it, no floor
+    let floor = if epoch_cur >= PARTICIPATION_FLOOR_EPOCH { SOLVER_PARTICIPATION_FLOOR } else { 0 };
+    let participation = pflops.clamp(floor, SOLVER_PARTICIPATION_TARGET);
 
     //participation curbs the solver half always; it curbs vault APY only from
     //PARTICIPATION_VAULT_EPOCH on. before that, vaults always pay full and only solvers
