@@ -576,8 +576,8 @@ pub fn call_slash_trainer(env: &mut crate::consensus::consensus_apply::ApplyEnv,
 //  * vault APY paid from (this half + carried pool); leftover carries on
 //  * a 25% treasury tax on all payouts, FUNDED from the vault leftover (not minted
 //    on top) so issuance stays within the curve
-//  * emission curbed by participation (phash): below SOLVER_PARTICIPATION_TARGET only
-//    phash% pays, the rest accrues. always applies to the solver half; applies to
+//  * emission curbed by participation (pflops): below SOLVER_PARTICIPATION_TARGET only
+//    pflops% pays, the rest accrues. always applies to the solver half; applies to
 //    vault APY too from PARTICIPATION_VAULT_EPOCH on
 //  * validator set = peddlebike67 + every >=1m-stake vault validator + top 33 solvers
 //  * no community-fund payout (peddlebike67 only enter the validator set)
@@ -626,13 +626,13 @@ pub fn next(env: &mut ApplyEnv) {
     let vault_half = epoch_total_emission / 2;
     let solver_half = epoch_total_emission - vault_half;
 
-    //--- participation (phash) — computed up front so it can also curb vault APY ---
-    //at phash >= SOLVER_PARTICIPATION_TARGET (100 PFLOPS) full emission pays; below that
-    //only phash% pays and the shortfall accrues, so a low-participation (bear) period
+    //--- participation (pflops) — computed up front so it can also curb vault APY ---
+    //at pflops >= SOLVER_PARTICIPATION_TARGET (100 PFLOPS) full emission pays; below that
+    //only pflops% pays and the shortfall accrues, so a low-participation (bear) period
     //can't take the lion's share of easy emissions.
     let height_in_epoch = (env.caller_env.entry_height % 100_000) as i128;
-    let phash = net_phash(env, total_score_all, height_in_epoch);
-    let participation = phash.clamp(0, SOLVER_PARTICIPATION_TARGET); //0..=100
+    let pflops = net_pflops(env, total_score_all, height_in_epoch);
+    let participation = pflops.clamp(0, SOLVER_PARTICIPATION_TARGET); //0..=100
 
     //participation curbs the solver half always; it curbs vault APY only from
     //PARTICIPATION_VAULT_EPOCH on. before that, vaults always pay full and only solvers
@@ -686,7 +686,7 @@ pub fn next(env: &mut ApplyEnv) {
     clear_epoch_data(env);
 }
 
-fn net_phash(env: &mut ApplyEnv, total_sols: i128, height_in_epoch: i128) -> i128 {
+fn net_pflops(env: &mut ApplyEnv, total_sols: i128, height_in_epoch: i128) -> i128 {
     const OPS: i128 = 16 * 16 * 50_240 * 2; //25_722_880 (MACs x2, per pflops)
 
     let diff_bits = kv_get(env, b"bic:epoch:diff_bits")
@@ -696,7 +696,7 @@ fn net_phash(env: &mut ApplyEnv, total_sols: i128, height_in_epoch: i128) -> i12
 
     let total_calcs = total_sols.checked_mul(diff_multiplier).unwrap_or(i128::MAX);
     let numer = total_calcs.checked_mul(OPS).unwrap_or(i128::MAX);
-    let denom = (height_in_epoch + 2).checked_mul(500_000_000_000_000).unwrap_or_else(|| panic_any("phash_denom_overflow"));
+    let denom = (height_in_epoch + 2).checked_mul(500_000_000_000_000).unwrap_or_else(|| panic_any("pflops_denom_overflow"));
     numer / denom
 }
 

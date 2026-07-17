@@ -1155,13 +1155,13 @@ fn cluster_of_validators_stays_in_sync() {
 }
 
 //end-to-end emission snapshot: the real epoch::next boundary at epoch 751 with
-//100m AMA staked across 100 vaults at 20% APY, at net phash 1, 5, and 50.
+//100m AMA staked across 100 vaults at 20% APY, at net pflops 1, 5, and 50.
 //prints the full money flow; run with --nocapture to see it.
 #[test]
 fn epoch_751_emission_scenarios_100m_stake() {
     use crate::consensus::bic::epoch::{emission2_total, next, SOLVER_ACCRUED_POOL_KEY, TREASURY_DONATION_ADDRESS, VAULT_ACCRUED_POOL_KEY};
 
-    for &target_phash in &[1i128, 5, 50] {
+    for &target_pflops in &[1i128, 5, 50] {
         let mut chain = Chain::new();
         let creator = chain.wallet(to_flat(200_000_000));
         let payee = new_wallet();
@@ -1189,11 +1189,11 @@ fn epoch_751_emission_scenarios_100m_stake() {
         chain.put(&bcat(&[b"bic:epoch:validators:height:", format!("{:012}", 0).as_bytes()]), &set);
         chain.put(b"bic:epoch:diff_bits", b"24");
 
-        //sol count that lands net phash exactly on target at the 751 boundary
-        //(phash = sols * 2^diff_bits * OPS / ((height_in_epoch + 2) * 5e14), floored)
+        //sol count that lands net pflops exactly on target at the 751 boundary
+        //(pflops = sols * 2^diff_bits * OPS / ((height_in_epoch + 2) * 5e14), floored)
         let per_sol: i128 = (1i128 << 24) * 25_722_880;
         let denom: i128 = (99_999 + 2) * 500_000_000_000_000;
-        let sols = target_phash * denom / per_sol + 1;
+        let sols = target_pflops * denom / per_sol + 1;
         chain.put(&bcat(&[b"bic:epoch:solutions_count:", &solver.pk]), sols.to_string().as_bytes());
 
         //run the real epoch 751 boundary
@@ -1208,12 +1208,12 @@ fn epoch_751_emission_scenarios_100m_stake() {
         let vault_pool = chain.get(VAULT_ACCRUED_POOL_KEY).and_then(|v| atoi::atoi::<i128>(&v)).unwrap_or(0);
         let solver_pool = chain.get(SOLVER_ACCRUED_POOL_KEY).and_then(|v| atoi::atoi::<i128>(&v)).unwrap_or(0);
 
-        println!("=== epoch 751 boundary, net phash {} ===", target_phash);
+        println!("=== epoch 751 boundary, net pflops {} ===", target_pflops);
         println!("  total emission curve: {:>12.3} AMA", from_flat(total));
         println!("  vault half:           {:>12.3} AMA", from_flat(total / 2));
         println!("  solver half:          {:>12.3} AMA", from_flat(total - total / 2));
-        println!("  vault APY paid:       {:>12.3} AMA (100m at 20%, phash-independent until epoch 1150)", from_flat(vault_paid));
-        println!("  solver paid:          {:>12.3} AMA ({}% participation)", from_flat(solver_paid), target_phash.min(100));
+        println!("  vault APY paid:       {:>12.3} AMA (100m at 20%, pflops-independent until epoch 1150)", from_flat(vault_paid));
+        println!("  solver paid:          {:>12.3} AMA ({}% participation)", from_flat(solver_paid), target_pflops.min(100));
         println!("  treasury tax (25%):   {:>12.3} AMA", from_flat(treasury));
         println!("  vault pool carry:     {:>12.3} AMA", from_flat(vault_pool));
         println!("  solver pool carry:    {:>12.3} AMA", from_flat(solver_pool));
