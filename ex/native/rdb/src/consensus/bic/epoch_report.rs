@@ -44,7 +44,7 @@ impl Report {
         let _ = std::fs::create_dir_all(dir);
         let mut out = String::new();
         for (addr, kind, amount) in &self.rows {
-            out.push_str(&format!("{},{},{}\n", bs58::encode(addr).into_string(), kind, amount));
+            out.push_str(&format!("{},{},{},{}\n", bs58::encode(addr).into_string(), kind, amount, to_ama_2dp(*amount)));
         }
         let tmp = format!("{}/{}.csv.tmp", dir, epoch);
         let path = format!("{}/{}.csv", dir, epoch);
@@ -52,4 +52,9 @@ impl Report {
             let _ = std::fs::rename(&tmp, &path);
         }
     }
+}
+
+fn to_ama_2dp(flat: i128) -> String {
+    let hundredths = (flat + 5_000_000) / 10_000_000;
+    format!("{}.{:02}", hundredths / 100, hundredths % 100)
 }

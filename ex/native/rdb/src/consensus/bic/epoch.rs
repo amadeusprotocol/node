@@ -656,6 +656,7 @@ pub fn next(env: &mut ApplyEnv) {
     if solver_accrued > 0 {
         let _ = kv_increment(env, SOLVER_ACCRUED_POOL_KEY, solver_accrued);
     }
+    report.add(SOLVER_ACCRUED_POOL_KEY, "solver_pool", solver_accrued);
 
     //--- 25% network tax, charged AFTER all participation reductions so it tracks what
     //was actually paid (vault_paid and solver_paid are already reduced). funded from the
@@ -670,6 +671,7 @@ pub fn next(env: &mut ApplyEnv) {
     }
     let new_vault_pool = vault_leftover - tax;
     kv_put(env, VAULT_ACCRUED_POOL_KEY, new_vault_pool.to_string().as_bytes());
+    report.add(VAULT_ACCRUED_POOL_KEY, "vault_pool", new_vault_pool - vault_pool);
     if !env.readonly {
         report.write(epoch_cur);
     }
