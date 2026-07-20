@@ -93,4 +93,47 @@ defmodule RPC.API do
       RPC.API.get("/api/chain/tx/#{txid}")
     end
   end
+
+  defmodule Vault do
+    defp submit(txu) do
+      RPC.API.get("/api/tx/submit_and_wait/#{Base58.encode(txu |> TX.pack())}?finalized=true")
+    end
+
+    # opts: :validator, :payout_address, :owner, :unlock_epoch, :months
+    def create(seed64, amount, tier \\ "og", opts \\ []) do
+      API.Vault.create(seed64, amount, tier, opts, false) |> submit()
+    end
+
+    def unlock(seed64, vault_index) do
+      API.Vault.unlock(seed64, vault_index, false) |> submit()
+    end
+
+    def set_payout_address(seed64, vault_index, payout_pk) do
+      API.Vault.set_payout_address(seed64, vault_index, payout_pk, false) |> submit()
+    end
+
+    def clear_payout_address(seed64, vault_index) do
+      API.Vault.clear_payout_address(seed64, vault_index, false) |> submit()
+    end
+
+    def set_validator(seed64, vault_index, validator_pk) do
+      API.Vault.set_validator(seed64, vault_index, validator_pk, false) |> submit()
+    end
+
+    def clear_validator(seed64, vault_index) do
+      API.Vault.clear_validator(seed64, vault_index, false) |> submit()
+    end
+
+    def change_owner(seed64, vault_index, new_owner_pk) do
+      API.Vault.change_owner(seed64, vault_index, new_owner_pk, false) |> submit()
+    end
+
+    def extend_lock(seed64, vault_index, months) do
+      API.Vault.extend_lock(seed64, vault_index, months, false) |> submit()
+    end
+
+    def set_commission(seed64, bps) do
+      API.Vault.set_commission(seed64, bps, false) |> submit()
+    end
+  end
 end
