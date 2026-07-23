@@ -175,32 +175,28 @@ defmodule SpecialMeetingAttestGen do
 
   def maybe_attest("slash_trainer_tx", epoch, malicious_pk) do
     slotStallTrainer = isNextSlotStalled()
-    cond do
-        byte_size(malicious_pk) != 48 -> nil
-        DB.Chain.epoch() != epoch -> nil
+    guilty = cond do
+        byte_size(malicious_pk) != 48 -> false
+        DB.Chain.epoch() != epoch -> false
 
         #TODO: check for Slowloris
         #avg_seentimes_last_10_slots(malicious_pk) > 1second -> true
-        has_double_entry(malicious_pk) ->
-            msg = <<"slash_trainer", epoch::32-little, malicious_pk::binary>>
-            sk = Application.fetch_env!(:ama, :trainer_sk)
-            BlsEx.sign!(sk, msg, BLS12AggSig.dst_motion())
-
-        !!calcSlow(malicious_pk) and calcSlow(malicious_pk) > 600 ->
-            msg = <<"slash_trainer", epoch::32-little, malicious_pk::binary>>
-            sk = Application.fetch_env!(:ama, :trainer_sk)
-            BlsEx.sign!(sk, msg, BLS12AggSig.dst_motion())
-
-        malicious_pk == slotStallTrainer or malicious_pk in offlineTrainers()->
-            msg = <<"slash_trainer", epoch::32-little, malicious_pk::binary>>
-            sk = Application.fetch_env!(:ama, :trainer_sk)
-            BlsEx.sign!(sk, msg, BLS12AggSig.dst_motion())
-
-        true -> nil
+        has_double_entry(malicious_pk) -> true
+        !!calcSlow(malicious_pk) and calcSlow(malicious_pk) > 600 -> true
+        malicious_pk == slotStallTrainer or malicious_pk in offlineTrainers() -> true
+        true -> false
+    end
+    if !guilty do [] else
+        msg = <<"slash_trainer", epoch::32-little, malicious_pk::binary>>
+        my_keys_in(DB.Chain.validators_for_height(DB.Chain.height() + 1))
+        |> Enum.map(fn(%{pk: pk, seed: seed})->
+            %{pk: pk, signature: BlsEx.sign!(seed, msg, BLS12AggSig.dst_motion())}
+        end)
     end
   end
 
   def maybe_attest("slash_trainer_entry", entry_packed) do
+   try do
     slotStallTrainer = isNextSlotStalled()
     cur_entry = DB.Chain.rooted_tip_entry()
     %{error: :ok, entry: entry} = Entry.unpack_and_validate_from_net(entry_packed)
@@ -215,20 +211,53 @@ defmodule SpecialMeetingAttestGen do
     <<mask::size(mask_size)-bitstring, _::bitstring>> = mask
 
     trainers = DB.Chain.validators_for_height(entry.header.height)
+    my_keys = my_keys_in(trainers)
+
+    guilty = has_double_entry(malicious_pk)
+      or (!!calcSlow(malicious_pk) and calcSlow(malicious_pk) > 600)
+      or (malicious_pk == slotStallTrainer or malicious_pk in offlineTrainers())
 
     cond do
-        DB.Chain.epoch() != epoch -> nil
-        Entry.validate_next(cur_entry, entry) != %{error: :ok} -> nil
-        BIC.Epoch.slash_trainer_verify(malicious_pk, epoch, trainers, mask, signature) != nil -> nil
+        DB.Chain.epoch() != epoch -> []
+        Entry.validate_next(cur_entry, entry) != %{error: :ok} -> []
+        BIC.Epoch.slash_trainer_verify(malicious_pk, epoch, trainers, mask, signature) != nil -> []
+        !guilty -> []
+        my_keys == [] -> []
+        !acquire_entry_sign_lock(entry.header.height, entry.hash) -> []
 
-        has_double_entry(malicious_pk)
-        or (!!calcSlow(malicious_pk) and calcSlow(malicious_pk) > 600)
-        or (malicious_pk == slotStallTrainer or malicious_pk in offlineTrainers()) ->
+        true ->
           h = :crypto.hash(:sha256, RDB.vecpak_encode(entry.header))
-          sk = Application.fetch_env!(:ama, :trainer_sk)
-          BlsEx.sign!(sk, h, BLS12AggSig.dst_entry())
+          Enum.map(my_keys, fn(%{pk: pk, seed: seed})->
+              %{pk: pk, signature: BlsEx.sign!(seed, h, BLS12AggSig.dst_entry())}
+          end)
+    end
+   catch
+    _,_ -> []
+   end
+  end
 
-        true -> nil
+  defp my_keys_in(validators) do
+    Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
+  end
+
+  #persisted last slash entry we signed: never sign a DIFFERENT entry at or below
+  #that height; re-signing the exact same hash is always allowed (net retries).
+  #recorded BEFORE any signature is released so a crash cannot forget it.
+  def acquire_entry_sign_lock(height, entry_hash) do
+    %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
+    opts = %{db: db, cf: cf.sysconf}
+    case RocksDB.get("slash_trainer_signed", opts) do
+        <<last_height::64-little, last_hash::32-binary>> ->
+            cond do
+                entry_hash == last_hash -> true
+                height <= last_height -> false
+                true ->
+                    RocksDB.put("slash_trainer_signed", <<height::64-little, entry_hash::binary>>, opts)
+                    true
+            end
+        _ ->
+            RocksDB.put("slash_trainer_signed", <<height::64-little, entry_hash::binary>>, opts)
+            true
     end
   end
 

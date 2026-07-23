@@ -1,6 +1,8 @@
 defmodule SpecialMeetingGen do
   use GenServer
 
+  @initiator_round_seconds 8
+
   def try_slash_trainer_entry_next() do
     if SpecialMeetingAttestGen.isNextSlotStalled() do
       mpk = DB.Chain.validator_for_height_next()
@@ -37,6 +39,10 @@ defmodule SpecialMeetingGen do
     {:noreply, state}
   end
 
+  #a motion is already in flight: never overwrite it
+  def handle_info({:try_slash_trainer_tx, _mpk}, state = %{slash_trainer: _}) do
+    {:noreply, state}
+  end
   def handle_info({:try_slash_trainer_tx, mpk}, state) do
     slash_trainer = %{}
 
@@ -66,6 +72,9 @@ defmodule SpecialMeetingGen do
     {:noreply, state}
   end
 
+  def handle_info({:try_slash_trainer_entry, _mpk}, state = %{slash_trainer: _}) do
+    {:noreply, state}
+  end
   def handle_info({:try_slash_trainer_entry, mpk}, state) do
     slash_trainer = %{}
 
@@ -98,9 +107,11 @@ defmodule SpecialMeetingGen do
     {:noreply, state}
   end
 
-  def handle_info({:add_slash_trainer_tx_reply, pk, signature}, state = %{slash_trainer: _}) do
+  def handle_info({:add_slash_trainer_tx_reply, pk, signature, mpk, epoch}, state = %{slash_trainer: _}) do
     st = state.slash_trainer
-    if pk in st.validators do
+    #a signature from another motion (different mpk/epoch) signs a different
+    #message: aggregating it would silently poison the aggsig
+    if pk in st.validators and mpk == st.mpk and epoch == st.epoch do
       aggsig = BLS12AggSig.add_padded(st.tx.aggsig, st.validators, pk, signature)
       state = put_in(state, [:slash_trainer, :tx, :aggsig], aggsig)
       IO.inspect {:tx, aggsig.mask_set_size / aggsig.mask_size}
@@ -133,20 +144,29 @@ defmodule SpecialMeetingGen do
     #IO.inspect state[:slash_trainer]
     st = state[:slash_trainer]
     cond do
-      !state[:slash_trainer] -> state
+      !state[:slash_trainer] -> maybe_start_motion(state)
       st.attempts > 3 -> Map.delete(state, :slash_trainer)
 
+      #the slash already landed via another initiator: stand down
+      st.mpk not in DB.Chain.validators_for_height(DB.Chain.height() + 1) ->
+        Map.delete(state, :slash_trainer)
+
       st.type == :tx and (st.tx.aggsig.mask_set_size / st.tx.aggsig.mask_size) >= 0.67 ->
-        txu = build_slash_tx(st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)
+        txu = build_slash_tx(carrier_sk(st), st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)
         IO.inspect txu
         TXPool.insert_and_broadcast(txu, %{peers: 0})
         Map.delete(state, :slash_trainer)
 
       st.type == :entry and st.state == :gather_tx_sigs and (st.tx.aggsig.mask_set_size / st.tx.aggsig.mask_size) >= 0.67 ->
-        {entry, aggsig} = build_slash_entry(st)
-        state = put_in(state, [:slash_trainer, :entry, :entry], entry)
-        state = put_in(state, [:slash_trainer, :entry, :aggsig], aggsig)
-        put_in(state, [:slash_trainer, :state], :gather_entry_sigs)
+        case build_slash_entry(st) do
+          nil ->
+            IO.puts "🔴 already signed a different slash entry at this height, dropping motion"
+            Map.delete(state, :slash_trainer)
+          {entry, aggsig} ->
+            state = put_in(state, [:slash_trainer, :entry, :entry], entry)
+            state = put_in(state, [:slash_trainer, :entry, :aggsig], aggsig)
+            put_in(state, [:slash_trainer, :state], :gather_entry_sigs)
+        end
 
       st.state == :gather_tx_sigs ->
         business = %{op: "slash_trainer_tx", epoch: st.epoch, malicious_pk: st.mpk}
@@ -172,51 +192,96 @@ defmodule SpecialMeetingGen do
     end
   end
 
-  def build_slash_tx(mpk, epoch, aggsig, mask, mask_size) do
-    my_sk = Application.fetch_env!(:ama, :trainer_sk)
-    TX.build(my_sk, "Epoch", "slash_trainer", [mpk, "#{epoch}", aggsig, "#{mask_size}", mask])
+  #prefer a key that is actually in the validator set to carry the slash
+  def carrier_sk(st) do
+    case st.my_validators do
+      [%{seed: seed} | _] -> seed
+      [] -> Application.fetch_env!(:ama, :trainer_sk)
+    end
+  end
+
+  def build_slash_tx(sk, mpk, epoch, aggsig, mask, mask_size) do
+    TX.build(sk, "Epoch", "slash_trainer", [mpk, "#{epoch}", aggsig, "#{mask_size}", mask])
   end
 
   def build_slash_entry(st) do
-    sk = Application.fetch_env!(:ama, :trainer_sk)
+    sk = carrier_sk(st)
 
     true = FabricSyncAttestGen.isQuorumSynced()
     cur_entry = DB.Chain.rooted_tip_entry()
-    cur_height = cur_entry.header.height
-    cur_slot = cur_entry.header.slot
 
-    txs = [build_slash_tx(st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)]
+    txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)]
     next_entry = Entry.build_next(sk, cur_entry, txs)
     next_entry = Entry.sign(sk, next_entry)
 
-    aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
-      h = :crypto.hash(:sha256, RDB.vecpak_encode(next_entry.header))
-      signature = BlsEx.sign!(seed, h, BLS12AggSig.dst_entry())
-      BLS12AggSig.add_padded(aggsig, st.validators, pk, signature)
-    end)
+    #same single-shot rule as attesters: we sign our own entry, so it goes
+    #through the same persisted height lock
+    if !SpecialMeetingAttestGen.acquire_entry_sign_lock(next_entry.header.height, next_entry.hash) do
+      nil
+    else
+      aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
+        h = :crypto.hash(:sha256, RDB.vecpak_encode(next_entry.header))
+        signature = BlsEx.sign!(seed, h, BLS12AggSig.dst_entry())
+        BLS12AggSig.add_padded(aggsig, st.validators, pk, signature)
+      end)
 
-    {next_entry, aggsig}
+      {next_entry, aggsig}
+    end
   end
 
-  def my_tickslice() do
-    pk = Application.fetch_env!(:ama, :trainer_pk)
-    entry = DB.Chain.tip_entry()
+  #--- automatic slash trigger ---
+  #one designated initiator per @initiator_round_seconds round instead of the
+  #whole validator set starting motions at once.
+  #disabled unless AUTOSLASH is set: motions are started manually via
+  #try_slash_trainer_tx/entry for now
+  def maybe_start_motion(state) do
+    with true <- Application.get_env(:ama, :autoslash_enabled, false),
+         true <- FabricSyncAttestGen.isQuorumSyncedOffBy1(),
+         validators = DB.Chain.validators_for_height(DB.Chain.height() + 1),
+         mpk when is_binary(mpk) <- slash_candidate(validators),
+         true <- my_initiator_turn?(mpk, validators) do
+      if SpecialMeetingAttestGen.isNextSlotStalled() do
+        send(self(), {:try_slash_trainer_entry, mpk})
+      else
+        send(self(), {:try_slash_trainer_tx, mpk})
+      end
+      state
+    else
+      _ -> state
+    end
+  end
 
-    my_height = entry.header.height
-    slot = entry.header.slot
-    next_height = my_height + 1
+  #stalled next-slot trainer first (unique by definition), else the first
+  #sorted offline trainer: every node converges on the same target
+  def slash_candidate(validators) do
+    stalled = SpecialMeetingAttestGen.isNextSlotStalled()
+    cond do
+      !!stalled and stalled in validators -> stalled
+      true ->
+        SpecialMeetingAttestGen.offlineTrainers()
+        |> Enum.filter(& &1 in validators)
+        |> Enum.sort()
+        |> List.first()
+    end
+  end
 
-    trainers = DB.Chain.validators_for_height(next_height + 1)
-    #TODO: make this 3 or 6 later
+  #a node takes the turn when ANY of its keys is the designated initiator.
+  #only seconds 1..6 of the 8s round are active: the edges absorb clock skew
+  def my_initiator_turn?(mpk, validators) do
     ts_s = :os.system_time(1)
-    sync_round_offset = rem(div(ts_s, 60), length(trainers))
-    sync_round_index = Enum.find_index(trainers, fn t -> t == pk end)
+    designated = designated_initiator(mpk, validators, div(ts_s, @initiator_round_seconds))
+    my_pks = Application.fetch_env!(:ama, :keys) |> Enum.map(& &1.pk)
+    !!designated and designated in my_pks and rem(ts_s, @initiator_round_seconds) in 1..6
+  end
 
-    seconds_in_minute = rem(ts_s, 60)
-
-    sync_round_offset == sync_round_index
-    and seconds_in_minute >= 10
-    and seconds_in_minute <= 50
+  #rotates over the epoch-shuffled validator list, skipping the accused and
+  #known-offline validators so a dead initiator cannot waste a round
+  def designated_initiator(mpk, validators, round) do
+    offline = SpecialMeetingAttestGen.offlineTrainers()
+    eligible = Enum.filter(validators, & &1 != mpk and &1 not in offline)
+    if eligible == [] do nil else
+      Enum.at(eligible, rem(round, length(eligible)))
+    end
   end
 
   def check(business) do

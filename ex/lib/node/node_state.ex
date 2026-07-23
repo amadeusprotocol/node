@@ -167,21 +167,24 @@ defmodule NodeState do
     cond do
       #istate.peer.pk != <<>> -> nil
       op == "slash_trainer_tx" ->
-        signature = SpecialMeetingAttestGen.maybe_attest("slash_trainer_tx", term.business.epoch, term.business.malicious_pk)
-        if signature do
-          pk = Application.fetch_env!(:ama, :trainer_pk)
+        #every key on this node that is a validator attests, one reply each
+        SpecialMeetingAttestGen.maybe_attest("slash_trainer_tx", term.business.epoch, term.business.malicious_pk)
+        |> Enum.each(fn(%{pk: pk, signature: signature})->
           business = %{op: "slash_trainer_tx_reply", epoch: term.business.epoch, malicious_pk: term.business.malicious_pk,
             pk: pk, signature: signature}
           send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.special_business_reply(business)})
-        end
+        end)
       op == "slash_trainer_entry" ->
-        signature = SpecialMeetingAttestGen.maybe_attest("slash_trainer_entry", term.business.entry_packed)
-        entry = Entry.unpack_from_net(term.business.entry_packed)
-        if signature do
-          pk = Application.fetch_env!(:ama, :trainer_pk)
-          business = %{op: "slash_trainer_entry_reply", entry_hash: entry.hash, pk: pk, signature: signature}
-          send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.special_business_reply(business)})
+        case SpecialMeetingAttestGen.maybe_attest("slash_trainer_entry", term.business.entry_packed) do
+          [] -> nil
+          sigs ->
+            entry = Entry.unpack_from_net(term.business.entry_packed)
+            Enum.each(sigs, fn(%{pk: pk, signature: signature})->
+              business = %{op: "slash_trainer_entry_reply", entry_hash: entry.hash, pk: pk, signature: signature}
+              send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.special_business_reply(business)})
+            end)
         end
+      true -> nil
     end
   end
 
@@ -196,7 +199,8 @@ defmodule NodeState do
         msg = <<"slash_trainer", b.epoch::32-little, b.malicious_pk::binary>>
         sigValid = b.pk in validators and BlsEx.verify?(b.pk, b.signature, msg, BLS12AggSig.dst_motion())
         if sigValid do
-          send(SpecialMeetingGen, {:add_slash_trainer_tx_reply, term.business.pk, term.business.signature})
+          #mpk+epoch travel along so the initiator can reject stale-motion replays
+          send(SpecialMeetingGen, {:add_slash_trainer_tx_reply, b.pk, b.signature, b.malicious_pk, b.epoch})
         end
 
       op == "slash_trainer_entry_reply" ->
