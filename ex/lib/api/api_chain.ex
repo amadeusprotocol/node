@@ -65,6 +65,8 @@ defmodule API.Chain do
         {tip, div(tip.header.height, 100_000)}
       end
 
+      supply = NodeStatsGen.supply()
+
       %{
         height: tip.header.height,
         rooted_height: DB.Chain.rooted_height(),
@@ -74,7 +76,11 @@ defmodule API.Chain do
         cur_validator: DB.Chain.validator_for_height_current() |> Base58.encode(),
         next_validator: DB.Chain.validator_for_height_next() |> Base58.encode(),
         emission_for_epoch: BIC.Coin.from_flat(RDB.protocol_epoch_emission(epoch)),
-        circulating: BIC.Coin.from_flat(RDB.protocol_circulating_without_burn(epoch)),
+        circulating: (supply && supply.circulating) || BIC.Coin.from_flat(RDB.protocol_circulating_without_burn(epoch)),
+        total_supply: supply && supply.total_supply,
+        total_locked: supply && supply.total_locked,
+        validators: NodeStatsGen.validators(),
+        supply_computed_at_height: supply && supply.computed_at_height,
         total_supply_y3: total_supply_y3(),
         total_supply_y30: total_supply_y30(),
         burned: API.Contract.total_burned().float,

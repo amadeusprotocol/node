@@ -132,6 +132,7 @@ defmodule Ama do
 
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: ComputorGen, start: {ComputorGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: LoggerGen, start: {LoggerGen, :start_link, []}})
+    {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: NodeStatsGen, start: {NodeStatsGen, :start_link, []}})
     if Application.fetch_env!(:ama, :pruner_enabled) do
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: DB.Pruner, start: {DB.Pruner, :start_link, []}})
     end
