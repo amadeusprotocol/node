@@ -73,6 +73,7 @@ rustler::atoms! {
     nonexistance,
 
     forkheight,
+    forkheight2,
 
     ama_1_dollar,
     ama_10_cent,

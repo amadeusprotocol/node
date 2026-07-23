@@ -1,6 +1,7 @@
 use std::cmp::{max, min};
 
-const TARGET_SOLS_EPOCH: u64 = 380_000;
+pub const TARGET_SOLS_EPOCH: u64 = 380_000; //retarget target below FORKHEIGHT2
+pub const TARGET_SOLS_EPOCH2: u64 = 180_000; //retarget target from FORKHEIGHT2 (epoch 767)
 
 const TOL_NUM: u64 = 1;
 const TOL_DEN: u64 = 10;
@@ -39,9 +40,7 @@ fn ceil_log2_ratio(a: u64, b: u64) -> u32 {
     }
 }
 
-pub fn next(prev_bits: u32, sols: u64) -> u32 {
-    let target = TARGET_SOLS_EPOCH;
-
+pub fn next(prev_bits: u32, sols: u64, target: u64) -> u32 {
     let lo = max(1, (target * (TOL_DEN - TOL_NUM) + TOL_DEN / 2) / TOL_DEN);
     let hi = (target * (TOL_DEN + TOL_NUM) + TOL_DEN / 2) / TOL_DEN;
 
@@ -56,5 +55,30 @@ pub fn next(prev_bits: u32, sols: u64) -> u32 {
         clamp_bits(prev_bits.saturating_sub(delta))
     } else {
         prev_bits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retarget_at_180k_target() {
+        //inside the 162k-198k tolerance band: unchanged
+        assert_eq!(next(23, 180_000, TARGET_SOLS_EPOCH2), 23);
+        assert_eq!(next(23, 165_000, TARGET_SOLS_EPOCH2), 23);
+        assert_eq!(next(23, 197_000, TARGET_SOLS_EPOCH2), 23);
+        //today's ~318k pace at diff 23 steps up, halving sols toward the band
+        assert_eq!(next(23, 318_000, TARGET_SOLS_EPOCH2), 24);
+        //just under the band steps down one bit
+        assert_eq!(next(24, 159_000, TARGET_SOLS_EPOCH2), 23);
+        assert_eq!(next(23, 0, TARGET_SOLS_EPOCH2), 20);
+    }
+
+    #[test]
+    fn retarget_at_legacy_380k_target() {
+        assert_eq!(next(23, 380_000, TARGET_SOLS_EPOCH), 23);
+        assert_eq!(next(23, 318_000, TARGET_SOLS_EPOCH), 22);
+        assert_eq!(next(23, 500_000, TARGET_SOLS_EPOCH), 24);
     }
 }

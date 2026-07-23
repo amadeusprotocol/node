@@ -114,4 +114,13 @@ defmodule RDBProtocol do
       const
     end
   end
+
+  def forkheight2() do
+    const = :persistent_term.get({ProtocolConstant, :forkheight2}, nil)
+    if const do const else
+      const = RDB.protocol_constants().forkheight2
+      :persistent_term.put({ProtocolConstant, :forkheight2}, const)
+      const
+    end
+  end
 end

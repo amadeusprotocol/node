@@ -1094,6 +1094,7 @@ fn protocol_constants<'a>(env: Env<'a>) -> Term<'a> {
     let mut map = Term::map_new(env);
 
     map = map.map_put(atoms::forkheight(), protocol::FORKHEIGHT).ok().unwrap();
+    map = map.map_put(atoms::forkheight2(), protocol::FORKHEIGHT2).ok().unwrap();
 
     map = map.map_put(atoms::ama_1_dollar(), protocol::AMA_1_DOLLAR).ok().unwrap();
     map = map.map_put(atoms::ama_10_cent(), protocol::AMA_10_CENT).ok().unwrap();

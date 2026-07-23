@@ -4,11 +4,23 @@ use crate::consensus::consensus_kv;
 pub const FORKHEIGHT: u64 = 710_00000;
 pub const FORKHEIGHT_TESTNET: u64 = 0;
 
+//epoch 767: COST_PER_SOL removed, sol difficulty retargets to 180k sols/epoch
+pub const FORKHEIGHT2: u64 = 767_00000;
+pub const FORKHEIGHT2_TESTNET: u64 = 0;
+
 pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
     if env.testnet {
         FORKHEIGHT_TESTNET
     } else {
         FORKHEIGHT
+    }
+}
+
+pub fn forkheight2(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
+    if env.testnet {
+        FORKHEIGHT2_TESTNET
+    } else {
+        FORKHEIGHT2
     }
 }
 
@@ -40,7 +52,7 @@ pub fn cost_db_write_byte(env: &crate::consensus::consensus_apply::ApplyEnv) -> 
 
 pub const COST_PER_CALL: i128 = AMA_01_CENT;
 pub const COST_PER_DEPLOY: i128 = AMA_1_CENT; //cost to deploy contract
-pub const COST_PER_SOL: i128 = AMA_1_CENT; //cost to submit_sol
+pub const COST_PER_SOL: i128 = AMA_1_CENT; //pre-FORKHEIGHT2 replay only: the sol PoW gates spam, gas covers the rest
 pub const COST_PER_SLASH: i128 = AMA_1_CENT; //cost to slash_trainer (BLS aggregation over the validator set)
 pub const COST_PER_NEW_LEAF_MERKLE: i128 = COST_PER_BYTE_STATE * 128; //cost to grow the merkle tree
 

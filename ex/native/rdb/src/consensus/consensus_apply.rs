@@ -934,7 +934,10 @@ pub fn call_bic(
 
         (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
         (b"Epoch", b"submit_sol") => {
-            consensus_kv::exec_budget_decr(env, protocol::COST_PER_SOL);
+            //flat charge kept below FORKHEIGHT2 only so historical replay is unchanged
+            if env.caller_env.entry_height < protocol::forkheight2(env) {
+                consensus_kv::exec_budget_decr(env, protocol::COST_PER_SOL);
+            }
             consensus::bic::epoch::call_submit_sol(env, args)
         }
         (b"Epoch", b"slash_trainer") => {

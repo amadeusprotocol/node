@@ -788,7 +788,14 @@ fn update_difficulty_and_log_sols(env: &mut ApplyEnv, epoch_cur: u64, epoch_next
     let old_diff_bits = kv_get(env, b"bic:epoch:diff_bits").unwrap();
     let old_diff_bits = std::str::from_utf8(&old_diff_bits).ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| panic_any("invalid_diff_bits"));
 
-    let next_diff_bits = crate::consensus::bic::sol_difficulty::next(old_diff_bits, total_sols as u64);
+    //target keyed on epoch_next: the diff an epoch runs under is computed with the
+    //target active in THAT epoch, so the 180k retarget lands exactly at FORKHEIGHT2
+    let target = if epoch_next.saturating_mul(100_000) >= consensus::bic::protocol::forkheight2(env) {
+        crate::consensus::bic::sol_difficulty::TARGET_SOLS_EPOCH2
+    } else {
+        crate::consensus::bic::sol_difficulty::TARGET_SOLS_EPOCH
+    };
+    let next_diff_bits = crate::consensus::bic::sol_difficulty::next(old_diff_bits, total_sols as u64, target);
     let _ = kv_put(env, b"bic:epoch:diff_bits", next_diff_bits.to_string().as_bytes());
     let _ = kv_put(env, format!("bic:epoch:diff_bits:{}", epoch_next).as_bytes(), next_diff_bits.to_string().as_bytes());
     let _ = kv_put(env, format!("bic:epoch:total_sols:{}", epoch_cur).as_bytes(), total_sols.to_string().as_bytes());
