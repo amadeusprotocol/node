@@ -3,8 +3,8 @@ defmodule ComputorGen do
 
   @batch_iterations 2000
 
-  def start(type \\ nil) do
-    send(__MODULE__, {:start, type})
+  def start() do
+    send(__MODULE__, :start)
   end
 
   def stop() do
@@ -17,33 +17,29 @@ defmodule ComputorGen do
 
   def init(state) do
     :erlang.send_after(1000, self(), :tick)
-    case Application.fetch_env!(:ama, :computor_type) do
-      :trainer -> ComputorGen.start(:trainer)
-      :default -> ComputorGen.start()
-      _ -> nil
+    if Application.fetch_env!(:ama, :computor_enabled) do
+      ComputorGen.start()
     end
     {:ok, state}
   end
 
   def handle_info(:tick, state) do
-    next_ms = cond do
-      !state[:enabled] -> 1000
+    {state, next_ms} = cond do
+      !state[:enabled] -> {state, 1000}
       !FabricSyncAttestGen.isQuorumIsInEpoch() ->
         IO.puts "🔴 cannot compute: out_of_sync"
-        1000
+        {state, 1000}
       true ->
         tick(state)
-        0
     end
     :erlang.send_after(next_ms, self(), :tick)
     {:noreply, state}
   end
 
-  def handle_info({:start, type}, state) do
+  def handle_info(:start, state) do
     threads = Application.get_env(:ama, :computor_upow_threads, 0)
-    IO.puts "🔢 computor enabled (type=#{inspect type}, upow_threads=#{if threads == 0, do: "auto", else: threads})"
+    IO.puts "🔢 computor enabled (upow_threads=#{if threads == 0, do: "auto", else: threads})"
     state = Map.put(state, :enabled, true)
-    state = Map.put(state, :type, type)
     {:noreply, state}
   end
 
@@ -55,45 +51,52 @@ defmodule ComputorGen do
   def handle_info(_msg, state), do: {:noreply, state}
 
   def tick(state) do
-    pk = Application.fetch_env!(:ama, :trainer_pk)
-    pop = Application.fetch_env!(:ama, :trainer_pop)
+    keys = Application.fetch_env!(:ama, :keys)
     threads = Application.get_env(:ama, :computor_upow_threads, 0)
 
-    coins = DB.Chain.balance(pk)
     epoch = DB.Chain.epoch()
     segment_vr_hash = DB.Chain.segment_vr_hash()
     diff_bits = DB.Chain.diff_bits()
-    hasExecCoins = coins >= BIC.Coin.to_cents(100)
-    cond do
-        is_nil(segment_vr_hash) -> :ok # epoch segment_vr not set yet; nothing to compute against
+    {pick, underfunded_pks} = next_funded_key(keys, state[:key_idx] || 0)
+    state = warn_underfunded(state, underfunded_pks)
+    case pick do
+      nil ->
+        IO.puts "🔴 cannot compute: no key has at least 3 AMA for submit_sol"
+        {state, 1000}
 
-        (state.type == :trainer and !hasExecCoins) or state.type == nil ->
-          # Compute to ourselves as a node: own pk is the computor (reward recipient).
-          sol = UPOW.compute(epoch, EntryGenesis.signer(), EntryGenesis.pop(), pk, segment_vr_hash, diff_bits, @batch_iterations, threads)
-          if sol do
-            IO.puts "🔢 tensor matmul complete! broadcasting sol.."
-            NodeGen.broadcast(%{op: :sol, sol: sol})
-          end
+      {key, idx} ->
+        sol = UPOW.compute(epoch, key.pk, key.pop, key.pk, segment_vr_hash, diff_bits, @batch_iterations, threads)
+        if sol do
+          packed_tx = TX.build(key.seed, "Epoch", "submit_sol", [sol])
+          %{hash: hash} = TX.unpack(packed_tx)
+          IO.puts "🔢 tensor matmul complete! tx #{Base58.encode(hash)} key #{Base58.encode(key.pk)}"
 
-        true ->
-          sol = UPOW.compute(epoch, pk, pop, pk, segment_vr_hash, diff_bits, @batch_iterations, threads)
-          if sol do
-            sk = Application.fetch_env!(:ama, :trainer_sk)
-            packed_tx = TX.build(sk, "Epoch", "submit_sol", [sol])
-            %{hash: hash} = TX.unpack(packed_tx)
-            IO.puts "🔢 tensor matmul complete! tx #{Base58.encode(hash)}"
-
-            TXPool.insert(packed_tx)
-            NodeGen.broadcast(NodeProto.event_tx(packed_tx))
-          end
+          TXPool.insert(packed_tx)
+          NodeGen.broadcast(NodeProto.event_tx(packed_tx))
+          {Map.put(state, :key_idx, idx + 1), 0}
+        else
+          {Map.put(state, :key_idx, idx), 0}
+        end
     end
-    state
   end
 
-  def set_emission_address(to_address) do
-    sk = Application.fetch_env!(:ama, :trainer_sk)
-    packed_tx = TX.build(sk, "Epoch", "set_emission_address", [to_address])
-    TXPool.insert(packed_tx)
-    NodeGen.broadcast(NodeProto.event_tx(packed_tx))
+  #3 AMA comfortably covers a submit_sol (1.2 AMA reserves + fee)
+  @min_key_balance_flat 3 * 1_000_000_000
+
+  defp next_funded_key(keys, idx) do
+    n = length(keys)
+    {funded, underfunded} = Enum.map(0..(n-1), fn(offset)->
+      i = rem(idx + offset, n)
+      {Enum.at(keys, i), i}
+    end)
+    |> Enum.split_with(fn({key, _i})-> DB.Chain.balance(key.pk) >= @min_key_balance_flat end)
+    {List.first(funded), Enum.map(underfunded, fn({key, _i})-> key.pk end) |> Enum.sort()}
+  end
+
+  defp warn_underfunded(state, underfunded_pks) do
+    if underfunded_pks != state[:underfunded] do
+      Enum.each(underfunded_pks, & IO.puts "🔴 key #{Base58.encode(&1)} has less than 3 AMA, skipping")
+    end
+    Map.put(state, :underfunded, underfunded_pks)
   end
 end
