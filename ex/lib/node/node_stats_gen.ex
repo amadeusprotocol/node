@@ -140,14 +140,14 @@ defmodule NodeStatsGen do
         map = Enum.uniq(list ++ Map.keys(stakes))
         |> Map.new(fn(pk)->
             staked_flat = Map.get(stakes, pk, 0)
-            {Base58.encode(pk), %{
-                commission_bps: commission_bps(pk, epoch, opts),
+            entry = %{
                 staked: BIC.Coin.from_flat(staked_flat),
                 staked_flat: staked_flat,
                 #any validator can also be solving, so every entry carries its count
                 sols: Map.get(sols, pk, 0),
                 in_validator_set: :lists.member(pk, list),
-            }}
+            }
+            {Base58.encode(pk), Map.merge(entry, commission(pk, epoch, opts))}
         end)
         :ets.insert(NodeStatsGen, {:validators, %{list: list, map: map}})
     end
@@ -176,12 +176,21 @@ defmodule NodeStatsGen do
         end
     end
 
-    defp commission_bps(pk, epoch, opts) do
+    #a set_commission queues {pending_bps, pending_epoch}; until that epoch the old
+    #bps stays effective, so the queued change is reported alongside it
+    defp commission(pk, epoch, opts) do
         case RocksDB.get("bic:lockup_vault:validator_commission:#{pk}", opts) do
-            nil -> 0
+            nil -> %{commission_bps: 0}
             bytes ->
                 c = RDB.vecpak_decode(bytes)
-                if epoch >= vfield(c, :pending_epoch) do vfield(c, :pending_bps) else vfield(c, :bps) end
+                if epoch >= vfield(c, :pending_epoch) do
+                    %{commission_bps: vfield(c, :pending_bps)}
+                else
+                    %{
+                        commission_bps: vfield(c, :bps),
+                        commission_pending: %{bps: vfield(c, :pending_bps), epoch: vfield(c, :pending_epoch)},
+                    }
+                end
         end
     end
 
