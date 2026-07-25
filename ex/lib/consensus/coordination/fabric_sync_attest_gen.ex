@@ -64,6 +64,7 @@ defmodule FabricSyncAttestGen do
 
   def isQuorumSyncedOffBy1() do
     cond do
+      Application.fetch_env!(:ama, :testnet) -> true
       !hasQuorum() -> false
       isSynced() in [:full, :off_by_1] -> true
       DB.Chain.rooted_height() < (DB.Chain.height() - 1) -> false
@@ -74,6 +75,7 @@ defmodule FabricSyncAttestGen do
 
   def isQuorumSyncedOffByX(cnt) do
     cond do
+      Application.fetch_env!(:ama, :testnet) -> true
       !hasQuorum() -> false
       isSynced() in [:full, :off_by_1] -> true
       DB.Chain.rooted_height() < (DB.Chain.height() - cnt) -> false
@@ -83,7 +85,7 @@ defmodule FabricSyncAttestGen do
   end
 
   def isQuorumIsInEpoch() do
-    hasQuorum() and isInEpoch()
+    !!Application.fetch_env!(:ama, :testnet) or (hasQuorum() and isInEpoch())
   end
 
   def init(state) do

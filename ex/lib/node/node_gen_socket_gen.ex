@@ -8,7 +8,10 @@ defmodule NodeGenSocketGen do
   end
 
   def init([ip_tuple, port, idx]) do
-    lsocket = if Application.fetch_env!(:ama, :testnet) do nil else
+    #testnet historically ran as a single node with no P2P (lsocket = nil). a
+    #replica cluster needs real UDP between nodes, so bind when REPLICAS is set.
+    skip_socket = Application.fetch_env!(:ama, :testnet) and is_nil(Application.fetch_env!(:ama, :replicas))
+    lsocket = if skip_socket do nil else
       lsocket = listen(port, [{:ifaddr, ip_tuple}])
       {snd, rcv} = get_sys_bufs(lsocket)
       snd_mb = (snd/1024)/1024
@@ -76,6 +79,14 @@ defmodule NodeGenSocketGen do
     msg = plaintext
     |> NodeProto.decompress_and_unpack()
 
+    #a decryptable message for OUR own pk from another IP proves another node booted
+    #with our first key (only a key-holder can produce it) — flag the collision
+    my_pk = Application.fetch_env!(:ama, :trainer_pk)
+    my_ip = Application.fetch_env!(:ama, :anr)[:ip4]
+    if pk == my_pk and !!my_ip and peer_ip != my_ip do
+      NodeANR.note_collision(pk, "self", my_ip, peer_ip)
+    end
+
     if !NodeGenNetguard.op_ok(peer_ip, msg.op) do
       IO.inspect({:dropping_due_to_op_flood, peer_ip, msg.op})
     else
@@ -113,10 +124,11 @@ defmodule NodeGenSocketGen do
   end
 
   def handle_info(msg, state) do
-    testnet = Application.fetch_env!(:ama, :testnet)
+    #solo testnet has no peers so incoming P2P is dropped; a replica cluster needs it
+    testnet_solo = Application.fetch_env!(:ama, :testnet) != nil and is_nil(Application.fetch_env!(:ama, :replicas))
     case msg do
-      #NOOP for testnet
-      _ when testnet != nil -> state
+      #NOOP for solo testnet
+      _ when testnet_solo -> state
 
       {:udp, _socket, {ipa,ipb,ipc,ipd}, _inportno, data} ->
         peer_ip = "#{ipa}.#{ipb}.#{ipc}.#{ipd}"

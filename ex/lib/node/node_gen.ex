@@ -81,10 +81,12 @@ defmodule NodeGen do
   end
 
   def handle_info(msg, state) do
-    testnet = Application.fetch_env!(:ama, :testnet)
+    #a single testnet node has no peers, so all P2P ticks NOOP. a replica cluster
+    #testnet DOES need pings/handshakes/gossip, so let the normal handlers run.
+    testnet_solo = Application.fetch_env!(:ama, :testnet) != nil and is_nil(Application.fetch_env!(:ama, :replicas))
     state = case msg do
-      #NOOP for testnet
-      _ when testnet != nil -> state
+      #NOOP for solo testnet
+      _ when testnet_solo -> state
 
       :tick ->
         :erlang.send_after(1000, self(), :tick)
