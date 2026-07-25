@@ -124,12 +124,38 @@ defmodule NodeANR do
     is_binary(ip4) and match?({:ok, {_,_,_,_}}, :inet.parse_address(~c'#{ip4}'))
   end
 
+  #once per pk per cooldown, so a persistent collision logs steadily but never floods
+  @collision_cooldown_ms 30_000
+  def note_collision(pk, kind, ip_a, ip_b) do
+    now = :os.system_time(1000)
+    fresh = case :ets.lookup(NODECollisionLog, pk) do
+      [{^pk, last}] -> now - last >= @collision_cooldown_ms
+      _ -> true
+    end
+    if fresh do
+      :ets.insert(NODECollisionLog, {pk, now})
+      IO.puts "🔴 IDENTITY COLLISION (#{kind}): pk #{Base58.encode(pk)} announced from BOTH #{ip_a} and #{ip_b} — two nodes share a first key; rotate one node's seeds file"
+    end
+  end
+
   def insert(anr) do
     if !valid_ip4?(anr[:ip4]) do
       nil
     else
+      #another node announcing OUR identity from a different IP == duplicate first key
+      my_pk = Application.fetch_env!(:ama, :trainer_pk)
+      my_ip = Application.fetch_env!(:ama, :anr)[:ip4]
+      if anr.pk == my_pk and !!my_ip and anr.ip4 != my_ip do
+        note_collision(anr.pk, "self", my_ip, anr.ip4)
+      end
+
       anr = Map.put(anr, :hasChainPop, !!DB.Chain.pop(anr.pk))
       old_anr = MnesiaKV.get(NODEANR, anr.pk)
+      #same pk flipping between two live IPs (both fresh ts) == two announcers colliding
+      if old_anr && old_anr[:ip4] && old_anr.ip4 != anr.ip4 && old_anr[:ts] &&
+         (anr.ts - old_anr.ts) < @collision_cooldown_ms do
+        note_collision(anr.pk, "peer", old_anr.ip4, anr.ip4)
+      end
       if !routed_peer?(anr.ip4) do
         if !old_anr or old_anr[:ip4] == anr.ip4 or !old_anr[:ts] or anr.ts > old_anr.ts do
           delete(anr.pk)
