@@ -10,7 +10,7 @@
   "exjsx": {:hex, :exjsx, "4.0.0", "60548841e0212df401e38e63c0078ec57b33e7ea49b032c796ccad8cde794b5c", [:mix], [{:jsx, "~> 2.8.0", [hex: :jsx, repo: "hexpm", optional: false]}], "hexpm", "32e95820a97cffea67830e91514a2ad53b888850442d6d395f53a1ac60c82e07"},
   "jason": {:hex, :jason, "1.4.4", "b9226785a9aa77b6857ca22832cffa5d5011a667207eb2a0ad56adb5db443b8a", [:mix], [{:decimal, "~> 1.0 or ~> 2.0", [hex: :decimal, repo: "hexpm", optional: true]}], "hexpm", "c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b"},
   "jsx": {:hex, :jsx, "2.8.3", "a05252d381885240744d955fbe3cf810504eb2567164824e19303ea59eef62cf", [:mix, :rebar3], [], "hexpm", "fc3499fed7a726995aa659143a248534adc754ebd16ccd437cd93b649a95091f"},
-  "mnesia_kv": {:git, "https://github.com/xenomorphtech/mnesia_kv.git", "890109669975807b72506adceea7f20682bc6a67", []},
+  "mnesia_kv": {:git, "https://github.com/xenomorphtech/mnesia_kv.git", "d0e4e1d7e2696d02bc5527822970d0643eee5dea", []},
   "parse_trans": {:git, "https://github.com/uwiger/parse_trans", "d99fb36755c813a5db23e6f93741aa58323ef911", []},
   "photon": {:git, "https://github.com/vans163/photon.git", "1a26f37c17ae210b1d5b8ca20cae21256b2defe8", []},
   "reedsolomon_ex": {:git, "https://github.com/amadeusprotocol/reedsolomon_ex", "e11ddb33a50a4a3ccb1419a438fcc00b3c7ba8d4", []},
