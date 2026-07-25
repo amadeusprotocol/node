@@ -44,6 +44,14 @@ defmodule SpecialMeetingGen do
     {:noreply, state}
   end
   def handle_info({:try_slash_trainer_tx, mpk}, state) do
+    if !ReplicaGen.can_sign?() do
+      IO.puts "🔴 not replica leader, ignoring slash motion"
+      {:noreply, state}
+    else
+      start_slash_tx_motion(mpk, state)
+    end
+  end
+  defp start_slash_tx_motion(mpk, state) do
     slash_trainer = %{}
 
     height = DB.Chain.height()
@@ -76,6 +84,14 @@ defmodule SpecialMeetingGen do
     {:noreply, state}
   end
   def handle_info({:try_slash_trainer_entry, mpk}, state) do
+    if !ReplicaGen.can_sign?() do
+      IO.puts "🔴 not replica leader, ignoring slash motion"
+      {:noreply, state}
+    else
+      start_slash_entry_motion(mpk, state)
+    end
+  end
+  defp start_slash_entry_motion(mpk, state) do
     slash_trainer = %{}
 
     height = DB.Chain.height()
@@ -215,17 +231,18 @@ defmodule SpecialMeetingGen do
     next_entry = Entry.sign(sk, next_entry)
 
     #same single-shot rule as attesters: we sign our own entry, so it goes
-    #through the same persisted height lock
-    if !SpecialMeetingAttestGen.acquire_entry_sign_lock(next_entry.header.height, next_entry.hash) do
-      nil
-    else
-      aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
-        h = :crypto.hash(:sha256, RDB.vecpak_encode(next_entry.header))
-        signature = BlsEx.sign!(seed, h, BLS12AggSig.dst_entry())
-        BLS12AggSig.add_padded(aggsig, st.validators, pk, signature)
-      end)
+    #through the same persisted height lock, quorum-replicated before signing
+    cond do
+      !SpecialMeetingAttestGen.acquire_entry_sign_lock(next_entry.header.height, next_entry.hash) -> nil
+      !ReplicaGen.await_slash_lock_replicated(next_entry.header.height, next_entry.hash) -> nil
+      true ->
+        aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
+          h = :crypto.hash(:sha256, RDB.vecpak_encode(next_entry.header))
+          signature = BlsEx.sign!(seed, h, BLS12AggSig.dst_entry())
+          BLS12AggSig.add_padded(aggsig, st.validators, pk, signature)
+        end)
 
-      {next_entry, aggsig}
+        {next_entry, aggsig}
     end
   end
 
@@ -236,6 +253,7 @@ defmodule SpecialMeetingGen do
   #try_slash_trainer_tx/entry for now
   def maybe_start_motion(state) do
     with true <- Application.get_env(:ama, :autoslash_enabled, false),
+         true <- ReplicaGen.can_sign?(),
          true <- FabricSyncAttestGen.isQuorumSyncedOffBy1(),
          validators = DB.Chain.validators_for_height(DB.Chain.height() + 1),
          mpk when is_binary(mpk) <- slash_candidate(validators),

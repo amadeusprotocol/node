@@ -42,10 +42,14 @@ defmodule Ama do
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
     :ets.new(NODEANRHOT, [:ordered_set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
+    #rate-limit table for identity-collision warnings (same pk seen from 2 IPs)
+    :ets.new(NODECollisionLog, [:set, :named_table, :public,
+      {:write_concurrency, true}, {:read_concurrency, true}])
 
     MnesiaKV.load(
       %{
         NODEANR => %{index: [:handshaked, :ip4, :placeholder]},
+        ReplicaKV => %{sync: true},
       },
       %{path: Path.join([Application.fetch_env!(:ama, :work_folder), "local_kv/"])}
     )
@@ -123,7 +127,9 @@ defmodule Ama do
   def run_node_services() do
     ensure_mmr_synced()
 
-    if !Application.fetch_env!(:ama, :testnet) do
+    #solo testnet has no peers to sync from; a replica cluster needs sync/catchup
+    #so followers keep up with the leader and can take over on failover
+    if !Application.fetch_env!(:ama, :testnet) or !is_nil(Application.fetch_env!(:ama, :replicas)) do
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricSyncAttestGen, start: {FabricSyncAttestGen, :start_link, []}})
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricSyncGen, start: {FabricSyncGen, :start_link, []}})
       #TODO: remove it later
@@ -133,6 +139,7 @@ defmodule Ama do
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: ComputorGen, start: {ComputorGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: LoggerGen, start: {LoggerGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: NodeStatsGen, start: {NodeStatsGen, :start_link, []}})
+    {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: ReplicaGen, start: {ReplicaGen, :start_link, []}})
     if Application.fetch_env!(:ama, :pruner_enabled) do
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: DB.Pruner, start: {DB.Pruner, :start_link, []}})
     end

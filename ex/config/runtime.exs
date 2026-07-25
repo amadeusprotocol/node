@@ -63,6 +63,7 @@ keys = File.read!(path_seeds) |> String.split("\n") |> Enum.filter(& &1 != "") |
   pop = BlsEx.sign!(seed, pk, BLS12AggSig.dst_pop())
   %{pk: pk, seed: seed, pop: pop}
 end)
+
 keys_by_pk = Enum.into(keys, %{}, fn(key)->
   {key.pk, %{pop: key.pop, seed: key.seed}}
 end)
@@ -78,6 +79,27 @@ config :ama, :trainer_pop, first_key.pop
 #for local API - ease of use
 config :ama, :seed64, (case System.get_env("SEED64") do nil -> nil; seed64 -> Base58.decode(seed64) end)
 
+#--- replica cluster: several nodes carrying the same seed pack, one leader ---
+replica_id = case System.get_env("REPLICA_ID") do nil -> nil; v -> :erlang.binary_to_integer(v) end
+replicas = case System.get_env("REPLICAS") do
+  nil -> nil
+  str ->
+    String.split(str, ",")
+    |> Enum.map(fn(entry)->
+      [id, ip, port] = String.split(entry, ["@", ":"])
+      {:ok, ip} = :inet.parse_ipv4_address(:unicode.characters_to_list(ip))
+      %{id: :erlang.binary_to_integer(id), ip: ip, port: :erlang.binary_to_integer(port)}
+    end)
+end
+replica_psk = case System.get_env("REPLICA_PSK") do nil -> nil; b58 -> Base58.decode(b58) end
+if replicas != nil do
+  if !replica_id, do: raise("REPLICAS is set but REPLICA_ID is missing")
+  if !Enum.any?(replicas, & &1.id == replica_id), do: raise("REPLICA_ID #{replica_id} is not in REPLICAS")
+  if !replica_psk or byte_size(replica_psk) != 32, do: raise("REPLICA_PSK must be 32 bytes base58")
+end
+config :ama, :replicas, replicas
+config :ama, :replica_id, replica_id
+config :ama, :replica_psk, replica_psk
 
 archival_node = System.get_env("ARCHIVALNODE") in ["true", "y", "yes"]
 history_keep_epochs = (System.get_env("HISTORY_KEEP_EPOCHS") || "10") |> :erlang.binary_to_integer()

@@ -175,15 +175,20 @@ defmodule NodeState do
           send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.special_business_reply(business)})
         end)
       op == "slash_trainer_entry" ->
-        case SpecialMeetingAttestGen.maybe_attest("slash_trainer_entry", term.business.entry_packed) do
-          [] -> nil
-          sigs ->
-            entry = Entry.unpack_from_net(term.business.entry_packed)
-            Enum.each(sigs, fn(%{pk: pk, signature: signature})->
-              business = %{op: "slash_trainer_entry_reply", entry_hash: entry.hash, pk: pk, signature: signature}
-              send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.special_business_reply(business)})
-            end)
-        end
+        #maybe_attest can wait on replica lock replication: never block the socket loop
+        peer = %{ip4: istate.peer.ip4, pk: istate.peer.pk}
+        entry_packed = term.business.entry_packed
+        Task.start(fn ->
+          case SpecialMeetingAttestGen.maybe_attest("slash_trainer_entry", entry_packed) do
+            [] -> nil
+            sigs ->
+              entry = Entry.unpack_from_net(entry_packed)
+              Enum.each(sigs, fn(%{pk: pk, signature: signature})->
+                business = %{op: "slash_trainer_entry_reply", entry_hash: entry.hash, pk: pk, signature: signature}
+                send(NodeGen.get_socket_gen(), {:send_to, [peer], NodeProto.special_business_reply(business)})
+              end)
+          end
+        end)
       true -> nil
     end
   end

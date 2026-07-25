@@ -299,6 +299,9 @@ defmodule FabricGen do
 
       !FabricSyncAttestGen.isQuorumSynced() -> nil
 
+      #replica follower, or a replica already signed this height: never produce
+      !!am_i_next and !ReplicaGen.can_produce?(next_height) -> nil
+
       am_i_next ->
         if :persistent_term.get(:snapshot_before_my_slot, nil) do
           :persistent_term.erase(:snapshot_before_my_slot)
@@ -317,6 +320,8 @@ defmodule FabricGen do
 
   def produce_insert_and_broadcast_next_entry(seed, cur_entry) do
     next_entry = produce_entry(seed, cur_entry)
+    #record before anything leaves the box so replicas never re-sign this height
+    ReplicaGen.note_signed_height(next_entry.header.height)
     DB.Entry.insert(next_entry)
 
     msg = NodeProto.event_entry(Entry.pack_for_net(next_entry))
@@ -426,7 +431,10 @@ defmodule FabricGen do
       end
 
       validators = DB.Chain.validators_for_height(Entry.height(next_entry), %{rtx: rtx})
-      my_validators = Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
+      #replica followers never attest: the leader attests for the shared keys
+      my_validators = if !ReplicaGen.can_sign?() do [] else
+        Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
+      end
       # {next_entry, mutations_hash} = {%{hash: DB.Chain.tip(), header_unpacked: %{height: DB.Chain.height()}}, DB.Entry.muts_hash(DB.Chain.tip())}
       # my_validators = Application.fetch_env!(:ama, :keys)
       # rtx = RocksDB.transaction(:persistent_term.get({:rocksdb, Fabric}).db)

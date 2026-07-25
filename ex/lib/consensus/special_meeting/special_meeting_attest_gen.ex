@@ -137,14 +137,20 @@ defmodule SpecialMeetingAttestGen do
   end
 
   def tick_offline(state) do
-    my_pk = Application.fetch_env!(:ama, :trainer_pk)
     isSynced = FabricSyncAttestGen.isQuorumSyncedOffBy1()
 
     trainers = DB.Chain.validators_for_height(DB.Chain.height()+1)
     {vals, _} = NodeANR.handshaked_and_online()
     onlineTrainers = Enum.map(vals, & &1.pk)
-    onlineTrainers = if my_pk in onlineTrainers do onlineTrainers else onlineTrainers ++ [my_pk] end
+    my_trainer_pks = Application.fetch_env!(:ama, :keys_all_pks) |> Enum.filter(& &1 in trainers)
+    onlineTrainers = Enum.uniq(onlineTrainers ++ my_trainer_pks)
     offlineTrainers = trainers -- onlineTrainers
+
+    #multikey nodes announce only their first key via ANR: a validator whose
+    #entries keep landing is online no matter what the peer table says
+    recent_cnt = min(max(DB.Chain.height(), 1), 2 * length(trainers))
+    recent_signers = entries_last_x(recent_cnt) |> Enum.map(& &1.header.signer) |> Enum.uniq()
+    offlineTrainers = offlineTrainers -- recent_signers
 
     offlineLocal = Process.get(:offlineTrainersSeries, []) |> Enum.take(10)
     offlineLocal = [offlineTrainers] ++ offlineLocal
@@ -186,7 +192,7 @@ defmodule SpecialMeetingAttestGen do
         malicious_pk == slotStallTrainer or malicious_pk in offlineTrainers() -> true
         true -> false
     end
-    if !guilty do [] else
+    if !guilty or !ReplicaGen.can_sign?() do [] else
         msg = <<"slash_trainer", epoch::32-little, malicious_pk::binary>>
         my_keys_in(DB.Chain.validators_for_height(DB.Chain.height() + 1))
         |> Enum.map(fn(%{pk: pk, seed: seed})->
@@ -223,7 +229,9 @@ defmodule SpecialMeetingAttestGen do
         BIC.Epoch.slash_trainer_verify(malicious_pk, epoch, trainers, mask, signature) != nil -> []
         !guilty -> []
         my_keys == [] -> []
+        !ReplicaGen.can_sign?() -> []
         !acquire_entry_sign_lock(entry.header.height, entry.hash) -> []
+        !ReplicaGen.await_slash_lock_replicated(entry.header.height, entry.hash) -> []
 
         true ->
           h = :crypto.hash(:sha256, RDB.vecpak_encode(entry.header))
@@ -240,24 +248,26 @@ defmodule SpecialMeetingAttestGen do
     Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
   end
 
-  #persisted last slash entry we signed: never sign a DIFFERENT entry at or below
-  #that height; re-signing the exact same hash is always allowed (net retries).
-  #recorded BEFORE any signature is released so a crash cannot forget it.
+  #last slash entry we signed, durable in ReplicaKV (sync, fsync'd before any
+  #signature is released so a crash cannot forget it): never sign a DIFFERENT entry
+  #at or below that height; re-signing the exact same hash is always allowed (net
+  #retries). node-local guard — the chain never reads it.
   def acquire_entry_sign_lock(height, entry_hash) do
-    %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-    opts = %{db: db, cf: cf.sysconf}
-    case RocksDB.get("slash_trainer_signed", opts) do
-        <<last_height::64-little, last_hash::32-binary>> ->
-            cond do
-                entry_hash == last_hash -> true
-                height <= last_height -> false
-                true ->
-                    RocksDB.put("slash_trainer_signed", <<height::64-little, entry_hash::binary>>, opts)
-                    true
-            end
-        _ ->
-            RocksDB.put("slash_trainer_signed", <<height::64-little, entry_hash::binary>>, opts)
+    {last_height, last_hash} = ReplicaGen.my_slash_lock()
+    cond do
+        entry_hash == last_hash -> true
+        height <= last_height -> false
+        true ->
+            ReplicaGen.put_slash_lock(height, entry_hash)
             true
+    end
+  end
+
+  #adopt a replica peer's slash-entry lock heard via heartbeat; only ever advances
+  def adopt_entry_sign_lock(height, entry_hash) do
+    {current, _} = ReplicaGen.my_slash_lock()
+    if height > current do
+        ReplicaGen.put_slash_lock(height, entry_hash)
     end
   end
 
