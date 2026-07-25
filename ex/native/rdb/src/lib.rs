@@ -1022,6 +1022,18 @@ fn hbsmt_root_verify<'a>(env: Env<'a>, expected_root: Binary<'a>, proof_ex: Term
     }
 }
 
+#[rustler::nif(schedule = "DirtyCpu")]
+fn hbsmt_seed_contractstate<'a>(env: Env<'a>, db: ResourceArc<DbResource>, proplist: Vec<(Binary<'a>, Binary<'a>)>) -> Term<'a> {
+    let mut ops = Vec::with_capacity(proplist.len());
+    for (k_bin, v_bin) in &proplist {
+        let key = k_bin.to_vec();
+        let ns = crate::consensus::consensus_kv::contractstate_namespace(&key);
+        ops.push(hbsmt_common::Op::Insert(ns, key, v_bin.to_vec()));
+    }
+    crate::consensus::hbsmt_rdb::hbsmt_batch_update_db(&db.db, "contractstate_tree_hbsmt", ops);
+    atoms::ok().encode(env)
+}
+
 //rocksdb proof over the consensus contractstate HBSMT
 #[rustler::nif(schedule = "DirtyIo")]
 fn hbsmt_contractstate_root_prove<'a>(env: Env<'a>, db: ResourceArc<DbResource>, ns: Option<Binary<'a>>, key: Binary<'a>) -> Term<'a> {

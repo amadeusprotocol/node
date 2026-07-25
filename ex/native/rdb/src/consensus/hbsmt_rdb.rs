@@ -641,6 +641,41 @@ pub fn hbsmt_root_env(env: &mut ApplyEnv, cf_name: &str) -> [u8; 32] {
 /// Incremental batch update of the env-based HBSMT in `cf_name`. Writes go
 /// through `env.txn` so they commit atomically with the rest of the block's
 /// mutations.
+/// Seed/update the tree directly against a db transaction (no ApplyEnv). Used to
+/// build the contractstate tree at testnet genesis, where state rows are written
+/// directly rather than through apply_entry. Mirrors hbsmt_batch_update_env.
+pub fn hbsmt_batch_update_db(db: &TransactionDB<MultiThreaded>, cf_name: &str, ops: Vec<Op>) {
+    if ops.is_empty() { return; }
+    let cf = db.cf_handle(cf_name).unwrap();
+    let latest = collapse_ops_to_latest(ops);
+    let txn = db.transaction();
+
+    let mut dirty: Vec<Path> = Vec::with_capacity(latest.len());
+    for (path, val) in &latest {
+        let prev = txn.get_cf(&cf, &path[..]).expect("hbsmt_batch_update_db: get_cf read error");
+        match val {
+            Some((id, v)) => {
+                let encoded = encode_leaf(id, v);
+                if prev.as_deref() != Some(&encoded[..]) {
+                    txn.put_cf(&cf, &path[..], encoded).unwrap();
+                    dirty.push(*path);
+                }
+            }
+            None => {
+                if prev.is_some() {
+                    txn.delete_cf(&cf, &path[..]).unwrap();
+                    dirty.push(*path);
+                }
+            }
+        }
+    }
+    if !dirty.is_empty() {
+        let empties = make_empties();
+        descend_and_flush(&txn, &cf, &empties, &dirty);
+    }
+    txn.commit().expect("hbsmt_batch_update_db: commit failed");
+}
+
 pub fn hbsmt_batch_update_env(env: &mut ApplyEnv, cf_name: &str, ops: Vec<Op>) {
     if ops.is_empty() { return; }
     let cf = env.db.cf_handle(cf_name).unwrap();

@@ -185,16 +185,25 @@ defmodule EntryGenesis do
         RocksDB.put("rooted_tip", entry_signed.hash, %{rtx: rtx, cf: cf.sysconf})
 
         validator_pks = Application.fetch_env!(:ama, :keys) |> Enum.map(& &1.pk)
-        RocksDB.put("bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}",
-          RDB.vecpak_encode(validator_pks), %{rtx: rtx, cf: cf.contractstate})
-        RocksDB.put("bic:epoch:diff_bits", "8", %{rtx: rtx, cf: cf.contractstate})
-        RocksDB.put("bic:epoch:segment_vr_hash", Blake3.hash(vr), %{rtx: rtx, cf: cf.contractstate})
 
-        Enum.each(Application.fetch_env!(:ama, :keys), fn(key)->
-          RocksDB.put("account:#{key.pk}:balance:AMA", "10300300123456789", %{rtx: rtx, cf: cf.contractstate})
-          RocksDB.put("account:#{key.pk}:attribute:pop", key.pop, %{rtx: rtx, cf: cf.contractstate})
+        rows = [
+          {"bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}", RDB.vecpak_encode(validator_pks)},
+          {"bic:epoch:diff_bits", "8"},
+          {"bic:epoch:segment_vr_hash", Blake3.hash(vr)},
+        ] ++ Enum.flat_map(Application.fetch_env!(:ama, :keys), fn(key)->
+          [
+            {"account:#{key.pk}:balance:AMA", "10300300123456789"},
+            {"account:#{key.pk}:attribute:pop", key.pop},
+          ]
+        end)
+
+        Enum.each(rows, fn({k, v})->
+          RocksDB.put(k, v, %{rtx: rtx, cf: cf.contractstate})
         end)
         rtx = RocksDB.transaction_commit(rtx)
+
+        %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+        RDB.hbsmt_seed_contractstate(db, rows)
       end
     end
 end
