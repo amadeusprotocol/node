@@ -51,35 +51,6 @@ defmodule SpecialMeetingGen do
       start_slash_tx_motion(mpk, state)
     end
   end
-  defp start_slash_tx_motion(mpk, state) do
-    slash_trainer = %{}
-
-    height = DB.Chain.height()
-    epoch = DB.Chain.epoch()
-    validators = DB.Chain.validators_for_height(height + 1)
-    my_validators = Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
-
-    aggsig = BLS12AggSig.new_padded(length(validators))
-    aggsig = Enum.reduce(my_validators, aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
-      signature = BlsEx.sign!(seed, <<"slash_trainer", epoch::32-little, mpk::binary>>, BLS12AggSig.dst_motion())
-      BLS12AggSig.add_padded(aggsig, validators, pk, signature)
-    end)
-
-    state = put_in(state, [:slash_trainer], slash_trainer)
-    state = put_in(state, [:slash_trainer, :type], :tx)
-    state = put_in(state, [:slash_trainer, :tx], %{})
-    state = put_in(state, [:slash_trainer, :tx, :tx], nil)
-    state = put_in(state, [:slash_trainer, :tx, :aggsig], aggsig)
-    state = put_in(state, [:slash_trainer, :mpk], mpk)
-    state = put_in(state, [:slash_trainer, :state], :gather_tx_sigs)
-    state = put_in(state, [:slash_trainer, :attempts], 0)
-    state = put_in(state, [:slash_trainer, :height], height)
-    state = put_in(state, [:slash_trainer, :epoch], epoch)
-    state = put_in(state, [:slash_trainer, :validators], validators)
-    state = put_in(state, [:slash_trainer, :my_validators], my_validators)
-    {:noreply, state}
-  end
-
   def handle_info({:try_slash_trainer_entry, _mpk}, state = %{slash_trainer: _}) do
     {:noreply, state}
   end
@@ -91,38 +62,6 @@ defmodule SpecialMeetingGen do
       start_slash_entry_motion(mpk, state)
     end
   end
-  defp start_slash_entry_motion(mpk, state) do
-    slash_trainer = %{}
-
-    height = DB.Chain.height()
-    epoch = DB.Chain.epoch()
-    validators = DB.Chain.validators_for_height(height + 1)
-    my_validators = Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
-
-    aggsig = BLS12AggSig.new_padded(length(validators))
-    aggsig = Enum.reduce(my_validators, aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
-      signature = BlsEx.sign!(seed, <<"slash_trainer", epoch::32-little, mpk::binary>>, BLS12AggSig.dst_motion())
-      BLS12AggSig.add_padded(aggsig, validators, pk, signature)
-    end)
-
-    state = put_in(state, [:slash_trainer], slash_trainer)
-    state = put_in(state, [:slash_trainer, :type], :entry)
-    state = put_in(state, [:slash_trainer, :tx], %{})
-    state = put_in(state, [:slash_trainer, :tx, :tx], nil)
-    state = put_in(state, [:slash_trainer, :tx, :aggsig], aggsig)
-    state = put_in(state, [:slash_trainer, :entry], %{})
-    state = put_in(state, [:slash_trainer, :entry, :entry], nil)
-    state = put_in(state, [:slash_trainer, :entry, :aggsig], BLS12AggSig.new_padded(length(validators)))
-    state = put_in(state, [:slash_trainer, :mpk], mpk)
-    state = put_in(state, [:slash_trainer, :state], :gather_tx_sigs)
-    state = put_in(state, [:slash_trainer, :attempts], 0)
-    state = put_in(state, [:slash_trainer, :height], height)
-    state = put_in(state, [:slash_trainer, :epoch], epoch)
-    state = put_in(state, [:slash_trainer, :validators], validators)
-    state = put_in(state, [:slash_trainer, :my_validators], my_validators)
-    {:noreply, state}
-  end
-
   def handle_info({:add_slash_trainer_tx_reply, pk, signature, mpk, epoch}, state = %{slash_trainer: _}) do
     st = state.slash_trainer
     #a signature from another motion (different mpk/epoch) signs a different
@@ -153,6 +92,67 @@ defmodule SpecialMeetingGen do
 
   def handle_info(msg, state) do
     IO.inspect {:unknown_special_meeting_msg, msg}
+    {:noreply, state}
+  end
+
+  defp start_slash_tx_motion(mpk, state) do
+    slash_trainer = %{}
+
+    height = DB.Chain.height()
+    epoch = DB.Chain.epoch()
+    validators = DB.Chain.validators_for_height(height + 1)
+    my_validators = Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
+
+    aggsig = BLS12AggSig.new_padded(length(validators))
+    aggsig = Enum.reduce(my_validators, aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
+      signature = BlsEx.sign!(seed, <<"slash_trainer", epoch::32-little, mpk::binary>>, BLS12AggSig.dst_motion())
+      BLS12AggSig.add_padded(aggsig, validators, pk, signature)
+    end)
+
+    state = put_in(state, [:slash_trainer], slash_trainer)
+    state = put_in(state, [:slash_trainer, :type], :tx)
+    state = put_in(state, [:slash_trainer, :tx], %{})
+    state = put_in(state, [:slash_trainer, :tx, :tx], nil)
+    state = put_in(state, [:slash_trainer, :tx, :aggsig], aggsig)
+    state = put_in(state, [:slash_trainer, :mpk], mpk)
+    state = put_in(state, [:slash_trainer, :state], :gather_tx_sigs)
+    state = put_in(state, [:slash_trainer, :attempts], 0)
+    state = put_in(state, [:slash_trainer, :height], height)
+    state = put_in(state, [:slash_trainer, :epoch], epoch)
+    state = put_in(state, [:slash_trainer, :validators], validators)
+    state = put_in(state, [:slash_trainer, :my_validators], my_validators)
+    {:noreply, state}
+  end
+
+  defp start_slash_entry_motion(mpk, state) do
+    slash_trainer = %{}
+
+    height = DB.Chain.height()
+    epoch = DB.Chain.epoch()
+    validators = DB.Chain.validators_for_height(height + 1)
+    my_validators = Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
+
+    aggsig = BLS12AggSig.new_padded(length(validators))
+    aggsig = Enum.reduce(my_validators, aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
+      signature = BlsEx.sign!(seed, <<"slash_trainer", epoch::32-little, mpk::binary>>, BLS12AggSig.dst_motion())
+      BLS12AggSig.add_padded(aggsig, validators, pk, signature)
+    end)
+
+    state = put_in(state, [:slash_trainer], slash_trainer)
+    state = put_in(state, [:slash_trainer, :type], :entry)
+    state = put_in(state, [:slash_trainer, :tx], %{})
+    state = put_in(state, [:slash_trainer, :tx, :tx], nil)
+    state = put_in(state, [:slash_trainer, :tx, :aggsig], aggsig)
+    state = put_in(state, [:slash_trainer, :entry], %{})
+    state = put_in(state, [:slash_trainer, :entry, :entry], nil)
+    state = put_in(state, [:slash_trainer, :entry, :aggsig], BLS12AggSig.new_padded(length(validators)))
+    state = put_in(state, [:slash_trainer, :mpk], mpk)
+    state = put_in(state, [:slash_trainer, :state], :gather_tx_sigs)
+    state = put_in(state, [:slash_trainer, :attempts], 0)
+    state = put_in(state, [:slash_trainer, :height], height)
+    state = put_in(state, [:slash_trainer, :epoch], epoch)
+    state = put_in(state, [:slash_trainer, :validators], validators)
+    state = put_in(state, [:slash_trainer, :my_validators], my_validators)
     {:noreply, state}
   end
 
