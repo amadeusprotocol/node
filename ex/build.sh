@@ -17,3 +17,4 @@ podman run -it --rm -v ../.:/root/node --entrypoint bash erlang_builder -c "echo
     && mix release \
     && cp _build/prod/rel/bakeware/ama amadeusd"
 sha256sum amadeusd
+./sign_release.sh

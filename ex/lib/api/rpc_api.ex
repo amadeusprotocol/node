@@ -7,7 +7,7 @@ defmodule RPC.API do
           {:verify, :verify_peer},
           {:depth, 99},
           {:cacerts, :certifi.cacerts()},
-          {:partial_chain, &Photon.GenTCP.partial_chain/1},
+          {:partial_chain, &Photon.SSLPin.partial_chain/1},
           {:customize_hostname_check, [{:match_fun, :public_key.pkix_verify_hostname_match_fun(:https)}]}
         ]}
       _ ->
