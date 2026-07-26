@@ -83,7 +83,7 @@ defmodule NodeGen do
   def handle_info(msg, state) do
     #a single testnet node has no peers, so all P2P ticks NOOP. a replica cluster
     #testnet DOES need pings/handshakes/gossip, so let the normal handlers run.
-    testnet_solo = Application.fetch_env!(:ama, :testnet) != nil and is_nil(Application.fetch_env!(:ama, :replicas))
+    testnet_solo = !!Application.fetch_env!(:ama, :testnet) and is_nil(Application.fetch_env!(:ama, :replicas))
     state = case msg do
       #NOOP for solo testnet
       _ when testnet_solo -> state

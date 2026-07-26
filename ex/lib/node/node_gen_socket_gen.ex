@@ -10,7 +10,7 @@ defmodule NodeGenSocketGen do
   def init([ip_tuple, port, idx]) do
     #testnet historically ran as a single node with no P2P (lsocket = nil). a
     #replica cluster needs real UDP between nodes, so bind when REPLICAS is set.
-    skip_socket = Application.fetch_env!(:ama, :testnet) and is_nil(Application.fetch_env!(:ama, :replicas))
+    skip_socket = !!Application.fetch_env!(:ama, :testnet) and is_nil(Application.fetch_env!(:ama, :replicas))
     lsocket = if skip_socket do nil else
       lsocket = listen(port, [{:ifaddr, ip_tuple}])
       {snd, rcv} = get_sys_bufs(lsocket)
@@ -125,7 +125,7 @@ defmodule NodeGenSocketGen do
 
   def handle_info(msg, state) do
     #solo testnet has no peers so incoming P2P is dropped; a replica cluster needs it
-    testnet_solo = Application.fetch_env!(:ama, :testnet) != nil and is_nil(Application.fetch_env!(:ama, :replicas))
+    testnet_solo = !!Application.fetch_env!(:ama, :testnet) and is_nil(Application.fetch_env!(:ama, :replicas))
     case msg do
       #NOOP for solo testnet
       _ when testnet_solo -> state
