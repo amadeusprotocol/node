@@ -97,7 +97,7 @@ defmodule AutoUpdateGen do
   #the highest version we ever accepted (anti-rollback).
   defp maybe_install(bin, sigfile, is_boot) do
     with {:ok, manifest, sig} <- split_bundle(sigfile),
-         :ok <- ReleaseVerify.verify(manifest, sig),
+         :ok <- AutoUpdateReleaseVerify.verify(manifest, sig),
          {:ok, mver, msha} <- parse_manifest(manifest),
          true <- sha256_hex(bin) == msha or {:hash_mismatch, msha, sha256_hex(bin)},
          true <- version_accepted?(mver) or {:rejected_version, mver} do
