@@ -135,19 +135,6 @@ defmodule Ama.MultiServer do
         end
     end
 
-    def moveme(nil) do
-        %{
-        }
-    end
-
-    def build_dashboard(state) do
-        file = Application.app_dir(:ama, "priv/index.html")
-        bin = File.read!(file)
-
-        inject = moveme(nil)
-        String.replace(bin,"{replace:\"me\"}", JSX.encode!(inject))
-    end
-
     def json_fix_floats(data) when is_map(data) do json_fix_floats(JSX.encode!(data)) end
     def json_fix_floats(json_string) do
       Regex.replace(~r/(\d+\.?\d*)e-([0-9]+)/, json_string, fn(_, num, exp) ->
@@ -460,10 +447,6 @@ defmodule Ama.MultiServer do
                 result_math = RDB.freivalds(sol, :crypto.strong_rand_bytes(32))
                 quick_reply(%{state|request: r}, %{valid: result, valid_math: result_math})
               end)
-
-            #r.method == "GET" ->
-            #    bin = build_dashboard(state)
-            #    quick_reply(state, bin)
 
             true ->
                 quick_reply(state, %{error: :not_found}, 404)

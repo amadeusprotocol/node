@@ -4,8 +4,6 @@ defmodule Ama do
   def start(_type, _args) do
     import Supervisor.Spec, warn: false
 
-    #IO.inspect Application.app_dir(:ama, "priv/index.html")
-
     supervisor = Supervisor.start_link([
       {DynamicSupervisor, strategy: :one_for_one, name: Ama.Supervisor, max_seconds: 1, max_restarts: 999_999_999_999}
     ], strategy: :one_for_one)
