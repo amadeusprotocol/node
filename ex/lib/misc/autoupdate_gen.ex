@@ -43,7 +43,7 @@ defmodule AutoUpdateGen do
   end
 
   defp check_for_update(is_boot) do
-    with {:ok, body} <- http_get("https://api.github.com/repos/amadeus-robot/node/releases/latest", @api_timeout),
+    with {:ok, body} <- http_get("https://api.github.com/repos/amadeusprotocol/node/releases/latest", @api_timeout),
          {:ok, json} <- decode_json(body) do
       #cheap gate on the (untrusted) tag; the authoritative check is the SIGNED manifest
       if version_lt?(Application.fetch_env!(:ama, :version), to_string(json[:tag_name])) do
