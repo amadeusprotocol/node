@@ -44,7 +44,7 @@ defmodule RDB do
   def transaction_delete_cf(_tx, _cf, _key), do: :erlang.nif_error(:nif_not_loaded)
   def transaction_scan_cf(_tx, _cf_or_nil, _prefix, _cursor, _direction, _skip_cursor, _offset, _limit, _max_bytes), do: :erlang.nif_error(:nif_not_loaded)
 
-  def apply_entry(_db, _entry, _pk, _sk, _testnet, _testnet_peddlebike), do: :erlang.nif_error(:nif_not_loaded)
+  def apply_entry(_db, _entry, _pk, _sk, _testnet), do: :erlang.nif_error(:nif_not_loaded)
   def contract_view(_db, _entry, _view_pk, _contract, _function, _args, _testnet), do: :erlang.nif_error(:nif_not_loaded)
   def contract_validate(_db, _entry, _wasmbytes, _testnet), do: :erlang.nif_error(:nif_not_loaded)
 

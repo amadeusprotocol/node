@@ -726,7 +726,6 @@ fn apply_entry<'a>(
     pk: Binary,
     sk: Binary,
     testnet: bool,
-    testnet_peddlebikes: Vec<Binary>,
 ) -> Result<Term<'a>, Error> {
     let __res: std::thread::Result<Result<Term<'a>, Error>> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let entry = crate::model::entry::from_bytes(entry_vecpak.as_slice()).map_err(|_| Error::BadArg)?;
@@ -742,7 +741,6 @@ fn apply_entry<'a>(
             pk.as_slice(),
             sk.as_slice(),
             testnet,
-            testnet_peddlebikes.iter().map(|bin| bin.as_slice().to_vec()).collect(),
         );
 
         let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(txn) };

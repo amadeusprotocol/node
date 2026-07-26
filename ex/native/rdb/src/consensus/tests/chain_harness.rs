@@ -133,7 +133,6 @@ impl Chain {
             &[0u8; 32],
             &[0u8; 32],
             true,
-            Vec::new(),
         );
         env.caller_env.account_origin = signer.to_vec();
         env.caller_env.account_caller = signer.to_vec();

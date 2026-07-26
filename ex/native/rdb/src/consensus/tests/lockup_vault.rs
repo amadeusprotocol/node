@@ -1380,3 +1380,66 @@ fn matured_vault_auto_closes_to_owner_at_boundary() {
     assert!(!vault_exists(&chain, &w.pk, 1));
     assert_eq!(chain.balance(&w.pk), to_flat(5000));
 }
+
+//EntryGenesis.generate_testnet writes each seed key a 1M-AMA vault with the
+//validator set DIRECTLY (not validator_pending), so the keys are live validators
+//from genesis with no 2-epoch promotion delay. And since testnet no longer seeds
+//peddlebikes, they must persist across epoch boundaries purely on vault stake.
+#[test]
+fn testnet_genesis_vault_backs_validator_without_promotion() {
+    let mut chain = Chain::new();
+    let v = new_wallet();
+    let min = crate::consensus::bic::lockup_vault::VALIDATOR_MIN_STAKE;
+
+    //exactly the bytes generate_testnet writes for each key (map key order is
+    //irrelevant — both the elixir and rust encoders sort proplist keys)
+    let vault = vp_map(vec![
+        (b"type", Term::Binary(b"og".to_vec())),
+        (b"amount", Term::VarInt(min)),
+        (b"accrued", Term::VarInt(0)),
+        (b"rate_bps", Term::VarInt(0)),
+        (b"created_epoch", Term::VarInt(0)),
+        (b"mature_epoch", Term::VarInt(0)),
+        (b"payout_address", Term::Nil()),
+        (b"validator", Term::Binary(v.pk.to_vec())),
+        (b"validator_pending", Term::Nil()),
+        (b"validator_pending_epoch", Term::Nil()),
+        (b"unlock_start_epoch", Term::Nil()),
+        (b"unlock_at_epoch", Term::Nil()),
+    ]);
+    chain.put(&vault_key(&v.pk, 0), &vault);
+
+    //(1) decodes via Vault::from_term with the validator live, not queued
+    let decoded = get_vault(&chain, &v.pk, 0);
+    assert_eq!(decoded.validator.as_deref(), Some(v.pk.as_slice()));
+    assert!(decoded.validator_pending.is_none());
+    assert_eq!(decoded.amount, min);
+
+    //(2) counted toward its validator immediately — no promotion tick — which is
+    //exactly the stake build_and_shuffle_new_validators requires (>= MIN_STAKE)
+    let stakes = chain.with_env(&[0u8; 48], |env| {
+        crate::consensus::bic::lockup_vault::close_matured_and_sum_stakes(env, chain.epoch() + 1)
+    });
+    assert_eq!(stakes.get(v.pk.as_slice()).copied(), Some(min));
+
+    //(3) at the real epoch boundary the key enters the new set on stake alone — no
+    //peddlebike seed on testnet (peddlebikes_for_epoch returns empty when testnet)
+    chain.put(
+        &bcat(&[b"bic:epoch:validators:height:", format!("{:012}", 0).as_bytes()]),
+        &crate::consensus::bic::list_of_binaries_to_vecpak(vec![v.pk.to_vec()]),
+    );
+    chain.put(b"bic:epoch:diff_bits", b"24");
+    chain.advance_blocks(99_999);
+    chain.with_env(&[0u8; 48], |env| crate::consensus::bic::epoch::next(env));
+
+    let set_bytes = chain
+        .get(&bcat(&[b"bic:epoch:validators:height:", format!("{:012}", 100_000).as_bytes()]))
+        .expect("post-boundary validator set missing");
+    let vecpak::Term::List(items) = vecpak::decode(&set_bytes).expect("set decode") else {
+        panic!("validator set is not a vecpak list")
+    };
+    assert!(
+        items.iter().any(|t| matches!(t, vecpak::Term::Binary(b) if b.as_slice() == v.pk.as_slice())),
+        "vault-backed key must be in the post-boundary validator set with no peddlebike seed"
+    );
+}

@@ -389,7 +389,7 @@ defmodule FabricGen do
       entry = next_entry
       {rtx, m, m_rev, receipts, root_receipts, root_contractstate} = RDB.apply_entry(db, RDB.vecpak_encode(entry),
         Application.fetch_env!(:ama, :trainer_pk), Application.fetch_env!(:ama, :trainer_sk),
-        !!Application.fetch_env!(:ama, :testnet), Map.keys(Application.fetch_env!(:ama, :keys_by_pk))
+        !!Application.fetch_env!(:ama, :testnet)
       )
 
       took_contract_exec = :os.system_time(1000) - start_contract_exec

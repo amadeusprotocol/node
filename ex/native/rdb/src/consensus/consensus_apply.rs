@@ -101,7 +101,6 @@ pub struct ApplyEnv<'db> {
     pub logs_size: usize,
     pub preverified_sol_hashes: HashSet<[u8; 32]>,
     pub testnet: bool,
-    pub testnet_peddlebikes: Vec<Vec<u8>>,
     pub readonly: bool,
     pub call_depth: u32,
 }
@@ -134,7 +133,6 @@ pub fn make_apply_env<'db>(
     entry_vr_b3: &[u8; 32],
     entry_dr: &[u8; 32],
     testnet: bool,
-    testnet_peddlebikes: Vec<Vec<u8>>,
 ) -> ApplyEnv<'db> {
     ApplyEnv {
         caller_env: make_caller_env(entry_signer, entry_prev_hash, entry_slot, entry_prev_slot, entry_height, entry_epoch, entry_vr, entry_vr_b3, entry_dr),
@@ -158,7 +156,6 @@ pub fn make_apply_env<'db>(
         logs_size: 0,
         preverified_sol_hashes: HashSet::new(),
         testnet: testnet,
-        testnet_peddlebikes: testnet_peddlebikes,
         readonly: false,
         call_depth: 0,
     }
@@ -242,7 +239,6 @@ pub fn apply_entry<'db, 'a>(
     pk: &[u8],
     sk: &[u8],
     testnet: bool,
-    testnet_peddlebikes: Vec<Vec<u8>>,
 ) -> (Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32]) {
 
     let cf_h = db.cf_handle("contractstate").unwrap();
@@ -274,7 +270,6 @@ pub fn apply_entry<'db, 'a>(
         entry_vr_b3,
         entry_dr,
         testnet,
-        testnet_peddlebikes,
     );
 
 
@@ -456,7 +451,6 @@ pub fn contract_view<'db, 'a>(
         entry_vr_b3,
         entry_dr,
         testnet,
-        Vec::new(),
     );
     applyenv.readonly = true;
 
@@ -533,7 +527,6 @@ pub fn contract_validate<'db, 'a>(
         entry_vr_b3,
         entry_dr,
         testnet,
-        Vec::new(),
     );
     applyenv.readonly = true;
 

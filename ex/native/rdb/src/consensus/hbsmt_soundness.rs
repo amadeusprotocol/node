@@ -1371,7 +1371,6 @@ impl TestEnv {
             logs_size: 0,
             preverified_sol_hashes: HashSet::new(),
             testnet: false,
-            testnet_peddlebikes: Vec::new(),
             readonly: false,
             call_depth: 0,
         }

@@ -21,6 +21,25 @@ pub const PARTICIPATION_FLOOR_EPOCH: u64 = 758;
 
 pub const PARTICIPATION_VAULT_EPOCH: u64 = 1150;
 
+//peddlebike67 are the bootstrap validators. from this epoch on they are no longer
+//auto-seeded into the validator set (nor specially excluded from solver slots/
+//emissions) — the set is carried by vault-backed validators + top solvers. gated,
+//not removed: epochs before this still applied peddlebikes, so historical replay
+//must reproduce that.
+pub const PEDDLEBIKE_END_EPOCH: u64 = 771;
+
+//the peddlebike bootstrap set active for a given epoch: empty once retired. testnet
+//uses its own configured set.
+fn peddlebikes_for_epoch(env: &ApplyEnv, epoch: u64) -> Vec<Vec<u8>> {
+    //testnet is vault-backed from genesis (see EntryGenesis.generate_testnet), so it
+    //never seeds peddlebikes; mainnet seeds PEDDLEBIKE67 until they retire at 770.
+    if env.testnet || epoch >= PEDDLEBIKE_END_EPOCH {
+        Vec::new()
+    } else {
+        PEDDLEBIKE67.iter().map(|pk| pk.to_vec()).collect()
+    }
+}
+
 //per-epoch emission not disbursed carries over in these pools: the vault pool feeds
 //back into future vault APY budgets (and funds the network tax); the solver pool
 //just accumulates for now (disposition TBD).
@@ -592,11 +611,8 @@ pub fn next(env: &mut ApplyEnv) {
 
     consensus::bic::lockup_vault::promote_pending_validators(env, epoch_next);
 
-    let peddlebike67_map: HashSet<Vec<u8>> = if env.testnet {
-        env.testnet_peddlebikes.iter().map(|pk| pk.to_vec()).collect()
-    } else {
-        PEDDLEBIKE67.iter().map(|pk| pk.to_vec()).collect()
-    };
+    //solver-emission eligibility is for epoch_cur's payout, so gate on epoch_cur
+    let peddlebike67_map: HashSet<Vec<u8>> = peddlebikes_for_epoch(env, epoch_cur).into_iter().collect();
 
     let trainers = kv_get_trainers(env, env.caller_env.entry_height.saturating_add(1));
     let trainers_map: HashSet<Vec<u8>> = trainers.into_iter().collect();
@@ -744,13 +760,13 @@ const SOLVER_VALIDATOR_SLOTS: usize = 33;
 //validator set: peddlebike67 + every >=1m-stake vault validator + top 33 solvers,
 //deduped, no fixed size cap.
 fn build_and_shuffle_new_validators(env: &ApplyEnv, leaders: &Vec<(Vec<u8>, i128)>, vault_stakes: &BTreeMap<Vec<u8>, i128>) -> Vec<Vec<u8>> {
-    let PEDDLEBIKE_LOCAL: Vec<[u8; 48]> = if env.testnet {
-        env.testnet_peddlebikes.iter().map(|pk| pk.as_slice().try_into().expect("Testnet key was not 48 bytes long")).collect()
-    } else {
-        PEDDLEBIKE67.to_vec()
-    };
+    //the set built here is for epoch_next, so gate the bootstrap peddlebikes on it.
+    //once retired the list is empty: no seeding, and the solver-slot filter below
+    //stops excluding those addresses (they become ordinary solver candidates).
+    let epoch_next = env.caller_env.entry_epoch + 1;
+    let PEDDLEBIKE_LOCAL: Vec<Vec<u8>> = peddlebikes_for_epoch(env, epoch_next);
 
-    let mut new_validators: Vec<Vec<u8>> = PEDDLEBIKE_LOCAL.iter().map(|p| p.to_vec()).collect();
+    let mut new_validators: Vec<Vec<u8>> = PEDDLEBIKE_LOCAL.clone();
 
     //vault-backed validators with at least VALIDATOR_MIN_STAKE (1m AMA amount+accrued)
     for (validator, stake) in vault_stakes {

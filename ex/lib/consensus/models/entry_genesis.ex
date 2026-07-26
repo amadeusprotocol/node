@@ -186,14 +186,30 @@ defmodule EntryGenesis do
 
         validator_pks = Application.fetch_env!(:ama, :keys) |> Enum.map(& &1.pk)
 
+        vault_flat = 1_000_000 * 1_000_000_000
         rows = [
           {"bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}", RDB.vecpak_encode(validator_pks)},
           {"bic:epoch:diff_bits", "8"},
           {"bic:epoch:segment_vr_hash", Blake3.hash(vr)},
         ] ++ Enum.flat_map(Application.fetch_env!(:ama, :keys), fn(key)->
+          vault = RDB.vecpak_encode(%{
+            "type" => "og",
+            "amount" => vault_flat,
+            "accrued" => 0,
+            "rate_bps" => 0,
+            "created_epoch" => 0,
+            "mature_epoch" => 0,
+            "payout_address" => nil,
+            "validator" => key.pk,
+            "validator_pending" => nil,
+            "validator_pending_epoch" => nil,
+            "unlock_start_epoch" => nil,
+            "unlock_at_epoch" => nil,
+          })
           [
             {"account:#{key.pk}:balance:AMA", "10300300123456789"},
             {"account:#{key.pk}:attribute:pop", key.pop},
+            {"bic:lockup_vault:vault:#{key.pk}:0", vault},
           ]
         end)
 
