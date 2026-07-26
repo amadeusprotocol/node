@@ -71,6 +71,14 @@ defmodule ReplicaGen do
     end
   end
 
+  #push a heartbeat right now (out of band) instead of waiting up to @heartbeat_ms
+  def flush_heartbeat() do
+    case :persistent_term.get({ReplicaGen, :config}, nil) do
+      nil -> :ok
+      _ -> GenServer.cast(__MODULE__, :heartbeat_now)
+    end
+  end
+
   @empty_hash :binary.copy(<<0>>, 32)
 
   #slash-entry single-shot lock, durable in ReplicaKV (sync). read at ETS speed for
@@ -141,7 +149,7 @@ defmodule ReplicaGen do
       :erlang.send_after(3_000, self(), :restore)
       {:ok, %{enabled: true, my_id: my_id, my_pk: my_pk, majority: div(length(replicas), 2) + 1, psk: psk,
               peers: peers, peer_ips: peer_ips, meshed: MapSet.new(), socket: socket,
-              ack_target: nil, last_ack_change: nil, last_seqs: %{}}}
+              ack_target: nil, last_ack_change: nil, last_seq: 0, last_seqs: %{}}}
     end
   end
 
@@ -172,6 +180,12 @@ defmodule ReplicaGen do
 
   def handle_info(_msg, state) do {:noreply, state} end
 
+  def handle_cast(:heartbeat_now, state = %{enabled: true}) do
+    state = try do broadcast_heartbeat(state) catch _,_ -> state end
+    {:noreply, state}
+  end
+  def handle_cast(_msg, state) do {:noreply, state} end
+
   defp tick(state) do
     now = :erlang.monotonic_time(:millisecond)
 
@@ -185,16 +199,27 @@ defmodule ReplicaGen do
     desired = Enum.min([state.my_id | visible_ids])
     state = update_ack_target(state, desired, now)
 
+    broadcast_heartbeat(state)
+  end
+
+  #build and gossip one heartbeat: our ack target + HWM + slash lock. carry my pk
+  #so peers can mesh me without assuming any particular seed-pack ordering.
+  #seq must strictly increase so peers dedup/order correctly (they drop
+  #seq <= last_seq). ms wall clock + the bump past last_seq: the bump keeps two
+  #same-ms sends (tick + flush) distinct and guards a backward wall-clock/NTP step
+  #within a run; wall-clock-seeded so it stays ahead of what peers saw before a
+  #restart (erlang monotonic time resets per VM and would not). stay in ms — a
+  #finer unit would poison peers' volatile last_seqs against any rollback build.
+  defp broadcast_heartbeat(state) do
+    seq = max(:os.system_time(:millisecond), state.last_seq + 1)
     my_h = my_signed_height()
     {sh, shash} = my_slash_lock()
-    #carry my pk so peers can mesh me into the gossip layer without assuming any
-    #particular seed-pack ordering
-    payload = :erlang.term_to_binary({state.my_id, state.my_pk, state.ack_target, my_h, sh, shash, :os.system_time(:millisecond)})
+    payload = :erlang.term_to_binary({state.my_id, state.my_pk, state.ack_target, my_h, sh, shash, seq})
     packet = encrypt(payload, state.psk)
     Enum.each(state.peers, fn(p)->
       :gen_udp.send(state.socket, p.ip, p.port, packet)
     end)
-    state
+    %{state | last_seq: seq}
   end
 
   #never endorse two different leaders within one freshness window: any target

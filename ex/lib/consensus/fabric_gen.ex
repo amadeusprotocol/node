@@ -322,6 +322,7 @@ defmodule FabricGen do
     next_entry = produce_entry(seed, cur_entry)
     #record before anything leaves the box so replicas never re-sign this height
     ReplicaGen.note_signed_height(next_entry.header.height)
+    ReplicaGen.flush_heartbeat()
     DB.Entry.insert(next_entry)
 
     msg = NodeProto.event_entry(Entry.pack_for_net(next_entry))
