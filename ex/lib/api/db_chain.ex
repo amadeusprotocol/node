@@ -152,7 +152,9 @@ defmodule DB.Chain do
   def rewind(target_hash) do
     %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
     rtx = RocksDB.transaction(db)
-    in_chain = DB.Entry.in_chain(target_hash, %{rtx: rtx})
+    rooted_hash = DB.Chain.rooted_tip(%{rtx: rtx})
+    #STOP at target hash (dont rewind the target_hash)
+    in_chain = DB.Entry.in_chain(target_hash, %{rtx: rtx}) || target_hash == rooted_hash
     tip_entry = DB.Chain.tip_entry(%{rtx: rtx})
 
     target_hash_entry = DB.Entry.by_hash(target_hash, %{rtx: rtx})
