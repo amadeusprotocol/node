@@ -163,7 +163,10 @@ defmodule FabricSyncAttestGen do
     end
 
     isInEpoch = isInEpoch()
-    epoch_highest = div(new_highest_bft, 100_000)
+    #max validator rooted (incl. our own): epoch membership must not be dragged
+    #backwards by a stuck/forked minority of peers the way the 67% floor (bft)
+    #can, e.g. old-version peers wedged at the previous epoch boundary
+    epoch_highest = div(new_highest_rooted_abs, 100_000)
     epoch_mine = div(temporal_height, 100_000)
     cond do
       epoch_highest == epoch_mine and !isInEpoch -> :persistent_term.get({Net, :isInEpoch}) |> :atomics.put(1, 1)

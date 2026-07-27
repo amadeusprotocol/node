@@ -342,11 +342,12 @@ defmodule NodeANR do
 
   def set_tips(pk, rooted, temporal, pruned_below \\ 0) do
     ts_m = :os.system_time(1000)
-    if !rooted do
-      :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {6, temporal}, {7, pruned_below}], {pk, ts_m, "", 0, %{}, %{}, 0})
-    else
-      :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {5, rooted}, {6, temporal}, {7, pruned_below}], {pk, ts_m, "", 0, %{}, %{}, 0})
-    end
+    #nil rooted/temporal means "no valid tip of that kind in this update":
+    #keep whatever was stored before instead of clobbering it
+    updates = [{2, ts_m}, {7, pruned_below}]
+    updates = if rooted do updates ++ [{5, rooted}] else updates end
+    updates = if temporal do updates ++ [{6, temporal}] else updates end
+    :ets.update_element(NODEANRHOT, pk, updates, {pk, ts_m, "", 0, %{}, %{}, 0})
   end
 
   def get_last_message(pk) do :ets.lookup_element(NODEANRHOT, pk, 2, 0) end

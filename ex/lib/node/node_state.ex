@@ -80,8 +80,24 @@ defmodule NodeState do
     %{error: err_r, hash: hash_r} = Entry.validate_signature(rooted)
     rooted = Map.merge(rooted, %{hash: hash_r, sig_error: err_r})
 
+    #highest_validator_height trusts these heights blindly: a tip only counts if
+    #it verifies AND a validator signed it, else a non-validator advertising a
+    #self-signed head pushes everyone to :off_by_1 and stalls production.
+    #checked per tip: a peer stuck on an invalid temporal (old version) still
+    #contributes its valid rooted for BFT height and sync targeting.
+    #empty validator set (pre-bundle bootstrap) skips the signer check.
+    tip_ok = fn(tip, err)->
+      is_map(tip) and Map.has_key?(tip, :header) and err == :ok and
+        (validators = DB.Chain.validators_for_height(tip.header[:height] || 0) || []
+         validators == [] or tip.header[:signer] in validators)
+    end
+    rooted = if tip_ok.(rooted, err_r) do rooted else nil end
+    temporal = if tip_ok.(temporal, err_t) do temporal else nil end
+
     pruned_below = term[:pruned_below_height] || 0
-    NodeANR.set_tips(istate.peer.pk, rooted, temporal, pruned_below)
+    if rooted || temporal do
+      NodeANR.set_tips(istate.peer.pk, rooted, temporal, pruned_below)
+    end
   end
 
   def handle(:event_tx, istate, term) do

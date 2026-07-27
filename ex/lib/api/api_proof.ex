@@ -30,7 +30,7 @@ defmodule API.Proof do
 
   def contractstate_namespace(key) do
     case key do
-      <<"account:", pk::binary-48, _::binary>> -> <<"account:", pk>>
+      <<"account:", pk::binary-48, _::binary>> -> <<"account:", pk::binary>>
       <<"coin:", _::binary>> -> "coin"
       <<"bic:", _::binary>> -> "bic"
       _ -> nil

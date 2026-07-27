@@ -212,7 +212,7 @@ defmodule SpecialMeetingGen do
   def carrier_sk(st) do
     case st.my_validators do
       [%{seed: seed} | _] -> seed
-      [] -> Application.fetch_env!(:ama, :trainer_sk)
+      [] -> nil
     end
   end
 
@@ -223,12 +223,13 @@ defmodule SpecialMeetingGen do
   def build_slash_entry(st) do
     sk = carrier_sk(st)
 
-    true = FabricSyncAttestGen.isQuorumSynced()
-    cur_entry = DB.Chain.rooted_tip_entry()
+    if sk do
+      true = FabricSyncAttestGen.isQuorumSynced()
+      cur_entry = DB.Chain.tip_entry()
 
-    txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)]
-    next_entry = Entry.build_next(sk, cur_entry, txs)
-    next_entry = Entry.sign(sk, next_entry)
+      txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)]
+      next_entry = Entry.build_next(sk, cur_entry, txs)
+      next_entry = Entry.sign(sk, next_entry)
 
     #same single-shot rule as attesters: we sign our own entry, so it goes
     #through the same persisted height lock, quorum-replicated before signing
@@ -243,6 +244,9 @@ defmodule SpecialMeetingGen do
         end)
 
         {next_entry, aggsig}
+    end
+    else
+      nil
     end
   end
 
