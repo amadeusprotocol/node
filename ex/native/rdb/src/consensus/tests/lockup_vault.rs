@@ -1383,8 +1383,8 @@ fn matured_vault_auto_closes_to_owner_at_boundary() {
 
 //EntryGenesis.generate_testnet writes each seed key a 1M-AMA vault with the
 //validator set DIRECTLY (not validator_pending), so the keys are live validators
-//from genesis with no 2-epoch promotion delay. And since testnet no longer seeds
-//peddlebikes, they must persist across epoch boundaries purely on vault stake.
+//from genesis with no 2-epoch promotion delay. They must persist across epoch
+//boundaries purely on vault stake.
 #[test]
 fn testnet_genesis_vault_backs_validator_without_promotion() {
     let mut chain = Chain::new();
@@ -1422,8 +1422,7 @@ fn testnet_genesis_vault_backs_validator_without_promotion() {
     });
     assert_eq!(stakes.get(v.pk.as_slice()).copied(), Some(min));
 
-    //(3) at the real epoch boundary the key enters the new set on stake alone — no
-    //peddlebike seed on testnet (peddlebikes_for_epoch returns empty when testnet)
+    //(3) at the real epoch boundary the key enters the new set on stake alone
     chain.put(
         &bcat(&[b"bic:epoch:validators:height:", format!("{:012}", 0).as_bytes()]),
         &crate::consensus::bic::list_of_binaries_to_vecpak(vec![v.pk.to_vec()]),
@@ -1440,6 +1439,6 @@ fn testnet_genesis_vault_backs_validator_without_promotion() {
     };
     assert!(
         items.iter().any(|t| matches!(t, vecpak::Term::Binary(b) if b.as_slice() == v.pk.as_slice())),
-        "vault-backed key must be in the post-boundary validator set with no peddlebike seed"
+        "vault-backed key must be in the post-boundary validator set on stake alone"
     );
 }

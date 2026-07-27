@@ -1080,7 +1080,7 @@ fn contract_view<'a>(env: Env<'a>, db: ResourceArc<DbResource>, cur_entry_trimme
     let (txn, muts, muts_rev, result_log, root_receipts, root_contractstate) =
         consensus::consensus_apply::apply_entry(&db.db, pk.as_slice(), sk.as_slice(), &entry_signer, &entry_prev_hash,
             entry_slot, entry_prev_slot, entry_height, entry_epoch, &entry_vr, &entry_vr_b3, &entry_dr, txus, txn,
-            testnet, testnet_peddlebikes.iter().map(|bin| bin.as_slice().to_vec()).collect()
+            testnet
         );
 
     let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(txn) };
