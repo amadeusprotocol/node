@@ -1,11 +1,14 @@
 defmodule TXPool do
     def insert(tx) when is_map(tx) do insert([tx]) end
     def insert([]) do :ok end
-    def insert(txus) do
-        txus = Enum.map(txus, fn(txu)->
-            {{txu.tx.nonce, txu.hash}, txu}
+    def insert(txus) when is_list(txus) do
+        txus = Enum.flat_map(txus, fn(txu)->
+            case TX.validate(txu) do
+              %{error: :ok, txu: txu} -> [{{txu.tx.nonce, txu.hash}, txu}]
+              _ -> []
+            end
         end)
-        :ets.insert(TXPool, txus)
+        if txus != [], do: :ets.insert(TXPool, txus)
     end
 
     def delete_packed(txu) when is_map(txu) do delete_packed([txu]) end
@@ -92,59 +95,29 @@ defmodule TXPool do
       end
     end
 
-    #TODO: fix this, we dont need to validate VS chain here
-    def event_tx_validate(txu) when is_map(txu) do event_tx_validate([txu]) end
-    def event_tx_validate(txus) when is_list(txus) do
-      chain_epoch = DB.Chain.epoch()
-      chain_height = DB.Chain.height()
-      segment_vr_hash = DB.Chain.segment_vr_hash()
-      diff_bits = DB.Chain.diff_bits()
-
-      {good, _} = Enum.reduce(txus, {[], %{}}, fn(txu, {acc, batch_state})->
-        case TX.validate(txu) do
-          %{error: :ok, txu: txu} ->
-            case TXPool.validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, diff_bits: diff_bits, batch_state: batch_state}) do
-              %{error: :ok, batch_state: batch_state} -> {acc ++ [txu], batch_state}
-              %{error: error} -> {acc, batch_state}
-            end
-          _ -> {acc, batch_state}
-        end
-      end)
-
-      good
-    end
-
     def grab_next_valid(chain_height, amt \\ 1) do
         try do
             chain_epoch = div(chain_height, 100_000)
 
             segment_vr_hash = DB.Chain.segment_vr_hash()
-            {acc, state} = :ets.foldl(fn({key, txu}, {acc, state_old})->
-                try do
-                  #TODO: remove this redundant validate
-                  case TX.validate(txu) do
-                    %{error: :ok, txu: txu} ->
-                      case validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, batch_state: state_old}) do
-                        %{error: :ok, batch_state: batch_state} ->
-                          acc = acc ++ [txu]
-                          if length(acc) == amt do
-                              throw {:choose, acc}
-                          end
-                          {acc, batch_state}
-                        #delete stale
-                        %{key: key} ->
-                          :ets.delete(TXPool, key)
-                          {acc, state_old}
-                      end
-                    _ ->
-                      :ets.delete(TXPool, key)
-                      {acc, state_old}
-                  end
-                catch
-                    :throw,{:choose, txs_packed} -> throw {:choose, txs_packed}
+            {acc, _state} = :ets.foldl(fn({key, txu}, {acc, state_old})->
+                case validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, batch_state: state_old}) do
+                  %{error: :ok, batch_state: batch_state} ->
+                    acc = [txu | acc]
+                    if length(acc) == amt do
+                        throw {:choose, Enum.reverse(acc)}
+                    end
+                    {acc, batch_state}
+                  #delete stale
+                  %{key: key} ->
+                    :ets.delete(TXPool, key)
+                    {acc, state_old}
+                  _ ->
+                    :ets.delete(TXPool, key)
+                    {acc, state_old}
                 end
             end, {[], %{}}, TXPool)
-            acc
+            Enum.reverse(acc)
         catch
             :throw,{:choose, txs_packed} -> txs_packed
         end

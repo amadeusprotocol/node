@@ -51,15 +51,6 @@ defmodule API.Epoch do
       |> Enum.sort_by(& Enum.at(&1, 1), :desc)
     end
 
-    def score_without_peddlebike() do
-      pb67 = BIC.Epoch.peddlebike67()
-      %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-      RocksDB.get_prefix("bic:epoch:solutions_count:", %{db: db, cf: cf.contractstate, to_integer: true})
-      |> Enum.reject(fn {k, v} -> k in pb67 end)
-      |> Enum.map(fn {k, v} -> [Base58.encode(k), v] end)
-      |> Enum.sort_by(& Enum.at(&1, 1), :desc)
-    end
-
     def score(pk) do
       pk = if byte_size(pk) != 48, do: Base58.decode(pk), else: pk
 

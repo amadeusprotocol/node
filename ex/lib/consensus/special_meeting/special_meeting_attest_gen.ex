@@ -226,7 +226,7 @@ defmodule SpecialMeetingAttestGen do
     cond do
         DB.Chain.epoch() != epoch -> []
         Entry.validate_next(cur_entry, entry) != %{error: :ok} -> []
-        BIC.Epoch.slash_trainer_verify(malicious_pk, epoch, trainers, mask, signature) != nil -> []
+        slash_trainer_verify(malicious_pk, epoch, trainers, mask, signature) != nil -> []
         !guilty -> []
         my_keys == [] -> []
         !ReplicaGen.can_sign?() -> []
@@ -246,6 +246,21 @@ defmodule SpecialMeetingAttestGen do
 
   defp my_keys_in(validators) do
     Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
+  end
+
+  def slash_trainer_verify(malicious_pk, cur_epoch, trainers, mask, signature) do
+    signers = BLS12AggSig.unmask_trainers(trainers, Util.pad_bitstring_to_bytes(mask), bit_size(mask))
+
+    consensus_pct = length(signers) / length(trainers)
+
+    apk = BlsEx.aggregate_public_keys!(signers)
+    msg = <<"slash_trainer", cur_epoch::32-little, malicious_pk::binary>>
+    validSignature = BlsEx.verify?(apk, signature, msg, BLS12AggSig.dst_motion())
+    cond do
+        consensus_pct < 0.67 -> :invalid_amount_of_signatures
+        !validSignature -> :invalid_signature
+        true -> nil
+    end
   end
 
   #last slash entry we signed, durable in ReplicaKV (sync, fsync'd before any

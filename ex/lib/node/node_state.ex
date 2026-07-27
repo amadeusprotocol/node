@@ -85,8 +85,7 @@ defmodule NodeState do
   end
 
   def handle(:event_tx, istate, term) do
-    good = TXPool.event_tx_validate(term.txus)
-    TXPool.insert(good)
+    TXPool.insert(term.txus)
   end
 
   def handle(:event_entry, istate, term) do
