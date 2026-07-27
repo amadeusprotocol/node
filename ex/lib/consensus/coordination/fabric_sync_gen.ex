@@ -39,14 +39,14 @@ defmodule FabricSyncGen do
     height_network_temp = FabricSyncAttestGen.highestTemporalHeight()
     behind_temp = height_network_temp - temporal_height
     height_network_root = FabricSyncAttestGen.highestRootedHeight()
-    behind_root = height_network_root - rooted_height
+    behind_network_root = height_network_root - rooted_height
     height_network_bft = FabricSyncAttestGen.highestBFTHeight()
     height_network_bft = if height_network_bft == 0 do height_network_root else height_network_bft end
     behind_bft = height_network_bft - temporal_height
 
-    behind_root = temporal_height - rooted_height
+    behind_root_local = temporal_height - rooted_height
 
-    if behind_root > 1000 do
+    if behind_root_local > 1000 do
       entries = Enum.to_list(rooted_height..temporal_height//1)
       IO.puts "Behind Root: Syncing #{length(entries)} entries"
       next_heights = Enum.to_list(entries)
@@ -72,7 +72,7 @@ defmodule FabricSyncGen do
         |> Enum.chunk_every(20)
         |> fetch_chunks(temporal_peers)
 
-      behind_root > 0 ->
+      behind_network_root > 0 ->
         next_heights = (try do  Enum.to_list((rooted_height+1)..height_network_root//1) catch _,_ -> [height_network_root] end)
         |> Enum.take(1000)
         |> Enum.uniq()
