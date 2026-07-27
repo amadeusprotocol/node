@@ -150,6 +150,7 @@ defmodule Entry do
         if !is_binary(eh.root_validator), do: throw(%{error: :root_validator_not_binary})
         if byte_size(eh.root_validator) != 32, do: throw(%{error: :root_validator_not_256_bits})
         validators = DB.Chain.validators_for_height(eh.height)
+        if eh.signer not in validators, do: throw(%{error: :signer_not_in_validator_set})
         validators_last_change_height = DB.Chain.validators_last_change_height(eh.height)
         if eh.root_validator != root_validator(validators, validators_last_change_height), do: throw(%{error: :root_validator_invalid})
 

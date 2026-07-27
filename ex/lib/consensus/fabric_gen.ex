@@ -245,7 +245,7 @@ defmodule FabricGen do
         !!next_entry[:mask] ->
             trainers = DB.Chain.validators_for_height(Entry.height(next_entry))
             score = BLS12AggSig.score(trainers, Util.pad_bitstring_to_bytes(next_entry.mask), bit_size(next_entry.mask))
-            score >= 0.67
+            next_entry.header.signer in trainers and score >= 0.67
 
         true -> false
       end
