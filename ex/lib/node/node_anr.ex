@@ -374,20 +374,21 @@ defmodule NodeANR do
     (:os.system_time(1000) - get_last_message(pk)) < 30_000
   end
 
-  def min_reached_by_pct(_, pct \\ 0.67)
-  def min_reached_by_pct([], pct) do 0 end
-  def min_reached_by_pct(peers, pct) do
+  def reached_by_pct(peers, key, pct \\ 0.67)
+  def reached_by_pct([], _key, _pct) do 0 end
+  def reached_by_pct(peers, key, pct) do
       n = length(peers)
       k = :math.ceil(pct * n) |> trunc()
 
       peers
-      |> Enum.frequencies_by(& &1.height_root)
+      |> Enum.frequencies_by(& Map.get(&1, key))
       |> Enum.sort_by(fn {h, _} -> h end, :desc)
       |> Enum.reduce_while(0, fn {h, cnt}, acc ->
         acc = acc + cnt
         if acc >= k, do: {:halt, h}, else: {:cont, acc}
       end)
   end
+  def min_reached_by_pct(peers, pct \\ 0.67), do: reached_by_pct(peers, :height_root, pct)
 
   def highest_validator_height() do
     {vals, peers} = NodeANR.handshaked_and_online()
@@ -413,7 +414,7 @@ defmodule NodeANR do
     |> Enum.sort_by(& &1.height_temp, :desc)
     |> List.first()
     |> case do nil -> 0; m -> m.height_temp end
-    {max_height_rooted, max_height_temp, min_reached_by_pct(vals)}
+    {max_height_rooted, max_height_temp, min_reached_by_pct(vals), reached_by_pct(vals, :height_temp)}
   end
 
   def peers_w_min_height(height, type \\ :any) do

@@ -290,12 +290,18 @@ defmodule FabricGen do
 
     rooted_tip = DB.Chain.rooted_tip()
 
-    #prevent double-entries due to sync
-    emptyHeight = DB.Entry.by_height(next_height)
-    emptyHeight = emptyHeight == []
+    trainers_next = DB.Chain.validators_for_height(next_height)
+    slotFilled = DB.Entry.by_height(next_height)
+    |> Enum.any?(fn(e)->
+      cond do
+        e.header.signer == next_validator -> true
+        !!e[:mask] -> BLS12AggSig.score(trainers_next, Util.pad_bitstring_to_bytes(e.mask), bit_size(e.mask)) >= 0.67
+        true -> false
+      end
+    end)
 
     cond do
-      !emptyHeight -> nil
+      slotFilled -> nil
 
       !FabricSyncAttestGen.isQuorumSynced() -> nil
 

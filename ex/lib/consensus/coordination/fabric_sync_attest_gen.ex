@@ -134,8 +134,12 @@ defmodule FabricSyncAttestGen do
     rooted = DB.Chain.rooted_tip_entry()
     rooted_height = rooted.header.height
 
-    {height_rooted_abs, height_abs, height_bft} = NodeANR.highest_validator_height()
+    {height_rooted_abs, height_abs, bft_rooted, bft_temp} = NodeANR.highest_validator_height()
 
+    #persistent_term maxes are SYNC TARGETS only (FabricSyncGen fetches toward
+    #them). a single inflated peer height here just causes harmless failed fetch
+    #attempts (take(1000)-bounded, no honest peer serves them) — it can NOT halt
+    #us, because the production/epoch decisions below use the corroborated values.
     old_highest_abs = FabricSyncAttestGen.highestTemporalHeight()
     new_highest_abs = max(temporal_height, height_abs)
     if new_highest_abs != old_highest_abs do
@@ -149,24 +153,30 @@ defmodule FabricSyncAttestGen do
     end
 
     old_highest_bft = highestBFTHeight()
-    new_highest_bft = max(old_highest_bft, height_bft)
+    new_highest_bft = max(old_highest_bft, bft_rooted)
     if new_highest_bft != old_highest_bft do
       :persistent_term.get({Net, :highestBFTHeight}) |> :atomics.put(1, new_highest_bft)
     end
 
+    #DECISION heights: highest reached by >=67% of validator peers, floored by our
+    #own height. this is both byzantine-robust (a single/<1/3 peer cannot inflate
+    #a 67% figure, so it cannot fake "behind" and stall us) and stuck-minority
+    #robust (own-height floor stops a wedged/forked minority dragging us backward).
+    sync_temporal = max(temporal_height, bft_temp)
+
     isS = isSynced()
     cond do
-      new_highest_abs - temporal_height == 0 and isS != :full -> :persistent_term.get({Net, :isSynced}) |> :atomics.put(1, 2)
-      new_highest_abs - temporal_height == 1 and isS != :off_by_1 -> :persistent_term.get({Net, :isSynced}) |> :atomics.put(1, 1)
-      new_highest_abs - temporal_height > 1 and isS -> :persistent_term.get({Net, :isSynced}) |> :atomics.put(1, 0)
+      sync_temporal - temporal_height == 0 and isS != :full -> :persistent_term.get({Net, :isSynced}) |> :atomics.put(1, 2)
+      sync_temporal - temporal_height == 1 and isS != :off_by_1 -> :persistent_term.get({Net, :isSynced}) |> :atomics.put(1, 1)
+      sync_temporal - temporal_height > 1 and isS -> :persistent_term.get({Net, :isSynced}) |> :atomics.put(1, 0)
       true -> nil
     end
 
     isInEpoch = isInEpoch()
-    #max validator rooted (incl. our own): epoch membership must not be dragged
-    #backwards by a stuck/forked minority of peers the way the 67% floor (bft)
-    #can, e.g. old-version peers wedged at the previous epoch boundary
-    epoch_highest = div(new_highest_rooted_abs, 100_000)
+    #out-of-epoch only when a 67% quorum has ROOTED into a later epoch than our own
+    #temporal has even reached. floored by our own temporal so being ahead (or a
+    #stuck minority) never flips us out; corroborated so a byzantine peer cannot.
+    epoch_highest = div(max(temporal_height, bft_rooted), 100_000)
     epoch_mine = div(temporal_height, 100_000)
     cond do
       epoch_highest == epoch_mine and !isInEpoch -> :persistent_term.get({Net, :isInEpoch}) |> :atomics.put(1, 1)
