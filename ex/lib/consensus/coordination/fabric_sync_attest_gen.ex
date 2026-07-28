@@ -104,9 +104,15 @@ defmodule FabricSyncAttestGen do
   def handle_info(:tick_quorum, state) do
     quorum_cnt = Application.fetch_env!(:ama, :quorum)
 
-    #TODO: fix to just validators
     {vals, peers} = NodeANR.handshaked_and_online()
-    online_vals_cnt = length(vals++peers) + 1
+    validators = DB.Chain.validators_for_height(DB.Chain.height()+1) || []
+    {online_vals_cnt, quorum_cnt} = if validators == [] do
+      {length(vals++peers) + 1, quorum_cnt}
+    else
+      my_val_pks = Application.fetch_env!(:ama, :keys_all_pks) |> Enum.filter(& &1 in validators)
+      online = length(Enum.uniq(Enum.map(vals, & &1.pk) ++ my_val_pks))
+      {online, min(quorum_cnt, max(1, div(length(validators), 2) + 1))}
+    end
 
     hasQ = hasQuorum()
     cond do

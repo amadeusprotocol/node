@@ -127,9 +127,11 @@ defmodule NodeState do
   end
 
   def handle(:catchup, istate, term) do
-    tries = Enum.map(term.height_flags, fn(opts)->
+    max_heights = if Enum.any?(term.height_flags, & &1[:e] || &1[:a]) do 20 else 200 end
+    tries = Enum.take(term.height_flags, max_heights)
+    |> Enum.map(fn(opts)->
       height = opts.height
-      hasHashes = opts[:hashes] || []
+      hasHashes = Enum.take(opts[:hashes] || [], 100)
       needEntry = opts[:e] || false
       needAttest = opts[:a] || false
       needConsensus = opts[:c] || false
