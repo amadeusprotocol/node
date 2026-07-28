@@ -60,10 +60,15 @@ defmodule LoggerGen do
     highest_height = max(FabricSyncAttestGen.highestTemporalHeight() || height, height)
     score = API.Epoch.score(pk)[:score] || 0
 
+    replica = case ReplicaGen.group_status() do
+      nil -> ""
+      {id, online, total} -> " 🔁 [#{id}] #{online}/#{total}"
+    end
+
     if !isSynced do
-      IO.puts "⛓️  #{height} / #{highest_height} R: #{height-rooted_height} | T: #{txpool_size} P: #{peer_cnt} 🔴 NOT-SYNCED #{Base58.encode(pk)}"
+      IO.puts "⛓️  #{height} / #{highest_height} R: #{height-rooted_height} | T: #{txpool_size} P: #{peer_cnt}#{replica} 🔴 NOT-SYNCED #{Base58.encode(pk)}"
     else
-      IO.puts "⛓️  #{height} / #{highest_height} R: #{height-rooted_height} | T: #{txpool_size} P: #{peer_cnt} S: #{score} | #{Base58.encode(pk)} #{isTrainer} #{coins_2dp(coins)}"
+      IO.puts "⛓️  #{height} / #{highest_height} R: #{height-rooted_height} | T: #{txpool_size} P: #{peer_cnt} S: #{score} |#{replica} #{Base58.encode(pk)} #{isTrainer} #{coins_2dp(coins)}"
     end
 
     state

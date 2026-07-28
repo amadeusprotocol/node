@@ -32,6 +32,20 @@ defmodule ReplicaGen do
     end
   end
 
+  def group_status() do
+    case Application.fetch_env!(:ama, :replicas) do
+      nil -> nil
+      replicas ->
+        now = :erlang.monotonic_time(:millisecond)
+        online = :ets.foldl(fn
+          ({{:peer, _id}, _acking, _h, _sh, _shash, seen}, acc)->
+            if now - seen <= @silence_timeout_ms do acc + 1 else acc end
+          (_, acc)-> acc
+        end, 1, ReplicaGen)
+        {Application.fetch_env!(:ama, :replica_id), online, length(replicas)}
+    end
+  end
+
   #production additionally never re-signs a height any replica already signed
   def can_produce?(height) do
     case :persistent_term.get({ReplicaGen, :config}, nil) do
