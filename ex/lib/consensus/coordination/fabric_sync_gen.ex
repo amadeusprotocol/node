@@ -94,7 +94,7 @@ defmodule FabricSyncGen do
         |> fetch_chunks(temporal_peers)
 
       #TODO: fetch only missing heads incase of doubleblock
-      behind_temp == 0 ->
+      behind_temp <= 0 ->
         {rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(temporal_height, :validators)
         chunk = [[%{height: temporal_height, hashes: Enum.map(DB.Entry.by_height(temporal_height), fn(%{hash: hash})-> hash end), e: true, a: true}]]
         fetch_chunks(chunk, temporal_peers)
