@@ -292,7 +292,9 @@ defmodule SpecialMeetingAttestGen do
   end
   def entries_last_x_1(cnt, prev_hash, acc) when cnt <= 0, do: acc
   def entries_last_x_1(cnt, prev_hash, acc) do
-      entry = DB.Entry.by_hash(prev_hash)
-      entries_last_x_1(cnt - 1, entry.header.prev_hash, [entry] ++ acc)
+      case DB.Entry.by_hash(prev_hash) do
+        nil -> acc
+        entry -> entries_last_x_1(cnt - 1, entry.header.prev_hash, [entry] ++ acc)
+      end
   end
 end
