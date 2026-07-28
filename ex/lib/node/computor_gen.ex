@@ -55,27 +55,38 @@ defmodule ComputorGen do
     threads = Application.get_env(:ama, :computor_upow_threads, 0)
 
     epoch = DB.Chain.epoch()
-    segment_vr_hash = DB.Chain.segment_vr_hash()
-    diff_bits = DB.Chain.diff_bits()
-    {pick, underfunded_pks} = next_funded_key(keys, state[:key_idx] || 0)
-    state = warn_underfunded(state, underfunded_pks)
-    case pick do
-      nil ->
-        IO.puts "🔴 cannot compute: no key has at least 3 AMA for submit_sol"
-        {state, 1000}
+    removed = DB.Chain.validators_removed(epoch)
+    {slashed, keys} = Enum.split_with(keys, & &1.pk in removed)
 
-      {key, idx} ->
-        sol = UPOW.compute(epoch, key.pk, key.pop, key.pk, segment_vr_hash, diff_bits, @batch_iterations, threads)
-        if sol do
-          packed_tx = TX.build(key.seed, "Epoch", "submit_sol", [sol])
-          %{hash: hash} = TX.unpack(packed_tx)
-          IO.puts "🔢 tensor matmul complete! tx #{Base58.encode(hash)} key #{Base58.encode(key.pk)}"
+    cond do
+      slashed != [] and keys == [] ->
+        Enum.each(slashed, & IO.puts "🔴 cannot compute: key #{Base58.encode(&1.pk)} was slashed/removed from epoch #{epoch}, waiting for next epoch")
+        {state, 60_000}
 
-          TXPool.insert(packed_tx)
-          NodeGen.broadcast(NodeProto.event_tx(packed_tx))
-          {Map.put(state, :key_idx, idx + 1), 0}
-        else
-          {Map.put(state, :key_idx, idx), 0}
+      true ->
+        state = warn_slashed(state, Enum.map(slashed, & &1.pk) |> Enum.sort(), epoch)
+        segment_vr_hash = DB.Chain.segment_vr_hash()
+        diff_bits = DB.Chain.diff_bits()
+        {pick, underfunded_pks} = next_funded_key(keys, state[:key_idx] || 0)
+        state = warn_underfunded(state, underfunded_pks)
+        case pick do
+          nil ->
+            IO.puts "🔴 cannot compute: no key has at least 3 AMA for submit_sol"
+            {state, 1000}
+
+          {key, idx} ->
+            sol = UPOW.compute(epoch, key.pk, key.pop, key.pk, segment_vr_hash, diff_bits, @batch_iterations, threads)
+            if sol do
+              packed_tx = TX.build(key.seed, "Epoch", "submit_sol", [sol])
+              %{hash: hash} = TX.unpack(packed_tx)
+              IO.puts "🔢 tensor matmul complete! tx #{Base58.encode(hash)} key #{Base58.encode(key.pk)}"
+
+              TXPool.insert(packed_tx)
+              NodeGen.broadcast(NodeProto.event_tx(packed_tx))
+              {Map.put(state, :key_idx, idx + 1), 0}
+            else
+              {Map.put(state, :key_idx, idx), 0}
+            end
         end
     end
   end
@@ -91,6 +102,13 @@ defmodule ComputorGen do
     end)
     |> Enum.split_with(fn({key, _i})-> DB.Chain.balance(key.pk) >= @min_key_balance_flat end)
     {List.first(funded), Enum.map(underfunded, fn({key, _i})-> key.pk end) |> Enum.sort()}
+  end
+
+  defp warn_slashed(state, slashed_pks, epoch) do
+    if slashed_pks != state[:slashed] do
+      Enum.each(slashed_pks, & IO.puts "🔴 key #{Base58.encode(&1)} was slashed/removed from epoch #{epoch}, skipping until next epoch")
+    end
+    Map.put(state, :slashed, slashed_pks)
   end
 
   defp warn_underfunded(state, underfunded_pks) do
