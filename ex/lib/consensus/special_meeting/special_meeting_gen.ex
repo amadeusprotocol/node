@@ -263,6 +263,7 @@ defmodule SpecialMeetingGen do
          true <- FabricSyncAttestGen.isQuorumSyncedOffBy1(),
          validators = DB.Chain.validators_for_height(DB.Chain.height() + 1),
          mpk when is_binary(mpk) <- slash_candidate(validators),
+         true <- has_grace_period_passed?(mpk),
          true <- my_initiator_turn?(mpk, validators) do
       if SpecialMeetingAttestGen.isNextSlotStalled() do
         send(self(), {:try_slash_trainer_entry, mpk})
@@ -272,6 +273,23 @@ defmodule SpecialMeetingGen do
       state
     else
       _ -> state
+    end
+  end
+
+  def has_grace_period_passed?(mpk) do
+    stalled = SpecialMeetingAttestGen.isNextSlotStalled()
+    if mpk == stalled do
+      entry = DB.Chain.tip_entry()
+      ts_m = :os.system_time(1000)
+      seen_time = DB.Entry.seentime(entry.hash) || ts_m
+      delta = ts_m - seen_time
+
+      next_height = entry.header.height + 1
+      timeout = if rem(next_height, 100_000) == 99_999 do 30_000 else 8_000 end
+
+      delta >= timeout + 3_000
+    else
+      true
     end
   end
 
