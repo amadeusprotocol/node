@@ -7,7 +7,74 @@ defmodule FabricSyncGen do
 
   def init(state) do
     :erlang.send_after(3000, self(), :tick)
+    :erlang.send_after(3000, self(), :tick_tip)
     {:ok, state}
+  end
+
+  #near-tip fast poll (100ms): the MOMENT any peer advertises something we
+  #lack, pull it from peers that provably hold it — don't wait for the 1s
+  #tick or a gossip retry. no-op (a few atomic/point reads) while nothing
+  #newer is advertised; bulk catchup stays on the main tick
+  def handle_info(:tick_tip, state) do
+    state = try do tick_tip(state) catch _,_ -> state end
+    :erlang.send_after(100, self(), :tick_tip)
+    {:noreply, state}
+  end
+
+  defp tick_tip(state) do
+    if !FabricSyncAttestGen.hasQuorum() do state else
+      now = :os.system_time(1000)
+
+      #a peer has a temporal tip above ours: pull the next entry
+      temporal_height = DB.Chain.height()
+      net_temp = FabricSyncAttestGen.highestTemporalHeight() || 0
+      state = if net_temp > temporal_height and net_temp - temporal_height <= 10 do
+        maybe_pull(state, :tip_temporal, temporal_height + 1, now, fn()->
+          {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(temporal_height + 1, :any)
+          chunk = [%{height: temporal_height + 1,
+            hashes: Enum.map(DB.Entry.by_height(temporal_height + 1), & &1.hash), e: true, a: true, c: true}]
+          pull_from(chunk, temporal_peers)
+        end)
+      else state end
+
+      #a peer ROOTED a height we haven't: its consensus aggregate exists,
+      #pull it (+ raw attestations) from peers whose rooted tip proves it
+      rooted_height = DB.Chain.rooted_height()
+      net_rooted = FabricSyncAttestGen.highestRootedHeight() || 0
+      if net_rooted > rooted_height and net_rooted - rooted_height <= 10 do
+        maybe_pull(state, :tip_rooted, rooted_height + 1, now, fn()->
+          {rooted_peers, _temporal_peers} = NodeANR.peers_w_min_height(rooted_height + 1, :any)
+          chunk = [%{height: rooted_height + 1, a: true, c: true}]
+          pull_from(chunk, rooted_peers)
+        end)
+      else state end
+    end
+  end
+
+  #one pull per target, then WAIT for it: a pulled peer with 200ms ping must
+  #not be re-hammered every 100ms. re-pull only when the target height moved
+  #on (reply arrived and applied) or the latency-scaled deadline expired
+  #(reply lost — fresh shuffle picks different peers)
+  defp maybe_pull(state, key, height, now, pull_fn) do
+    case state[key] do
+      {^height, deadline} when now < deadline -> state
+      _ ->
+        case pull_fn.() do
+          [] -> state
+          pulled ->
+            lat = pulled |> Enum.map(& NodeANR.get_latency(&1.pk)) |> Enum.max()
+            deadline = now + min(1000, max(300, 2 * lat))
+            Map.put(state, key, {height, deadline})
+        end
+    end
+  end
+
+  defp pull_from(chunk, peers) do
+    peers = Enum.take(Enum.shuffle(peers), 2)
+    Enum.each(peers, fn(peer)->
+      send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup(chunk)})
+    end)
+    peers
   end
 
   def handle_info(:tick, state) do
@@ -47,16 +114,15 @@ defmodule FabricSyncGen do
 
     behind_root_local = temporal_height - rooted_height
 
-    if behind_root_local > 1000 do
+    if behind_root_local > 0 do
       #rooting is sequential: ONE height missing its consensus blocks every
       #height above it. fetch exactly the holes instead of re-blasting the
-      #whole window, and the first hole (the blocker) redundantly from
-      #several peers so one peer lacking it cannot stall the drain a tick
-      #a hole is a height with no ROOTABLE consensus: a stored partial record
-      #(score < 0.67, valid sig over a subset) fills nothing, keep fetching
-      #walk forward from rooted until 2000 ACTUAL holes are found — holes can
-      #sit far past any fixed window when a long prefix is already filled.
-      #lazy: stops at 2000 holes; scan capped at 20k heights per tick
+      #whole window. a hole is a height with no ROOTABLE consensus: a stored
+      #partial (score < 0.67, valid sig over a subset) fills nothing.
+      #walk forward from rooted until 2000 ACTUAL holes are found — lazy,
+      #scan capped at 20k heights per tick. trigger is R > 0: the live edge
+      #(R 1-2) gets the same treatment, one missed attestation gossip must
+      #not leave the tip unrooted for seconds
       holes = Stream.iterate(rooted_height + 1, & &1 + 1)
       |> Stream.take_while(& &1 <= temporal_height)
       |> Stream.take(20_000)
@@ -64,19 +130,38 @@ defmodule FabricSyncGen do
         !Enum.any?(DB.Attestation.consensuses_by_height(h), & &1.aggsig.mask_set_size / &1.aggsig.mask_size >= 0.67)
       end)
       |> Enum.take(2000)
-      IO.puts "Behind Root: #{behind_root_local} unrooted, #{length(holes)} consensus holes"
-      case holes do
+      if behind_root_local > 100 do
+        IO.puts "Behind Root: #{behind_root_local} unrooted, #{length(holes)} consensus holes"
+      end
+
+      #live-edge holes get their own a+c request: the network-wide aggregate
+      #may not exist yet, peers' raw attestations (a) let us aggregate our own
+      #consensus locally. kept SEPARATE from the deep c-only chunks — the
+      #a-flag caps a served message at 20 heights and must not truncate them
+      {tip_holes, deep_holes} = Enum.split_with(holes, & temporal_height - &1 <= 2)
+
+      if tip_holes != [] do
+        {_rooted_peers, tip_peers} = NodeANR.peers_w_min_height(List.first(tip_holes), :any)
+        chunk = Enum.map(tip_holes, & %{height: &1, a: true, c: true})
+        Enum.take(Enum.shuffle(tip_peers), 3)
+        |> Enum.each(fn(peer)->
+          send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup(chunk)})
+        end)
+      end
+
+      case deep_holes do
         #consensus is present locally, the coordinator is still applying it:
         #nothing to fetch
         [] -> nil
         [blocker | _] ->
-          #peer eligibility keyed to the blocker: pruned_below must reach it
+          #peer eligibility keyed to the blocker: pruned_below must reach it;
+          #the blocker gates the whole drain so it goes to 3 peers redundantly
           {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(blocker, :any)
           Enum.take(Enum.shuffle(temporal_peers), 3)
           |> Enum.each(fn(peer)->
             send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup([%{height: blocker, c: true}])})
           end)
-          holes
+          deep_holes
           |> Enum.map(& %{height: &1, c: true})
           |> Enum.chunk_every(200)
           |> fetch_chunks(temporal_peers)
