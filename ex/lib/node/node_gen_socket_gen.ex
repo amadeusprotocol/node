@@ -145,6 +145,8 @@ defmodule NodeGenSocketGen do
 
       {:send_to, peer_pairs, msg} ->
         port = Application.fetch_env!(:ama, :udp_port)
+        #localnet simulation: hold outbound packets N ms to model link latency
+        delay = Application.get_env(:ama, :localnet_tx_delay_ms, 0)
         Enum.each(peer_pairs, fn(%{ip4: ip4, pk: pk})->
           version = NodeANR.get_version(pk)
           msg_compressed = NodeProto.compress(msg)
@@ -152,13 +154,20 @@ defmodule NodeGenSocketGen do
           {:ok, ip} = :inet.parse_address(~c'#{ip4}')
           NodeProto.encrypt_message(msg_compressed, NodeANR.get_shared_secret(pk))
           |> Enum.each(fn(msg_packed)->
-            case :gen_udp.send(state.socket, ip, port, msg_packed) do
-              :ok -> :ok
-              {:error, :eperm} -> :rand.uniform(100) == 1 && IO.puts("udp_send_error eperm")
-              {:error, other} -> :rand.uniform(100) == 1 && IO.puts("udp_send_error #{inspect(other)}")
+            if delay > 0 do
+              :erlang.send_after(delay, self(), {:delayed_udp, ip, port, msg_packed})
+            else
+              case :gen_udp.send(state.socket, ip, port, msg_packed) do
+                :ok -> :ok
+                {:error, :eperm} -> :rand.uniform(100) == 1 && IO.puts("udp_send_error eperm")
+                {:error, other} -> :rand.uniform(100) == 1 && IO.puts("udp_send_error #{inspect(other)}")
+              end
             end
           end)
         end)
+
+      {:delayed_udp, ip, port, msg_packed} ->
+        :gen_udp.send(state.socket, ip, port, msg_packed)
 
       {:udp_passive, _socket} ->
         :ok = :inet.setopts(state.socket, [{:active, 16}])

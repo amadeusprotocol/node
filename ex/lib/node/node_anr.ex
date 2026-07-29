@@ -11,9 +11,18 @@ defmodule NodeANR do
   def keys(), do: @keys
 
   def seed() do
-    Application.fetch_env!(:ama, :seedanrs)
-    |> Enum.each(fn(anr)->
+    #localnet simulation: a pre-signed ANR set in the workfolder REPLACES the
+    #baked-in seed ANRs entirely, so a local net can never touch mainnet
+    localnet_path = Path.join(Application.fetch_env!(:ama, :work_folder), "localnet_anrs.etf")
+    localnet = File.exists?(localnet_path)
+    anrs = if localnet do
+      File.read!(localnet_path) |> :erlang.binary_to_term()
+    else
+      Application.fetch_env!(:ama, :seedanrs)
+    end
+    Enum.each(anrs, fn(anr)->
       insert(anr)
+      localnet && set_handshaked(anr.pk)
     end)
     insert(build())
     set_handshaked(Application.fetch_env!(:ama, :trainer_pk))

@@ -148,3 +148,6 @@ end)
 #    Application.put_env(:ama, :challenge, challenge)
 #    Application.put_env(:ama, :challenge_signature, signature)
 #end
+
+#localnet simulation: artificial outbound packet delay in ms (0 = off)
+config :ama, :localnet_tx_delay_ms, (System.get_env("LOCALNET_TX_DELAY_MS") || "0") |> :erlang.binary_to_integer()
