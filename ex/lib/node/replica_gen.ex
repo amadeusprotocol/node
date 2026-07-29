@@ -6,6 +6,7 @@ defmodule ReplicaGen do
   @silence_timeout_ms 2_000  #peer counts as gone after this much silence
   @ack_cooldown_ms 1_500     #quiet gap between acking two different peers
   @slash_ack_timeout_ms 2_500
+  @keypack_ms 30_000         #interval between key-pack (pks only) broadcasts
 
   def start_link() do
     GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
@@ -163,7 +164,7 @@ defmodule ReplicaGen do
       :erlang.send_after(3_000, self(), :restore)
       {:ok, %{enabled: true, my_id: my_id, my_pk: my_pk, majority: div(length(replicas), 2) + 1, psk: psk,
               peers: peers, peer_ips: peer_ips, meshed: MapSet.new(), socket: socket,
-              ack_target: nil, last_ack_change: nil, last_seq: 0, last_seqs: %{}}}
+              ack_target: nil, last_ack_change: nil, last_seq: 0, last_seqs: %{}, last_keypack: 0}}
     end
   end
 
@@ -213,7 +214,22 @@ defmodule ReplicaGen do
     desired = Enum.min([state.my_id | visible_ids])
     state = update_ack_target(state, desired, now)
 
-    broadcast_heartbeat(state)
+    state = broadcast_heartbeat(state)
+    maybe_broadcast_keypack(state, now)
+  end
+
+  #gossip the PUBLIC keys of our pack so the group can cross-check packs.
+  #a distinct packet shape: replicas on older builds fail the heartbeat match
+  #and drop it harmlessly
+  defp maybe_broadcast_keypack(state, now) do
+    if now - state.last_keypack < @keypack_ms do state else
+      payload = :erlang.term_to_binary({:keypack, state.my_id, Application.fetch_env!(:ama, :keys_all_pks)})
+      packet = encrypt(payload, state.psk)
+      Enum.each(state.peers, fn(p)->
+        :gen_udp.send(state.socket, p.ip, p.port, packet)
+      end)
+      %{state | last_keypack: now}
+    end
   end
 
   #build and gossip one heartbeat: our ack target + HWM + slash lock. carry my pk
@@ -253,12 +269,42 @@ defmodule ReplicaGen do
 
   defp handle_packet(packet, state) do
     payload = decrypt(packet, state.psk)
-    {id, pk, acking, h, sh, shash, seq} = :erlang.binary_to_term(payload, [:safe])
+    case :erlang.binary_to_term(payload, [:safe]) do
+      {:keypack, id, pks} -> handle_keypack(id, pks, state)
+      {id, pk, acking, h, sh, shash, seq} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, state)
+    end
+  end
+
+  #the pack must hold the same KEY SET on every replica (ordering is free —
+  #each replica fronts a different first key as its identity). log every
+  #divergence, both directions, on every replica that can see it; repeats
+  #each @keypack_ms while the divergence lasts
+  defp handle_keypack(id, pks, state) do
+    true = Enum.any?(state.peers, & &1.id == id)
+    true = is_list(pks) and Enum.all?(pks, & is_binary(&1) and byte_size(&1) == 48)
+    mine = MapSet.new(Application.fetch_env!(:ama, :keys_all_pks))
+    theirs = MapSet.new(pks)
+    Enum.each(MapSet.difference(mine, theirs), fn(pk)->
+      IO.puts "🔁 ⚠️  replica #{id} key pack is MISSING #{Base58.encode(pk)}"
+    end)
+    Enum.each(MapSet.difference(theirs, mine), fn(pk)->
+      IO.puts "🔁 ⚠️  OUR key pack is MISSING #{Base58.encode(pk)} (held by replica #{id})"
+    end)
+    state
+  end
+
+  defp handle_heartbeat(id, pk, acking, h, sh, shash, seq, state) do
     true = is_integer(id) and is_binary(pk) and is_integer(h) and is_integer(sh) and is_integer(seq)
     true = Enum.any?(state.peers, & &1.id == id)
     last_seq = Map.get(state.last_seqs, id, 0)
     if seq <= last_seq do state else
       now = :erlang.monotonic_time(:millisecond)
+      #first heartbeat, or back from silence: push our keypack right away so
+      #pack divergence surfaces at connect time, not up to @keypack_ms later
+      fresh_connect = case :ets.lookup(ReplicaGen, {:peer, id}) do
+        [{{:peer, _}, _acking, _h, _sh, _shash, seen}] -> now - seen > @silence_timeout_ms
+        _ -> true
+      end
       :ets.insert(ReplicaGen, {{:peer, id}, acking, h, sh, shash, now})
       #mesh the peer the first time we see it, then keep it live: a heartbeat is
       #proof the peer is up, so keep it in the gossip online set so the leader's
@@ -270,7 +316,8 @@ defmodule ReplicaGen do
       if sh > my_sh and is_binary(shash) and byte_size(shash) == 32 do
         SpecialMeetingAttestGen.adopt_entry_sign_lock(sh, shash)
       end
-      %{state | last_seqs: Map.put(state.last_seqs, id, seq)}
+      state = %{state | last_seqs: Map.put(state.last_seqs, id, seq)}
+      if fresh_connect do maybe_broadcast_keypack(%{state | last_keypack: 0}, now) else state end
     end
   end
 
