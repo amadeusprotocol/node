@@ -349,7 +349,8 @@ defmodule Ama.MultiServer do
 
             r.method == "GET" and r.path == "/api/wallet/malicious_address" ->
                 list = ["7XnWYc4RT6ujKhVb8MgWJfks9ECR8iQsPjZwzpJM1UFJWhQhazsSXAZP42E1o37qGR",
-                "5wcwqPYHUGLrPECGiJsAn3XeLXUtuyMSRedJTAYiK4GwNrM2jksU5TxAh4TWPwV3sU"]
+                "5wcwqPYHUGLrPECGiJsAn3XeLXUtuyMSRedJTAYiK4GwNrM2jksU5TxAh4TWPwV3sU",
+                "77yQUXyN4Qa5jbrmxMhBQDsYVDwEYYhEjrQrb4if7Cwt2pHjnYfRBAaTNxTni9Svm3"]
                 quick_reply(state, %{error: :ok, list: list})
 
             r.method == "POST" and r.path == "/api/tx/submit" ->

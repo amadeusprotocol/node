@@ -56,7 +56,7 @@ defmodule LoggerGen do
     #Moneyround mean i roll wit da money
     isTrainer = if pk in trainers do "💰" else "🪙" end
 
-    isSynced = FabricSyncAttestGen.isQuorumSyncedOffBy1() || Application.fetch_env!(:ama, :testnet)
+    isSynced = FabricSyncAttestGen.isQuorumSyncedOffByX(2) || Application.fetch_env!(:ama, :testnet)
     highest_height = max(FabricSyncAttestGen.highestTemporalHeight() || height, height)
     score = API.Epoch.score(pk)[:score] || 0
 
