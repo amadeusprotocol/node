@@ -344,7 +344,14 @@ defmodule FabricGen do
   end
 
   def produce_entry(seed, cur_entry) do
-    txs = TXPool.grab_next_valid(cur_entry.header.height + 1, 100)
+    next_height = cur_entry.header.height + 1
+    txs = if next_height >= Entry.entry_size_activation_height() do
+      TXPool.grab_next_valid(next_height, Entry.entry_max_txs_bytes())
+    else
+      #pre-fork consensus caps entries at 100 txs: the byte budget alone
+      #can exceed that with a deep pool and produce an invalid entry
+      TXPool.grab_next_valid(next_height, 2_000_000) |> Enum.take(100)
+    end
     next_entry = Entry.build_next(seed, cur_entry, txs)
     next_entry = Entry.sign(seed, next_entry)
     next_entry

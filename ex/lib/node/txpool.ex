@@ -95,28 +95,37 @@ defmodule TXPool do
       end
     end
 
-    def grab_next_valid(chain_height, amt \\ 1) do
+    def grab_next_valid(chain_height, max_bytes \\ 2_000_000) do
         try do
             chain_epoch = div(chain_height, 100_000)
 
             segment_vr_hash = DB.Chain.segment_vr_hash()
-            {acc, _state} = :ets.foldl(fn({key, txu}, {acc, state_old})->
-                case validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, batch_state: state_old}) do
-                  %{error: :ok, batch_state: batch_state} ->
-                    acc = [txu | acc]
-                    if length(acc) == amt do
+            {acc, _state, _bytes} = :ets.foldl(fn({key, txu}, {acc, state_old, total_bytes})->
+                tx_size = byte_size(TX.pack(txu))
+                if total_bytes + tx_size > max_bytes do
+                    if length(acc) > 0 do
                         throw {:choose, Enum.reverse(acc)}
+                    else
+                        {acc, state_old, total_bytes}
                     end
-                    {acc, batch_state}
-                  #delete stale
-                  %{key: key} ->
-                    :ets.delete(TXPool, key)
-                    {acc, state_old}
-                  _ ->
-                    :ets.delete(TXPool, key)
-                    {acc, state_old}
+                else
+                  case validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, batch_state: state_old}) do
+                    %{error: :ok, batch_state: batch_state} ->
+                      acc = [txu | acc]
+                      if total_bytes + tx_size >= max_bytes do
+                          throw {:choose, Enum.reverse(acc)}
+                      end
+                      {acc, batch_state, total_bytes + tx_size}
+                    #delete stale
+                    %{key: key} ->
+                      :ets.delete(TXPool, key)
+                      {acc, state_old, total_bytes}
+                    _ ->
+                      :ets.delete(TXPool, key)
+                      {acc, state_old, total_bytes}
+                  end
                 end
-            end, {[], %{}}, TXPool)
+            end, {[], %{}, 0}, TXPool)
             Enum.reverse(acc)
         catch
             :throw,{:choose, txs_packed} -> txs_packed

@@ -127,8 +127,12 @@ defmodule NodeState do
 
   def handle(:catchup, istate, term) do
     max_heights = if Enum.any?(term.height_flags, & &1[:e] || &1[:a]) do 20 else 200 end
-    tries = Enum.take(term.height_flags, max_heights)
-    |> Enum.map(fn(opts)->
+    #reply byte budget: with multi-MB entries a full-height reply could blow
+    #the 64MB transport decompress ceiling. stop adding heights once entries
+    #pass ~16MB (first height always served); the requester's hole logic
+    #re-requests whatever was cut
+    {tries, _bytes} = Enum.take(term.height_flags, max_heights)
+    |> Enum.reduce_while({[], 0}, fn(opts, {tries, bytes})->
       height = opts.height
       hasHashes = Enum.take(opts[:hashes] || [], 100)
       needEntry = opts[:e] || false
@@ -138,8 +142,13 @@ defmodule NodeState do
       trie = if !needEntry do trie else Map.put(trie, :entries, DB.Entry.by_height(height) |> Enum.filter(& &1.hash not in hasHashes) |> Enum.map(& Entry.pack_for_net(&1))) end
       trie = if !needAttest do trie else Map.put(trie, :attestations, DB.Attestation.by_height_my(height)) end
       trie = if !needConsensus do trie else Map.put(trie, :consensuses, DB.Attestation.consensuses_by_height(height)) end
-      trie
+      esz = case trie[:entries] do nil -> 0; es -> :erlang.external_size(es) end
+      cond do
+        tries != [] and bytes + esz > 16_777_216 -> {:halt, {tries, bytes}}
+        true -> {:cont, {[trie | tries], bytes + esz}}
+      end
     end)
+    tries = Enum.reverse(tries)
     send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.catchup_reply(tries)})
   end
   def handle(:catchup_reply, istate, term) do

@@ -56,6 +56,12 @@ defmodule Entry do
     @fields [:header, :hash, :signature, :txs, :mask, :mask_size, :mask_set_size]
     @fields_header [:height, :prev_hash, :slot, :prev_slot, :signer, :dr, :vr, :root_tx, :root_validator, :root_chain]
 
+    #coordinated fork (SET TO THE AGREED EPOCH BOUNDARY BEFORE RELEASE):
+    #entries switch from the 100-tx count cap to a byte cap at this height.
+    #size = sum of packed tx bytes, the same measure TXPool packs against
+    def entry_size_activation_height(), do: 77_600_000
+    def entry_max_txs_bytes(), do: 3_145_728
+
     def unpack_from_db(nil), do: nil
     def unpack_from_db(entry_packed) do
         entry = if is_binary(entry_packed) do RDB.vecpak_decode(entry_packed) else entry_packed end
@@ -137,7 +143,13 @@ defmodule Entry do
         if !!e[:mask] and !is_bitstring(e.mask), do: throw(%{error: :mask_not_bitstring})
 
         if !is_list(e.txs), do: throw(%{error: :txs_not_list})
-        if length(e.txs) > 100, do: throw(%{error: :TEMPORARY_txs_only_100_per_entry})
+        if eh.height >= entry_size_activation_height() do
+          total_tx_size = Enum.reduce(e.txs, 0, fn tx, acc -> acc + byte_size(TX.pack(tx)) end)
+          if total_tx_size > entry_max_txs_bytes(), do: throw(%{error: :entry_exceeds_max_block_size})
+        else
+          #pre-fork rule: mixed-version validators must agree until activation
+          if length(e.txs) > 100, do: throw(%{error: :TEMPORARY_txs_only_100_per_entry})
+        end
 
         # Duplicate TX check
         tx_hashes = Enum.map(e.txs, & &1.hash)
