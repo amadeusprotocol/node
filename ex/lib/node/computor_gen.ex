@@ -1,7 +1,7 @@
 defmodule ComputorGen do
   use GenServer
 
-  @batch_iterations 2000
+  @batch_iterations 20000
 
   def start() do
     send(__MODULE__, :start)

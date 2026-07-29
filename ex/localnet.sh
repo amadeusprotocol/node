@@ -76,3 +76,4 @@ for i in 0 1 2 3 4; do
   echo "n$i pid $! lat ${LAT[$i]}ms ip 127.0.0.$((11 + i))"
 done
 echo "== running; logs at $NET/n*.log =="
+wait

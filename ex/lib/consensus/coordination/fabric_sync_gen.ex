@@ -15,9 +15,9 @@ defmodule FabricSyncGen do
   #poll subsystem to contend and duplicate with it. tick/0 returns the next
   #interval in ms.
   def handle_info(:tick, state) do
-    interval = cond do
-      FabricGen.isSyncing() or FabricCoordinatorGen.isSyncing() or !FabricSyncAttestGen.hasQuorum() -> 30
-      true -> tick()
+    {interval, state} = cond do
+      FabricGen.isSyncing() or FabricCoordinatorGen.isSyncing() or !FabricSyncAttestGen.hasQuorum() -> {30, state}
+      true -> tick(state)
     end
     :erlang.send_after(interval, self(), :tick)
     {:noreply, state}
@@ -31,7 +31,7 @@ defmodule FabricSyncGen do
     end)
   end
 
-  def tick() do
+  def tick(state) do
     temporal = DB.Chain.tip_entry()
     temporal_height = temporal.header.height
     rooted = DB.Chain.rooted_tip_entry()
@@ -47,7 +47,13 @@ defmodule FabricSyncGen do
 
     behind_root_local = temporal_height - rooted_height
 
-    if behind_root_local > 0 do
+    target_sig = {temporal_height, rooted_height, height_network_temp, height_network_root, height_network_bft}
+    now = :erlang.monotonic_time(:millisecond)
+    {last_sig, last_ts} = state[:last_fetch] || {nil, 0}
+    should_fetch? = (target_sig != last_sig) or (now - last_ts >= 1000)
+
+    if should_fetch? do
+      if behind_root_local > 0 do
       #rooting is sequential: ONE height missing its consensus blocks every
       #height above it. fetch exactly the holes instead of re-blasting the
       #whole window. a hole is a height with no ROOTABLE consensus: a stored
@@ -172,9 +178,12 @@ defmodule FabricSyncGen do
         chunk = [[%{height: temporal_height, hashes: Enum.map(DB.Entry.by_height(temporal_height), fn(%{hash: hash})-> hash end), e: true, a: true}]]
         fetch_chunks(chunk, temporal_peers)
     end
+    end
 
     #near the tip poll fast so a fresh block is fetched within ~100ms instead
     #of a full second; drop back to 1s once there is a real backlog to work
-    if behind_temp <= 2 and behind_root_local <= 5 do 100 else 1000 end
+    interval = if behind_temp <= 2 and behind_root_local <= 5 do 100 else 1000 end
+    state = if should_fetch? do Map.put(state, :last_fetch, {target_sig, now}) else state end
+    {interval, state}
   end
 end
