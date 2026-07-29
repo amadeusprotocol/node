@@ -16,7 +16,7 @@ defmodule NodeANR do
     localnet_path = Path.join(Application.fetch_env!(:ama, :work_folder), "localnet_anrs.etf")
     localnet = File.exists?(localnet_path)
     anrs = if localnet do
-      File.read!(localnet_path) |> :erlang.binary_to_term()
+      File.read!(localnet_path) |> :erlang.binary_to_term([:safe])
     else
       Application.fetch_env!(:ama, :seedanrs)
     end
