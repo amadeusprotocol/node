@@ -23,8 +23,9 @@ defmodule FabricSyncGen do
     {:noreply, state}
   end
 
+  def fetch_chunks(_chunks, []) do nil end
   def fetch_chunks(chunks, peers) do
-    Enum.zip(chunks, Enum.shuffle(peers))
+    Enum.zip(chunks, Stream.cycle(Enum.shuffle(peers)))
     |> Enum.each(fn({chunk, peer})->
       send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup(chunk)})
     end)
@@ -52,7 +53,7 @@ defmodule FabricSyncGen do
       next_heights = Enum.to_list(entries)
       |> Enum.take(1000)
       |> Enum.uniq()
-      {rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
+      {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
       next_heights
       |> Enum.map(& %{height: &1, c: true})
       |> Enum.chunk_every(200)
@@ -66,7 +67,7 @@ defmodule FabricSyncGen do
         next_heights = Enum.to_list(entries)
         |> Enum.take(1000)
         |> Enum.uniq()
-        {rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
+        {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
         next_heights
         |> Enum.map(& %{height: &1, e: true, c: true})
         |> Enum.chunk_every(20)
@@ -76,7 +77,7 @@ defmodule FabricSyncGen do
         next_heights = (try do  Enum.to_list((rooted_height+1)..height_network_root//1) catch _,_ -> [height_network_root] end)
         |> Enum.take(1000)
         |> Enum.uniq()
-        {rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
+        {rooted_peers, _temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
         next_heights
         |> Enum.map(& %{height: &1, hashes: Enum.map(DB.Entry.by_height(&1), fn(%{hash: hash})-> hash end), e: true, c: true})
         |> Enum.chunk_every(20)
@@ -87,7 +88,7 @@ defmodule FabricSyncGen do
         next_heights = (try do Enum.to_list(temporal_height..height_network_temp//1) catch _,_-> [height_network_temp] end)
         |> Enum.take(1000)
         |> Enum.uniq()
-        {rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :validators)
+        {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :validators)
         next_heights
         |> Enum.map(& %{height: &1, hashes: Enum.map(DB.Entry.by_height(&1), fn(%{hash: hash})-> hash end), e: true, a: true})
         |> Enum.chunk_every(10)
@@ -95,7 +96,7 @@ defmodule FabricSyncGen do
 
       #TODO: fetch only missing heads incase of doubleblock
       behind_temp <= 0 ->
-        {rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(temporal_height, :validators)
+        {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(temporal_height, :validators)
         chunk = [[%{height: temporal_height, hashes: Enum.map(DB.Entry.by_height(temporal_height), fn(%{hash: hash})-> hash end), e: true, a: true}]]
         fetch_chunks(chunk, temporal_peers)
     end

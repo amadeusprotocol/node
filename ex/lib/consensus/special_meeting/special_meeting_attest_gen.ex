@@ -290,7 +290,7 @@ defmodule SpecialMeetingAttestGen do
       entry = DB.Chain.tip_entry()
       entries_last_x_1(cnt - 1, entry.header.prev_hash, [entry])
   end
-  def entries_last_x_1(cnt, prev_hash, acc) when cnt <= 0, do: acc
+  def entries_last_x_1(cnt, _prev_hash, acc) when cnt <= 0, do: acc
   def entries_last_x_1(cnt, prev_hash, acc) do
       case DB.Entry.by_hash(prev_hash) do
         nil -> acc

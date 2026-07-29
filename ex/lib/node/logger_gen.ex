@@ -62,7 +62,8 @@ defmodule LoggerGen do
 
     replica = case ReplicaGen.group_status() do
       nil -> ""
-      {id, online, total} -> " 🔁 [#{id}] #{online}/#{total}"
+      {id, synced, 0, total} -> " 🔁 [#{id}] #{synced}/#{total}"
+      {id, synced, syncing, total} -> " 🔁 [#{id}] #{synced}+#{syncing}/#{total}"
     end
 
     if !isSynced do

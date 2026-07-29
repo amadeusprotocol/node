@@ -1,5 +1,4 @@
 defmodule NodeState do
-  import NodeProto
 
   def init() do
     %{
@@ -144,11 +143,11 @@ defmodule NodeState do
     send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.catchup_reply(tries)})
   end
   def handle(:catchup_reply, istate, term) do
-    #IO.inspect {:catchup_reply_from, istate.peer.ip4, Enum.map(term.tries, & &1.height)}
-    Enum.each(term.tries, fn(trie)->
+    Enum.take(term.tries, 200)
+    |> Enum.each(fn(trie)->
       rooted_tip = DB.Chain.rooted_height()
 
-      Enum.each(trie[:entries]||[], fn(entry_packed)->
+      Enum.each(Enum.take(trie[:entries]||[], 20), fn(entry_packed)->
         case Entry.unpack_and_validate_from_net(entry_packed) do
           %{error: :ok, entry: entry} ->
             if Entry.height(entry) >= rooted_tip do
@@ -159,7 +158,7 @@ defmodule NodeState do
         end
       end)
 
-      Enum.each(trie[:attestations]||[], fn(attestation)->
+      Enum.each(Enum.take(trie[:attestations]||[], 100), fn(attestation)->
         case Attestation.validate_vs_chain(attestation) do
           %{error: :ok} ->
             send(FabricCoordinatorGen, {:add_attestation, attestation})
@@ -168,7 +167,7 @@ defmodule NodeState do
         end
       end)
 
-      Enum.each(trie[:consensuses]||[], fn(consensus)->
+      Enum.each(Enum.take(trie[:consensuses]||[], 100), fn(consensus)->
         case Consensus.validate_vs_chain(consensus) do
           %{error: :ok} ->
             send(FabricCoordinatorGen, {:insert_consensus, consensus})

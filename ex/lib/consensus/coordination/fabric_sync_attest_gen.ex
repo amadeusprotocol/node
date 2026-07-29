@@ -66,10 +66,8 @@ defmodule FabricSyncAttestGen do
     cond do
       Application.fetch_env!(:ama, :testnet) -> true
       !hasQuorum() -> false
-      isSynced() in [:full, :off_by_1] -> true
       DB.Chain.rooted_height() < (DB.Chain.height() - 1) -> false
-      isSynced() not in [:full, :off_by_1] -> false
-      true -> true
+      true -> isSynced() in [:full, :off_by_1]
     end
   end
 
@@ -77,10 +75,8 @@ defmodule FabricSyncAttestGen do
     cond do
       Application.fetch_env!(:ama, :testnet) -> true
       !hasQuorum() -> false
-      isSynced() in [:full, :off_by_1] -> true
       DB.Chain.rooted_height() < (DB.Chain.height() - cnt) -> false
-      isSynced() not in [:full, :off_by_1] -> false
-      true -> true
+      true -> isSynced() in [:full, :off_by_1]
     end
   end
 
