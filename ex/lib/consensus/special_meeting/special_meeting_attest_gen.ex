@@ -183,6 +183,7 @@ defmodule SpecialMeetingAttestGen do
     slotStallTrainer = isNextSlotStalled()
     guilty = cond do
         byte_size(malicious_pk) != 48 -> false
+        own_pack_key?(malicious_pk) -> false
         DB.Chain.epoch() != epoch -> false
 
         #TODO: check for Slowloris
@@ -224,6 +225,7 @@ defmodule SpecialMeetingAttestGen do
       or (malicious_pk == slotStallTrainer or malicious_pk in offlineTrainers())
 
     cond do
+        own_pack_key?(malicious_pk) -> []
         DB.Chain.epoch() != epoch -> []
         Entry.validate_next(cur_entry, entry) != %{error: :ok} -> []
         slash_trainer_verify(malicious_pk, epoch, trainers, mask, signature) != nil -> []
@@ -246,6 +248,19 @@ defmodule SpecialMeetingAttestGen do
 
   defp my_keys_in(validators) do
     Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
+  end
+
+  #NEVER slash a key from our own seeds pack. if one of our keys is being
+  #accused something is deeply wrong locally (split replica? wedged clock?
+  #corrupt state?) — that needs debugging, not slashing, and a node must
+  #never vote to slash itself
+  def own_pack_key?(pk) do
+    if pk in Application.fetch_env!(:ama, :keys_all_pks) do
+      IO.puts "🔴🔴 slash motion targets OUR OWN key #{Base58.encode(pk)} — refusing to participate; debug this, do not slash it"
+      true
+    else
+      false
+    end
   end
 
   def slash_trainer_verify(malicious_pk, cur_epoch, trainers, mask, signature) do

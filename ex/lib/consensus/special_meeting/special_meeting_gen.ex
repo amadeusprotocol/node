@@ -44,22 +44,24 @@ defmodule SpecialMeetingGen do
     {:noreply, state}
   end
   def handle_info({:try_slash_trainer_tx, mpk}, state) do
-    if !ReplicaGen.can_sign?() do
-      IO.puts "🔴 not replica leader, ignoring slash motion"
-      {:noreply, state}
-    else
-      start_slash_tx_motion(mpk, state)
+    cond do
+      SpecialMeetingAttestGen.own_pack_key?(mpk) -> {:noreply, state}
+      !ReplicaGen.can_sign?() ->
+        IO.puts "🔴 not replica leader, ignoring slash motion"
+        {:noreply, state}
+      true -> start_slash_tx_motion(mpk, state)
     end
   end
   def handle_info({:try_slash_trainer_entry, _mpk}, state = %{slash_trainer: _}) do
     {:noreply, state}
   end
   def handle_info({:try_slash_trainer_entry, mpk}, state) do
-    if !ReplicaGen.can_sign?() do
-      IO.puts "🔴 not replica leader, ignoring slash motion"
-      {:noreply, state}
-    else
-      start_slash_entry_motion(mpk, state)
+    cond do
+      SpecialMeetingAttestGen.own_pack_key?(mpk) -> {:noreply, state}
+      !ReplicaGen.can_sign?() ->
+        IO.puts "🔴 not replica leader, ignoring slash motion"
+        {:noreply, state}
+      true -> start_slash_entry_motion(mpk, state)
     end
   end
   def handle_info({:add_slash_trainer_tx_reply, pk, signature, mpk, epoch}, state = %{slash_trainer: _}) do
@@ -274,14 +276,18 @@ defmodule SpecialMeetingGen do
   end
 
   #stalled next-slot trainer first (unique by definition), else the first
-  #sorted offline trainer: every node converges on the same target
+  #sorted offline trainer: every node converges on the same target.
+  #own-pack keys are never candidates — if our own key is the stalled one we
+  #stand down entirely (return nil) and leave the motion to the rest of the
+  #set; a node must never move to slash itself
   def slash_candidate(validators) do
+    my_pks = Application.fetch_env!(:ama, :keys_all_pks)
     stalled = SpecialMeetingAttestGen.isNextSlotStalled()
     cond do
-      !!stalled and stalled in validators -> stalled
+      !!stalled and stalled in validators -> if stalled in my_pks do nil else stalled end
       true ->
         SpecialMeetingAttestGen.offlineTrainers()
-        |> Enum.filter(& &1 in validators)
+        |> Enum.filter(& &1 in validators and &1 not in my_pks)
         |> Enum.sort()
         |> List.first()
     end
