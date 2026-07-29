@@ -80,6 +80,14 @@ defmodule FabricSyncAttestGen do
     end
   end
 
+  def isQuorumTemporalSynced() do
+    cond do
+      Application.fetch_env!(:ama, :testnet) -> true
+      !hasQuorum() -> false
+      true -> isSynced() in [:full, :off_by_1]
+    end
+  end
+
   def isQuorumIsInEpoch() do
     !!Application.fetch_env!(:ama, :testnet) or (hasQuorum() and isInEpoch())
   end

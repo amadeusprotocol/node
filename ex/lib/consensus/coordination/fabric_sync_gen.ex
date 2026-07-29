@@ -7,86 +7,19 @@ defmodule FabricSyncGen do
 
   def init(state) do
     :erlang.send_after(3000, self(), :tick)
-    :erlang.send_after(3000, self(), :tick_tip)
     {:ok, state}
   end
 
-  #near-tip fast poll (100ms): the MOMENT any peer advertises something we
-  #lack, pull it from peers that provably hold it — don't wait for the 1s
-  #tick or a gossip retry. no-op (a few atomic/point reads) while nothing
-  #newer is advertised; bulk catchup stays on the main tick
-  def handle_info(:tick_tip, state) do
-    state = try do tick_tip(state) catch _,_ -> state end
-    :erlang.send_after(100, self(), :tick_tip)
-    {:noreply, state}
-  end
-
-  defp tick_tip(state) do
-    if !FabricSyncAttestGen.hasQuorum() do state else
-      now = :os.system_time(1000)
-
-      #a peer has a temporal tip above ours: pull the next entry
-      temporal_height = DB.Chain.height()
-      net_temp = FabricSyncAttestGen.highestTemporalHeight() || 0
-      state = if net_temp > temporal_height and net_temp - temporal_height <= 10 do
-        maybe_pull(state, :tip_temporal, temporal_height + 1, now, fn()->
-          {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(temporal_height + 1, :any)
-          chunk = [%{height: temporal_height + 1,
-            hashes: Enum.map(DB.Entry.by_height(temporal_height + 1), & &1.hash), e: true, a: true, c: true}]
-          pull_from(chunk, temporal_peers)
-        end)
-      else state end
-
-      #a peer ROOTED a height we haven't: its consensus aggregate exists,
-      #pull it (+ raw attestations) from peers whose rooted tip proves it
-      rooted_height = DB.Chain.rooted_height()
-      net_rooted = FabricSyncAttestGen.highestRootedHeight() || 0
-      if net_rooted > rooted_height and net_rooted - rooted_height <= 10 do
-        maybe_pull(state, :tip_rooted, rooted_height + 1, now, fn()->
-          {rooted_peers, _temporal_peers} = NodeANR.peers_w_min_height(rooted_height + 1, :any)
-          chunk = [%{height: rooted_height + 1, a: true, c: true}]
-          pull_from(chunk, rooted_peers)
-        end)
-      else state end
-    end
-  end
-
-  #one pull per target, then WAIT for it: a pulled peer with 200ms ping must
-  #not be re-hammered every 100ms. re-pull only when the target height moved
-  #on (reply arrived and applied) or the latency-scaled deadline expired
-  #(reply lost — fresh shuffle picks different peers)
-  defp maybe_pull(state, key, height, now, pull_fn) do
-    case state[key] do
-      {^height, deadline} when now < deadline -> state
-      _ ->
-        case pull_fn.() do
-          [] -> state
-          pulled ->
-            lat = pulled |> Enum.map(& NodeANR.get_latency(&1.pk)) |> Enum.max()
-            deadline = now + min(1000, max(300, 2 * lat))
-            Map.put(state, key, {height, deadline})
-        end
-    end
-  end
-
-  defp pull_from(chunk, peers) do
-    peers = Enum.take(Enum.shuffle(peers), 2)
-    Enum.each(peers, fn(peer)->
-      send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup(chunk)})
-    end)
-    peers
-  end
-
+  #single requester (like the original): one tick drives all catchup. it just
+  #polls fast near the tip and slow during bulk sync — no separate parallel
+  #poll subsystem to contend and duplicate with it. tick/0 returns the next
+  #interval in ms.
   def handle_info(:tick, state) do
-    cond do
-      #true -> :erlang.send_after(300, self(), :tick)
-      FabricGen.isSyncing() or FabricCoordinatorGen.isSyncing() or !FabricSyncAttestGen.hasQuorum() ->
-        :erlang.send_after(30, self(), :tick)
-
-      true ->
-        tick()
-        :erlang.send_after(1000, self(), :tick)
+    interval = cond do
+      FabricGen.isSyncing() or FabricCoordinatorGen.isSyncing() or !FabricSyncAttestGen.hasQuorum() -> 30
+      true -> tick()
     end
+    :erlang.send_after(interval, self(), :tick)
     {:noreply, state}
   end
 
@@ -191,8 +124,15 @@ defmodule FabricSyncGen do
         |> Enum.take(forward_budget)
         IO.puts "Behind BFT: #{behind_bft} behind, #{length(holes)} entry holes"
         case holes do
-          #every entry up to target is on disk, apply just needs to catch up
-          [] -> nil
+          #no missing-entry holes yet behind_bft persists: either apply is
+          #catching up, or the frontier holds only a wrong/unconnectable
+          #entry (doubleblock sibling we lack) — refetch it hash-deduped so
+          #the sibling can arrive, else this branch deadlocks
+          [] ->
+            frontier = temporal_height + 1
+            {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(frontier, :any)
+            chunk = [[%{height: frontier, hashes: DB.Entry.by_height_return_hashes(frontier), e: true, a: true, c: true}]]
+            fetch_chunks(chunk, temporal_peers)
           [frontier | _] ->
             {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(frontier, :any)
             Enum.take(Enum.shuffle(temporal_peers), 3)
@@ -232,5 +172,9 @@ defmodule FabricSyncGen do
         chunk = [[%{height: temporal_height, hashes: Enum.map(DB.Entry.by_height(temporal_height), fn(%{hash: hash})-> hash end), e: true, a: true}]]
         fetch_chunks(chunk, temporal_peers)
     end
+
+    #near the tip poll fast so a fresh block is fetched within ~100ms instead
+    #of a full second; drop back to 1s once there is a real backlog to work
+    if behind_temp <= 2 and behind_root_local <= 5 do 100 else 1000 end
   end
 end
