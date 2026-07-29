@@ -287,7 +287,7 @@ defmodule SpecialMeetingGen do
       next_height = entry.header.height + 1
       timeout = if rem(next_height, 100_000) == 99_999 do 30_000 else 8_000 end
 
-      delta >= timeout + 3_000
+      delta >= timeout + 16_000
     else
       true
     end

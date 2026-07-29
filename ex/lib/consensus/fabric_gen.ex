@@ -280,6 +280,72 @@ defmodule FabricGen do
     end
   end
 
+  #attesting is normally single-shot inside apply_entry_1, gated on replica
+  #leadership at the moment of apply. an entry applied inside a leadership hole
+  #(boot window after a restart, ack flap, failover) is skipped there and
+  #nothing ever re-attests it: the slot is filled so it cannot be re-produced,
+  #and catchup can only serve attestations that already exist somewhere. the
+  #chain then wedges with the unattested entry as the temporal tip (production
+  #needs rooted == height, so nothing builds past it). once the group elects a
+  #leader again it re-attests the tip for any pack key still missing from it
+  @retro_attest_grace_ms 8_000   #let the apply-path attestation land + propagate first
+  def maybe_retro_attest(entry) do
+    cond do
+      :persistent_term.get({ReplicaGen, :config}, nil) == nil -> nil
+      entry.header.height <= (DB.Chain.rooted_height() || 0) -> nil
+      !ReplicaGen.can_sign?() -> nil
+      true ->
+        try do retro_attest_tip(entry, :os.system_time(1000))
+        catch e,r -> IO.inspect {FabricGen, :retro_attest_failed, e, r} end
+    end
+  end
+
+  defp retro_attest_tip(entry, now) do
+    height = entry.header.height
+    hash = entry.hash
+    muts_hash = DB.Entry.muts_hash(hash)
+    seen = DB.Entry.seentime(hash)
+    cond do
+      !muts_hash -> nil
+      !seen or now - seen < @retro_attest_grace_ms -> nil
+      true ->
+        validators = DB.Chain.validators_for_height(height)
+        root_receipts = DB.Entry.root_receipts(hash)
+        root_contractstate = DB.Entry.root_contractstate(hash)
+        attestations = Application.fetch_env!(:ama, :keys)
+        |> Enum.filter(& &1.pk in validators)
+        |> Enum.filter(fn(seed)->
+          #never sign twice at one height, and skip once our signature is
+          #already visible in an aggregate (followers never store the leader's
+          #raw attestation, only the consensus carries its mask bit)
+          !DB.Attestation.by_height_by_signer(height, seed.pk)
+            and !signer_in_consensus?(hash, muts_hash, validators, seed.pk)
+        end)
+        |> Enum.map(fn(seed)->
+          attestation = Attestation.sign(seed.seed, hash, height, muts_hash, root_receipts, root_contractstate, :binary.copy(<<0>>, 32))
+          DB.Attestation.put(attestation, height)
+          send(FabricCoordinatorGen, {:add_attestation, attestation})
+          attestation
+        end)
+        if attestations != [] do
+          IO.puts "🩹 retro-attested tip #{height} entry #{Base58.encode(hash)}"
+          msg = NodeProto.event_attestation(attestations)
+          NodeGen.broadcast(msg)
+          peers = Application.fetch_env!(:ama, :seedanrs_as_peers)
+          send(NodeGen.get_socket_gen(), {:send_to, peers, msg})
+        end
+    end
+  end
+
+  defp signer_in_consensus?(entry_hash, muts_hash, validators, pk) do
+    case DB.Attestation.consensus(entry_hash, muts_hash) do
+      %{aggsig: %{mask: mask}} ->
+        idx = Util.index_of(validators, pk)
+        idx != nil and Util.get_bit(mask, idx)
+      _ -> false
+    end
+  end
+
   def proc_if_my_slot() do
     entry = DB.Chain.tip_entry()
     next_slot = entry.header.slot + 1
@@ -299,6 +365,10 @@ defmodule FabricGen do
         true -> false
       end
     end)
+
+    #before considering production: if the unrooted tip is missing our pack
+    #signatures (applied inside a replica leadership hole), re-attest it
+    maybe_retro_attest(entry)
 
     cond do
       slotFilled -> nil
