@@ -27,6 +27,9 @@ pub const VALIDATOR_CHANGE_QUEUE_EPOCHS: u64 = 2;
 
 pub const COMMISSION_RAISE_QUEUE_EPOCHS: u64 = VALIDATOR_CHANGE_QUEUE_EPOCHS + 1;
 
+//treasury and early-investor allocations are held in vaults at exactly this minimum
+//under standard lockup terms, which is why many validator positions are identically
+//sized with identical commission — a disclosed cap table in lockup, not one operator
 pub const VALIDATOR_MIN_STAKE: i128 = 1_000_000 * 1_000_000_000; //1m AMA
 
 pub const APY_EPOCH_DENOM: i128 = 6_307_200; //10_000 bps x 630.72 epochs per 365 day year

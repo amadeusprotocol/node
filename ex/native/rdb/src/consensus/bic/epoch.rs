@@ -10,6 +10,9 @@ use crate::consensus::consensus_kv::{kv_delete, kv_exists, kv_get, kv_get_next, 
 pub const EPOCH_EMISSION_BASE: i128 = 1_000_000_000_000_000;
 pub const EPOCH_INTERVAL: i128 = 100_000;
 
+//protocol fee: 25% of paid solver and vault emission routed to the treasury pool, comparable
+//to the founders/dev fees other L1s carry (e.g. Zcash's ~20% founders reward) — funds the
+//treasury and network upkeep, not a discretionary skim
 pub const NETWORK_TAX_BPS: i128 = 2_500; //25%
 
 pub const SOLVER_PARTICIPATION_TARGET: i128 = 100;

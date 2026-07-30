@@ -93,10 +93,12 @@ defmodule API.Chain do
 
     def kpi() do
       {_, uaw} = API.Contract.richlist()
+      validator_pks = DB.Chain.validators_for_height(DB.Chain.height() + 1) |> Enum.map(& Base58.encode(&1))
+      sol_pks = Enum.map(API.Epoch.score(), fn([pk, _score])-> pk end)
       %{
         ama_burned: Float.round(API.Contract.total_burned().float, 2),
         fees_paid: Float.round(API.Contract.total_burned().float * 2, 2),
-        active_validator_keys: 67 + length(API.Epoch.score()),
+        active_validator_keys: length(Enum.uniq(validator_pks ++ sol_pks)),
         active_peers: length(API.Peer.all()),
         block_time: 500,
         total_tx: DB.Chain.tx_count(),
