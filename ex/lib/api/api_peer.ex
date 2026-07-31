@@ -128,6 +128,8 @@ defmodule API.Peer do
         isChainPop: !!anr[:isChainPop],
         version: anr.version,
         ts: anr.ts,
+        anr_name: anr[:anr_name],
+        anr_desc: anr[:anr_desc],
       }
     end
 end
