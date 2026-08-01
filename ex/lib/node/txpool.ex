@@ -95,7 +95,7 @@ defmodule TXPool do
       end
     end
 
-    def grab_next_valid(chain_height, max_bytes \\ 2_000_000) do
+    def grab_next_valid(chain_height, max_bytes \\ Entry.entry_max_txs_bytes()) do
         try do
             chain_epoch = div(chain_height, 100_000)
 
