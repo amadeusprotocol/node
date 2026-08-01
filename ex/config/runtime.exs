@@ -107,6 +107,10 @@ config :ama, :archival_node, archival_node
 config :ama, :history_keep_epochs, history_keep_epochs
 config :ama, :pruner_enabled, not archival_node and history_keep_epochs > 0
 config :ama, :statepeerdownload, System.get_env("STATEPEERDOWNLOAD") in ["true", "y", "yes"]
+# AUTOUPDATE is off by default; it exists so validators can easily follow the chain.
+# It is not a point of centralization: anyone who wants to be truly decentralized can
+# follow the GitHub releases manually and choose whether to apply each patch while
+# building from source — but not many operators are that tech savvy.
 config :ama, :autoupdate, System.get_env("AUTOUPDATE") in ["true", "y", "yes"]
 config :ama, :computor_enabled, !is_nil(System.get_env("COMPUTOR"))
 config :ama, :autoslash_enabled, System.get_env("AUTOSLASH") in ["true", "y", "yes"]
