@@ -251,6 +251,13 @@ pub fn next(env: &mut ApplyEnv) {
     let epoch_cur = env.caller_env.entry_epoch;
     let epoch_next = env.caller_env.entry_epoch + 1;
 
+    //one-shot fork: PRIME issued at the per-network epoch; an existing testnet
+    //PRIME keeps its supply/runtime state but is made soulbound and receives
+    //the canonical admin permissions
+    if epoch_next == consensus::bic::prime::prime_issuance_epoch(env) {
+        consensus::bic::prime::issue_prime(env);
+    }
+
     consensus::bic::lockup_vault::promote_pending_validators(env, epoch_next);
 
     let trainers = kv_get_trainers(env, env.caller_env.entry_height.saturating_add(1));

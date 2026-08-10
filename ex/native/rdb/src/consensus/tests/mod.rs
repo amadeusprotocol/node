@@ -2,3 +2,5 @@
 
 pub mod chain_harness;
 pub mod lockup_vault;
+pub mod prime;
+pub mod wasm_attachments;

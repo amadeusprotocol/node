@@ -90,6 +90,82 @@ pub fn has_permission(env: &mut crate::consensus::consensus_apply::ApplyEnv, sym
     }
 }
 
+fn validate_permission_list(items: Vec<Term>, error: &'static str) -> Vec<Vec<u8>> {
+    let mut permissions = Vec::with_capacity(items.len());
+    for item in items {
+        let Term::Binary(permission) = item else { panic_any(error) };
+        if permission.len() != 48 || !consensus::bls12_381::validate_public_key(&permission) {
+            panic_any("invalid_permission_pk")
+        }
+        if !permissions.contains(&permission) {
+            permissions.push(permission);
+        }
+    }
+    permissions
+}
+
+fn decode_permission_list(encoded: &[u8], error: &'static str) -> Vec<Vec<u8>> {
+    let Term::List(items) = decode(encoded).unwrap_or_else(|_| panic_any(error)) else { panic_any(error) };
+    validate_permission_list(items, error)
+}
+
+//Atomically rotate the permission list of any existing coin. Arguments are
+//passed as one vecpak map with add, remove, and symbol keys. The caller must be
+//in the current permission list, and the resulting list cannot be empty.
+pub fn call_update_permission(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Vec<Vec<u8>>) {
+    if args.len() != 1 {
+        panic_any("invalid_args")
+    }
+    let Term::PropList(pairs) = decode(&args[0]).unwrap_or_else(|_| panic_any("invalid_args")) else { panic_any("invalid_args") };
+    let mut additions = None;
+    let mut removals = None;
+    let mut symbol = None;
+    for (key, value) in pairs {
+        let Term::Binary(key) = key else { panic_any("invalid_args") };
+        match key.as_slice() {
+            b"add" if additions.is_none() => additions = Some(value),
+            b"remove" if removals.is_none() => removals = Some(value),
+            b"symbol" if symbol.is_none() => symbol = Some(value),
+            b"add" | b"remove" | b"symbol" => panic_any("invalid_args"),
+            _ => panic_any("unknown_arg"),
+        }
+    }
+    let Term::List(additions) = additions.unwrap_or_else(|| panic_any("invalid_args")) else { panic_any("invalid_add_permissions") };
+    let Term::List(removals) = removals.unwrap_or_else(|| panic_any("invalid_args")) else { panic_any("invalid_remove_permissions") };
+    let Term::Binary(symbol) = symbol.unwrap_or_else(|| panic_any("invalid_args")) else { panic_any("invalid_symbol") };
+
+    validate_symbol(&symbol);
+    if !exists(env, &symbol) {
+        panic_any("symbol_doesnt_exist")
+    }
+
+    let permission_key = bcat(&[b"coin:", &symbol, b":permission"]);
+    let encoded = kv_get(env, &permission_key).unwrap_or_else(|| panic_any("permissions_missing"));
+    let mut permissions = decode_permission_list(&encoded, "invalid_permissions");
+    if !permissions.iter().any(|permission| permission.as_slice() == env.caller_env.account_caller.as_slice()) {
+        panic_any("no_permissions")
+    }
+
+    let additions = validate_permission_list(additions, "invalid_add_permissions");
+    let removals = validate_permission_list(removals, "invalid_remove_permissions");
+    if additions.iter().any(|permission| removals.contains(permission)) {
+        panic_any("permission_update_overlap")
+    }
+
+    for permission in additions {
+        if !permissions.contains(&permission) {
+            permissions.push(permission);
+        }
+    }
+    permissions.retain(|permission| !removals.contains(permission));
+    if permissions.is_empty() {
+        panic_any("permissions_cannot_be_empty")
+    }
+
+    let encoded = encode(Term::List(permissions.into_iter().map(Term::Binary).collect()));
+    kv_put(env, &permission_key, &encoded);
+}
+
 pub fn call_transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Vec<Vec<u8>>) {
     if args.len() != 3 {
         panic_any("invalid_args")

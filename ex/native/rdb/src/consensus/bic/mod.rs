@@ -8,6 +8,7 @@ pub mod lockup;
 pub mod lockup_prime;
 pub mod lockup_vault;
 pub mod nft;
+pub mod prime;
 pub mod protocol;
 pub mod sol;
 pub mod sol_bloom;

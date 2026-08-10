@@ -940,11 +940,14 @@ pub fn call_bic(
 
         (b"Coin", b"transfer") => consensus::bic::coin::call_transfer(env, args),
 
+        //FORKHEIGHT3: PRIME exists from here (issued in epoch::next); coin admins
+        //can mint, pause, and atomically rotate permissions for existing symbols
+        (b"Coin", b"mint") if env.caller_env.entry_height >= protocol::forkheight3(env) => consensus::bic::coin::call_mint(env, args),
+        (b"Coin", b"pause") if env.caller_env.entry_height >= protocol::forkheight3(env) => consensus::bic::coin::call_pause(env, args),
+        (b"Coin", b"update_permission") if env.caller_env.entry_height >= protocol::forkheight3(env) => consensus::bic::coin::call_update_permission(env, args),
 
         /*
         (b"Coin", b"create_and_mint") => consensus::bic::coin::call_create_and_mint(env, args),
-        (b"Coin", b"mint") => consensus::bic::coin::call_mint(env, args),
-        (b"Coin", b"pause") => consensus::bic::coin::call_pause(env, args),
         (b"Nft", b"transfer") => consensus::bic::nft::call_transfer(env, args),
         (b"Nft", b"create_collection") => consensus::bic::nft::call_create_collection(env, args),
         (b"Nft", b"mint") => consensus::bic::nft::call_mint(env, args),
@@ -954,9 +957,6 @@ pub fn call_bic(
                 consensus_kv::exec_budget_decr(env, protocol::COST_PER_DEPLOY);
                 consensus::bic::contract::call_deploy(env, args)
         },
-        (b"LockupPrime", b"lock") => consensus::bic::lockup_prime::call_lock(env, args),
-        (b"LockupPrime", b"unlock") => consensus::bic::lockup_prime::call_unlock(env, args),
-        (b"LockupPrime", b"daily_checkin") => consensus::bic::lockup_prime::call_daily_checkin(env, args),
         */
         _ => std::panic::panic_any("invalid_bic_action"),
     }
@@ -1018,6 +1018,12 @@ pub fn call_wasmvm(
             }
             if amount > consensus::bic::coin::balance(env, &env.caller_env.account_caller.clone(), &attached_symbol) {
                 panic_any("attached_amount_insufficient_funds")
+            }
+            if consensus::bic::coin::paused(env, &attached_symbol) {
+                panic_any("paused")
+            }
+            if consensus::bic::coin::soulbound(env, &attached_symbol) {
+                panic_any("soulbound")
             }
 
             consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &contract, b":balance:", &attached_symbol]), amount);

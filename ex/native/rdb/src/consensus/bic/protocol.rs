@@ -8,6 +8,11 @@ pub const FORKHEIGHT_TESTNET: u64 = 0;
 pub const FORKHEIGHT2: u64 = 767_00000;
 pub const FORKHEIGHT2_TESTNET: u64 = 0;
 
+//epoch 792 mainnet / 462 testnet: PRIME issued (admin-mintable, soulbound);
+//Coin.mint/Coin.pause/Coin.update_permission dispatch enabled
+pub const FORKHEIGHT3: u64 = 792_00000;
+pub const FORKHEIGHT3_TESTNET: u64 = 462_00000;
+
 pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
     if env.testnet {
         FORKHEIGHT_TESTNET
@@ -21,6 +26,14 @@ pub fn forkheight2(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
         FORKHEIGHT2_TESTNET
     } else {
         FORKHEIGHT2
+    }
+}
+
+pub fn forkheight3(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
+    if env.testnet {
+        FORKHEIGHT3_TESTNET
+    } else {
+        FORKHEIGHT3
     }
 }
 

@@ -2,7 +2,7 @@ use std::arch::x86_64::*;
 use std::{
     cell::RefCell,
     mem,
-    mem::{size_of, MaybeUninit},
+    mem::MaybeUninit,
     ptr, slice,
 };
 
@@ -45,16 +45,22 @@ impl Drop for ScratchGuard {
     }
 }
 
+fn allocate_scratch() -> Box<AMAMatMul> {
+    let mut boxed_uninit: Box<MaybeUninit<AMAMatMul>> = Box::new_uninit();
+    // SAFETY: every field of AMAMatMul is an integer array, so an all-zero
+    // byte pattern is valid. Keep the allocation as MaybeUninit until every
+    // byte (including padding) is written.
+    unsafe {
+        ptr::write_bytes(boxed_uninit.as_mut_ptr(), 0, 1);
+        boxed_uninit.assume_init()
+    }
+}
+
 /// Obtain the per‑thread scratch buffer, allocating it the first time.
 fn borrow_scratch() -> ScratchGuard {
     SCRATCH.with(|tls| {
         let mut slot = tls.borrow_mut();
-        let buf = slot.take().unwrap_or_else(|| {
-            // First time on this thread: allocate **uninitialised** memory.
-            let boxed_uninit: Box<MaybeUninit<AMAMatMul>> = Box::new_uninit(); // ≈ zero cost for the OS here
-                                                                               // SAFETY: we promise to fully overwrite every byte before reading.
-            unsafe { boxed_uninit.assume_init() }
-        });
+        let buf = slot.take().unwrap_or_else(allocate_scratch);
         ScratchGuard { buf: Some(buf) }
     })
 }
@@ -336,6 +342,16 @@ mod tests {
         };
         let scalar = freivalds_inner_scalar(&s.Rs, &s.A, &s.B, &s.C);
         (avx2.unwrap_or(scalar), scalar)
+    }
+
+    #[test]
+    fn scratch_allocation_is_zero_initialized() {
+        let s = allocate_scratch();
+        assert!(s.A.iter().flatten().all(|&value| value == 0));
+        assert!(s.B.iter().flatten().all(|&value| value == 0));
+        assert!(s.B2.iter().flatten().all(|&value| value == 0));
+        assert!(s.Rs.iter().flatten().all(|&value| value == 0));
+        assert!(s.C.iter().flatten().all(|&value| value == 0));
     }
 
     #[test]
