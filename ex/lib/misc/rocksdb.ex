@@ -192,9 +192,9 @@ defmodule RocksDB do
                 value = if opts[:term] do :erlang.binary_to_term(value, [:safe]) else value end
                 value = if opts[:to_integer] do :erlang.binary_to_integer(value) else value end
                 res = RDB.iterator_move(it, :next)
-                get_prefix_1(prefix, it, res, opts, acc ++ [{key, value}])
-            {:error, :invalid_iterator} -> acc
-            _ -> acc
+                get_prefix_1(prefix, it, res, opts, [{key, value} | acc])
+            {:error, :invalid_iterator} -> Enum.reverse(acc)
+            _ -> Enum.reverse(acc)
         end
     end
 

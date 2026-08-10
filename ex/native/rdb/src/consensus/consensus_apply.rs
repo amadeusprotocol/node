@@ -901,6 +901,7 @@ pub fn call_bic(
             (b"Nft", b"transfer") => return consensus::bic::nft::call_transfer(env, args),
             (b"Nft", b"create_collection") => return consensus::bic::nft::call_create_collection(env, args),
             (b"Nft", b"mint") => return consensus::bic::nft::call_mint(env, args),
+            (b"Nft", b"update_permission") => return consensus::bic::nft::call_update_permission(env, args),
             (b"Lockup", b"lock") => return consensus::bic::lockup::call_lock(env, args),
             (b"Lockup", b"unlock") => return consensus::bic::lockup::call_unlock(env, args),
             (b"Contract", b"deploy") => {
@@ -951,6 +952,7 @@ pub fn call_bic(
         (b"Nft", b"transfer") => consensus::bic::nft::call_transfer(env, args),
         (b"Nft", b"create_collection") => consensus::bic::nft::call_create_collection(env, args),
         (b"Nft", b"mint") => consensus::bic::nft::call_mint(env, args),
+        (b"Nft", b"update_permission") => consensus::bic::nft::call_update_permission(env, args),
         (b"Lockup", b"lock") => consensus::bic::lockup::call_lock(env, args),
         (b"Lockup", b"unlock") => consensus::bic::lockup::call_unlock(env, args),
         (b"Contract", b"deploy") => {
