@@ -35,28 +35,39 @@ defmodule API.Contract do
     def richlist() do
       API.cached(:richlist, @richlist_ttl_ms, fn -> richlist_compute() end)
     end
+    #bounds the working set: the accumulator is squeezed back to the top-N every
+    #@richlist_prune_every entries instead of holding every account in memory
+    @richlist_prune_every 100_000
+
     defp richlist_compute() do
-      key = "account:#{:binary.copy(<<0>>, 48)}:balance:AMA"
-      {acc, count} = richlist_1(key, {[], 0})
+      %{db: _db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
+      {:ok, it} = RDB.iterator_cf(cf.contractstate)
+      res = RDB.iterator_move(it, {:seek, "account:"})
+      {acc, count} = richlist_1(it, res, {[], 0, 0})
+      RDB.iterator_close(it)
       acc = acc
-      |> Enum.filter(& &1.symbol == "AMA")
       |> Enum.sort_by(& &1.flat, :desc)
       |> Enum.take(@richlist_top)
       {acc, count}
     end
-    def richlist_1(key, {acc, count}) do
-      %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-      seek = RocksDB.seek_next(key, %{db: db, cf: cf.contractstate})
-      case seek do
-        {<<"account:", pk::384, ":balance:AMA">>, value} ->
-          key = <<"account:", (pk+1)::384, ":balance:AMA">>
+    #one sequential pass over account:* on a single iterator; the previous
+    #per-account seek_next reopened a rocksdb iterator for every key, which
+    #cost minutes of CPU per call on an archival state
+    defp richlist_1(it, res, {acc, count, pending}) do
+      case res do
+        {:ok, <<"account:", pk::384, ":balance:AMA">>, value} ->
           flat = :erlang.binary_to_integer(value)
           entry = %{pk: Base58.encode(<<pk::384>>), symbol: "AMA", flat: flat, float: trunc(BIC.Coin.from_flat(flat))}
-          richlist_1(key, {[entry | acc], count + 1})
-        {<<"account:", pk::384, _::binary>>, _} ->
-          key = <<"account:", pk::384, ":balance:AMA">>
-          richlist_1(key, {acc, count})
-        {_, _} -> {acc, count}
+          {acc, pending} = if pending >= @richlist_prune_every do
+            {acc |> Enum.sort_by(& &1.flat, :desc) |> Enum.take(@richlist_top), 0}
+          else
+            {acc, pending}
+          end
+          richlist_1(it, RDB.iterator_move(it, :next), {[entry | acc], count + 1, pending + 1})
+        {:ok, <<"account:", _rest::binary>>, _} ->
+          richlist_1(it, RDB.iterator_move(it, :next), {acc, count, pending})
+        _ ->
+          {acc, count}
       end
     end
 
