@@ -43,17 +43,14 @@ defmodule API.Contract do
       %{db: _db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       {:ok, it} = RDB.iterator_cf(cf.contractstate)
       res = RDB.iterator_move(it, {:seek, "account:"})
-      {acc, count} = richlist_1(it, res, {[], 0, 0})
+      {acc, count} = richlist_1(it, res, {[], 0, 0, nil})
       RDB.iterator_close(it)
       acc = acc
       |> Enum.sort_by(& &1.flat, :desc)
       |> Enum.take(@richlist_top)
       {acc, count}
     end
-    #one sequential pass over account:* on a single iterator; the previous
-    #per-account seek_next reopened a rocksdb iterator for every key, which
-    #cost minutes of CPU per call on an archival state
-    defp richlist_1(it, res, {acc, count, pending}) do
+    defp richlist_1(it, res, {acc, count, pending, uaw_pk}) do
       case res do
         {:ok, <<"account:", pk::384, ":balance:AMA">>, value} ->
           flat = :erlang.binary_to_integer(value)
@@ -63,12 +60,22 @@ defmodule API.Contract do
           else
             {acc, pending}
           end
-          richlist_1(it, RDB.iterator_move(it, :next), {[entry | acc], count + 1, pending + 1})
+          {count, uaw_pk} = count_uaw(count, uaw_pk, pk)
+          richlist_1(it, RDB.iterator_move(it, :next), {[entry | acc], count, pending + 1, uaw_pk})
+        {:ok, <<"account:", pk::384, ":balance:", _symbol::binary>>, _value} ->
+          {count, uaw_pk} = count_uaw(count, uaw_pk, pk)
+          richlist_1(it, RDB.iterator_move(it, :next), {acc, count, pending, uaw_pk})
+        {:ok, <<"account:", pk::384, ":nft:", _collection_token::binary>>, _value} ->
+          {count, uaw_pk} = count_uaw(count, uaw_pk, pk)
+          richlist_1(it, RDB.iterator_move(it, :next), {acc, count, pending, uaw_pk})
         {:ok, <<"account:", _rest::binary>>, _} ->
-          richlist_1(it, RDB.iterator_move(it, :next), {acc, count, pending})
+          richlist_1(it, RDB.iterator_move(it, :next), {acc, count, pending, uaw_pk})
         _ ->
           {acc, count}
       end
+    end
+    defp count_uaw(count, last_pk, pk) do
+      if pk != last_pk do {count + 1, pk} else {count, last_pk} end
     end
 
     def total_burned() do
