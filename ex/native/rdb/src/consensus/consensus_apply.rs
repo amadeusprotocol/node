@@ -808,7 +808,7 @@ fn migrate_db(env: &mut ApplyEnv) {
     while let Some((next_key_wo_prefix, _val)) = crate::consensus::consensus_kv::kv_get_next(env, b"bic:epoch:trainers:height:", &cursor) {
         let height = std::str::from_utf8(&next_key_wo_prefix).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_epoch"));
         let trainers: Vec<vecpak::Term> = consensus::bic::epoch::kv_get_trainers(env, height).into_iter().map(vecpak::Term::Binary).collect();
-        let buf = vecpak::encode(vecpak::Term::List(trainers));
+        let buf = vecpak::encode(vecpak::Term::List(trainers)).unwrap_or_else(|error| panic_any(error));
         crate::consensus::consensus_kv::kv_put(env, &crate::bcat(&[b"bic:epoch:validators:height:", &next_key_wo_prefix]), &buf);
         cursor = next_key_wo_prefix;
     }

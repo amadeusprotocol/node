@@ -55,5 +55,6 @@ pub fn issue_prime(env: &mut crate::consensus::consensus_apply::ApplyEnv) {
     if !env.testnet {
         admins.push(Term::Binary(PRIME_ADMIN_HOT_2.to_vec()));
     }
-    kv_put(env, &bcat(&[b"coin:PRIME:permission"]), &encode(Term::List(admins)));
+    let encoded = encode(Term::List(admins)).unwrap_or_else(|error| std::panic::panic_any(error));
+    kv_put(env, &bcat(&[b"coin:PRIME:permission"]), &encoded);
 }

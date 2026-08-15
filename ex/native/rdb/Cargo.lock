@@ -2065,17 +2065,18 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "vecpak"
 version = "0.1.0"
-source = "git+https://github.com/amadeusprotocol/chain#d51547efa245f7cf6dc3cc14b7318034b80d1b90"
+source = "git+https://github.com/amadeusprotocol/chain?rev=0b4a9d7761fbe4a663e60574198db8c5cb9276c1#0b4a9d7761fbe4a663e60574198db8c5cb9276c1"
 dependencies = [
+ "num-bigint",
  "serde",
 ]
 
 [[package]]
 name = "vecpak_ex"
 version = "0.1.0"
-source = "git+https://github.com/amadeusprotocol/chain#d51547efa245f7cf6dc3cc14b7318034b80d1b90"
+source = "git+https://github.com/amadeusprotocol/chain?rev=0b4a9d7761fbe4a663e60574198db8c5cb9276c1#0b4a9d7761fbe4a663e60574198db8c5cb9276c1"
 dependencies = [
- "num-traits",
+ "num-bigint",
  "rustler",
  "vecpak",
 ]

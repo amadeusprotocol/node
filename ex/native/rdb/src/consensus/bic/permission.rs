@@ -21,7 +21,8 @@ pub fn has(env: &mut ApplyEnv, permission_key: &[u8], signer: &[u8]) -> bool {
 }
 
 pub fn initialize(env: &mut ApplyEnv, permission_key: &[u8], admin: &[u8]) {
-    let encoded = encode(Term::List(vec![Term::Binary(admin.to_vec())]));
+    let encoded = encode(Term::List(vec![Term::Binary(admin.to_vec())]))
+        .unwrap_or_else(|error| panic_any(error));
     kv_put(env, permission_key, &encoded);
 }
 
@@ -104,6 +105,7 @@ pub fn apply_update(env: &mut ApplyEnv, permission_key: &[u8], caller: &[u8], up
         panic_any("permissions_cannot_be_empty")
     }
 
-    let encoded = encode(Term::List(permissions.into_iter().map(Term::Binary).collect()));
+    let encoded = encode(Term::List(permissions.into_iter().map(Term::Binary).collect()))
+        .unwrap_or_else(|error| panic_any(error));
     kv_put(env, permission_key, &encoded);
 }

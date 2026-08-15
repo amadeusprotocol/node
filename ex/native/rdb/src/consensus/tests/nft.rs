@@ -13,6 +13,7 @@ fn binary_map(pairs: &[(&[u8], &[u8])]) -> Vec<u8> {
     encode(Term::PropList(
         pairs.iter().map(|(key, value)| (Term::Binary(key.to_vec()), Term::Binary(value.to_vec()))).collect(),
     ))
+    .expect("vecpak encode")
 }
 
 fn create_collection_with_type(chain: &Chain, admin: &Wallet, collection: &[u8], soulbound: &[u8], nonfungible: &[u8]) -> Result<(), String> {
@@ -42,6 +43,7 @@ fn permission_update(add: &[&[u8]], remove: &[&[u8]], collection: &[u8]) -> Vec<
         (Term::Binary(b"remove".to_vec()), addresses(remove)),
         (Term::Binary(b"collection".to_vec()), Term::Binary(collection.to_vec())),
     ]))
+    .expect("vecpak encode")
 }
 
 fn permissions(chain: &Chain, collection: &[u8]) -> Vec<Vec<u8>> {

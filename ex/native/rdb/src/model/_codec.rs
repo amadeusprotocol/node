@@ -9,7 +9,7 @@ pub trait EncodeIntoBuf {
 impl<T: EncodeToTerm> EncodeIntoBuf for T {
     fn encode_into_buf(&self, buf: &mut Vec<u8>) -> Result<(), &'static str> {
         let term = self.to_term()?;
-        encode_term(buf, term); // use &term if your encoder takes &Term
+        encode_term(buf, term)?;
         Ok(())
     }
 }

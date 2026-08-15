@@ -42,7 +42,7 @@ fn prime_balance(chain: &Chain, addr: &[u8]) -> i128 {
 }
 
 fn encode_admins(admins: &[&[u8]]) -> Vec<u8> {
-    encode(Term::List(admins.iter().map(|admin| Term::Binary(admin.to_vec())).collect()))
+    encode(Term::List(admins.iter().map(|admin| Term::Binary(admin.to_vec())).collect())).expect("vecpak encode")
 }
 
 fn encode_permission_update(add: &[&[u8]], remove: &[&[u8]], symbol: &[u8]) -> Vec<u8> {
@@ -52,6 +52,7 @@ fn encode_permission_update(add: &[&[u8]], remove: &[&[u8]], symbol: &[u8]) -> V
         (Term::Binary(b"remove".to_vec()), addresses(remove)),
         (Term::Binary(b"symbol".to_vec()), Term::Binary(symbol.to_vec())),
     ]))
+    .expect("vecpak encode")
 }
 
 fn coin_permissions(chain: &Chain, symbol: &[u8]) -> Vec<Vec<u8>> {
@@ -306,7 +307,7 @@ fn existing_testnet_prime_keeps_supply_and_receives_canonical_config() {
     chain.put(b"coin:PRIME:mintable", b"true");
     chain.put(b"coin:PRIME:pausable", b"true");
     assert_eq!(chain.get(b"coin:PRIME:soulbound"), None);
-    let legacy_permissions = encode(Term::List(vec![Term::Binary(vec![1u8; 48])]));
+    let legacy_permissions = encode(Term::List(vec![Term::Binary(vec![1u8; 48])])).expect("vecpak encode");
     chain.put(b"coin:PRIME:permission", &legacy_permissions);
 
     chain.height = (PRIME_ISSUANCE_EPOCH_TESTNET - 1) * 100_000;

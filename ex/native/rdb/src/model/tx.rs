@@ -99,7 +99,7 @@ impl DecodeFromTerm for TX {
 
 pub fn to_bytes_tx(tx: &TX) -> Result<Vec<u8>, &'static str> {
     let term = tx.to_term()?;
-    Ok(vecpak::encode(term))
+    vecpak::encode(term)
 }
 
 impl EncodeToTerm for TXU {

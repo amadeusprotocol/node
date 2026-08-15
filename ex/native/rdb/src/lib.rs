@@ -840,7 +840,7 @@ fn contract_validate<'a>(env: Env<'a>, db: ResourceArc<DbResource>, entry_vecpak
 #[rustler::nif]
 fn vecpak_encode<'a>(env: Env<'a>, map: Term<'a>) -> Result<Term<'a>, Error> {
     let mut buf = Vec::with_capacity(1024);
-    vecpak_ex::encode_term(env, &mut buf, map)?;
+    vecpak_ex::encode_term(env, &mut buf, map, 0)?;
 
     let mut ob = OwnedBinary::new(buf.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
     ob.as_mut_slice().copy_from_slice(&buf);
@@ -848,9 +848,10 @@ fn vecpak_encode<'a>(env: Env<'a>, map: Term<'a>) -> Result<Term<'a>, Error> {
     Ok(Binary::from_owned(ob, env).encode(env))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn vecpak_decode<'a>(env: Env<'a>, bin: Binary) -> Result<Term<'a>, Error> {
-    let term = vecpak_ex::decode_term_from_slice(env, bin.as_slice())?;
+    let limits = vecpak_ex::VecpakLimits::default();
+    let term = vecpak_ex::decode_term_from_slice(env, bin.as_slice(), &limits)?;
     Ok(term.encode(env))
 }
 

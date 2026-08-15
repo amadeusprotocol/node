@@ -12,10 +12,22 @@ use vecpak::{encode, Term};
 const LV: &[u8] = b"LockupVault";
 
 //build a canonical vecpak tag-7 map blob; encode sorts the keys, so the call
-//order here is irrelevant and duplicate keys self-reject at decode
+//order here is irrelevant and duplicate keys self-reject at encode
 fn vp_map(pairs: Vec<(&[u8], Term)>) -> Vec<u8> {
     let terms: Vec<(Term, Term)> = pairs.into_iter().map(|(k, v)| (Term::Binary(k.to_vec()), v)).collect();
-    encode(Term::PropList(terms))
+    encode(Term::PropList(terms)).expect("vecpak encode")
+}
+
+//Build a raw tag-7 map without the encoder's canonical-map checks. This is
+//only for negative decoder tests which intentionally contain duplicate keys.
+fn vp_raw_map(pairs: Vec<(&[u8], Term)>) -> Vec<u8> {
+    let mut blob = vec![7];
+    vecpak::encode_varint(&mut blob, pairs.len() as i128);
+    for (key, value) in pairs {
+        blob.extend(encode(Term::Binary(key.to_vec())).expect("vecpak key encode"));
+        blob.extend(encode(value).expect("vecpak value encode"));
+    }
+    blob
 }
 
 fn create_call(chain: &Chain, w: &Wallet, pairs: Vec<(&[u8], Term)>) -> Result<(), String> {
@@ -198,17 +210,15 @@ fn create_map_strict_decode() {
         Err("unknown_arg".to_string())
     );
 
-    //duplicate key: encode sorts the pair adjacent, decode rejects as non-canonical
+    //duplicate key: bypass the hardened encoder so the decoder still receives
+    //and rejects the intentionally non-canonical map
+    let duplicate_key = vp_raw_map(vec![
+        (b"amount", Term::VarInt(to_flat(1000))),
+        (b"amount", Term::VarInt(to_flat(2000))),
+        (b"tier", Term::Binary(b"3m".to_vec())),
+    ]);
     assert_eq!(
-        create_call(
-            &chain,
-            &w,
-            vec![
-                (b"amount", Term::VarInt(to_flat(1000))),
-                (b"amount", Term::VarInt(to_flat(2000))),
-                (b"tier", Term::Binary(b"3m".to_vec())),
-            ]
-        ),
+        chain.call(&w, LV, b"create", &[&duplicate_key]),
         Err("invalid_args".to_string())
     );
 
@@ -218,7 +228,7 @@ fn create_map_strict_decode() {
     assert_eq!(chain.call(&w, LV, b"create", &[&blob, &blob]), Err("invalid_args".to_string()));
 
     //a non-map term (bare list) is rejected
-    let not_map = encode(Term::List(vec![Term::VarInt(1)]));
+    let not_map = encode(Term::List(vec![Term::VarInt(1)])).expect("vecpak encode");
     assert_eq!(chain.call(&w, LV, b"create", &[&not_map]), Err("invalid_args".to_string()));
 
     //wrong value types per key
@@ -291,12 +301,9 @@ fn create_amount_bounds() {
     let below = Err("vault_amount_below_minimum".to_string());
     assert_eq!(try_amount(0), below);
     assert_eq!(try_amount(-1), below);
-    assert_eq!(try_amount(i128::MIN + 1), below); //most-negative representable varint
+    assert_eq!(try_amount(i128::MIN + 1), below);
+    assert_eq!(try_amount(i128::MIN), below);
     assert_eq!(try_amount(MIN_VAULT_AMOUNT - 1), below);
-
-    //i128::MIN itself is not a representable vecpak varint (|MIN| > i128::MAX), so
-    //it is rejected at decode and never reaches the amount check
-    assert_eq!(try_amount(i128::MIN), Err("invalid_args".to_string()));
 
     //above balance
     assert_eq!(try_amount(to_flat(99_999)), Err("insufficient_funds".to_string()));

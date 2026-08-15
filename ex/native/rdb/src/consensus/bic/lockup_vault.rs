@@ -181,7 +181,7 @@ fn vault_key(owner: &[u8], vault_index: &[u8]) -> Vec<u8> {
 }
 
 fn store_vault(env: &mut ApplyEnv, key: &[u8], vault: &Vault) {
-    let buf = encode(vault.to_term());
+    let buf = encode(vault.to_term()).unwrap_or_else(|error| panic_any(error));
     kv_put(env, key, &buf);
 }
 
@@ -237,7 +237,8 @@ fn store_commission(env: &mut ApplyEnv, key: &[u8], bps: u64, pending_bps: u64, 
         (Term::Binary(b"pending_bps".to_vec()), Term::VarInt(pending_bps as i128)),
         (Term::Binary(b"pending_epoch".to_vec()), Term::VarInt(pending_epoch as i128)),
     ]);
-    kv_put(env, key, &encode(term));
+    let encoded = encode(term).unwrap_or_else(|error| panic_any(error));
+    kv_put(env, key, &encoded);
 }
 
 pub fn commission_bps_for_epoch(env: &mut ApplyEnv, validator: &[u8], epoch: u64) -> u64 {

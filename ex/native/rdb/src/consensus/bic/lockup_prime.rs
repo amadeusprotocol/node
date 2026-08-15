@@ -20,7 +20,7 @@ pub fn call_lock(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Ve
             102, 166, 54, 66, 245, 148, 140, 44, 78, 56, 84, 12, 222, 205, 57, 210,
         ];
         admin.push(Term::Binary(v0.to_vec()));
-        let term_admins = encode(Term::List(admin));
+        let term_admins = encode(Term::List(admin)).unwrap_or_else(|error| panic_any(error));
         kv_put(env, &bcat(&[b"coin:PRIME:permission"]), &term_admins);
 
         kv_put(env, &bcat(&[b"coin:PRIME:mintable"]), b"true");

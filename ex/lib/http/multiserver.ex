@@ -1,4 +1,6 @@
 defmodule Ama.MultiServer do
+    @max_http_body_size 1024 * 1024
+
     def init(state) do
         receive do
             :socket_ack -> :ok
@@ -143,11 +145,31 @@ defmodule Ama.MultiServer do
       end)
     end
 
+    @doc false
+    def validate_body_length(r, max_bytes) when is_integer(max_bytes) and max_bytes >= 0 do
+        case Map.get(r.headers, "content-length") do
+            nil ->
+                {:error, :length_required}
+
+            value when is_binary(value) ->
+                case Integer.parse(value) do
+                    {length, ""} when length >= 0 and length <= max_bytes -> :ok
+                    {length, ""} when length > max_bytes -> {:error, :payload_too_large}
+                    _ -> {:error, :invalid_content_length}
+                end
+
+            _ ->
+                {:error, :invalid_content_length}
+        end
+    end
+
+    defp read_body_all_limited(state, r, max_bytes \\ @max_http_body_size) do
+        :ok = validate_body_length(r, max_bytes)
+        Photon.HTTP.read_body_all(state.socket, r)
+    end
+
     def handle_http(state) do
         r = state.request
-        #IO.inspect r.path
-
-        #String.starts_with?(r.path, "/api/tx") && IO.inspect r
         testnet = !!Application.fetch_env!(:ama, :testnet)
         cond do
             r.method in ["OPTIONS", "HEAD"] ->
@@ -245,15 +267,15 @@ defmodule Ama.MultiServer do
                 quick_reply(state, result)
 
             r.method == "POST" and String.starts_with?(r.path, "/api/contract/validate") ->
-                {r, bytecode} = Photon.HTTP.read_body_all(state.socket, r)
+                {r, bytecode} = read_body_all_limited(state, r)
                 result = API.Contract.validate(bytecode)
                 quick_reply(%{state|request: r}, result)
             r.method == "POST" and r.path == "/api/contract/get" ->
-                {r, key} = Photon.HTTP.read_body_all(state.socket, r)
+                {r, key} = read_body_all_limited(state, r)
                 result = API.Contract.get(key)
                 quick_reply(%{state|request: r}, JSX.encode!(result))
             r.method == "POST" and r.path == "/api/contract/get_prefix" ->
-                {r, key} = Photon.HTTP.read_body_all(state.socket, r)
+                {r, key} = read_body_all_limited(state, r)
                 if not is_binary(key) or byte_size(key) < 8 do
                     quick_reply(%{state|request: r}, JSX.encode!(%{error: :prefix_too_short, min: 8}), 400)
                 else
@@ -261,7 +283,7 @@ defmodule Ama.MultiServer do
                     quick_reply(%{state|request: r}, RDB.vecpak_encode(result))
                 end
             r.method == "POST" and r.path == "/api/contract/view" ->
-                {r, vecpak} = Photon.HTTP.read_body_all(state.socket, r)
+                {r, vecpak} = read_body_all_limited(state, r)
                 m = RDB.vecpak_decode(vecpak)
                 {success, result, logs} = API.Contract.view(m.contract, m.function, m.args, m[:pk])
                 logs = Enum.map(logs, & RocksDB.ascii_dump(&1))
@@ -354,12 +376,14 @@ defmodule Ama.MultiServer do
                 quick_reply(state, %{error: :ok, list: list})
 
             r.method == "POST" and r.path == "/api/tx/submit" ->
-                {r, tx_packed} = Photon.HTTP.read_body_all(state.socket, r)
+                max_bytes = max(@max_http_body_size, Application.fetch_env!(:ama, :tx_size) * 2)
+                {r, tx_packed} = read_body_all_limited(state, r, max_bytes)
                 tx_packed = if Base58.likely(tx_packed) do Base58.decode(tx_packed |> String.trim()) else tx_packed end
                 result = API.TX.submit(tx_packed)
                 quick_reply(%{state|request: r}, result)
             r.method == "POST" and r.path == "/api/tx/submit_and_wait" ->
-                {r, tx_packed} = Photon.HTTP.read_body_all(state.socket, r)
+                max_bytes = max(@max_http_body_size, Application.fetch_env!(:ama, :tx_size) * 2)
+                {r, tx_packed} = read_body_all_limited(state, r, max_bytes)
                 tx_packed = if Base58.likely(tx_packed) do Base58.decode(tx_packed |> String.trim()) else tx_packed end
                 query = r.query && Photon.HTTP.parse_query(r.query)
                 wait_finalized = !!query[:finalized] or !!query[:wait_finalized]
@@ -399,7 +423,7 @@ defmodule Ama.MultiServer do
                 end
                 quick_reply(state, result)
             r.method == "POST" and String.starts_with?(r.path, "/api/proof/contractstate") ->
-                {r, vecpak_bin} = Photon.HTTP.read_body_all(state.socket, r)
+                {r, vecpak_bin} = read_body_all_limited(state, r)
                 map = RDB.vecpak_decode(vecpak_bin)
                 result = API.Proof.contractstate(map.key, map[:value])
                 quick_reply(%{state|request: r}, result)
@@ -441,7 +465,7 @@ defmodule Ama.MultiServer do
 
             testnet and r.method == "POST" and r.path == "/api/upow/validate" ->
               rate_limited_reply(state, 100, 60_000, fn ->
-                {r, sol} = Photon.HTTP.read_body_all(state.socket, r)
+                {r, sol} = read_body_all_limited(state, r)
                 diff_bits = DB.Chain.diff_bits()
                 segment_vr_hash = DB.Chain.segment_vr_hash()
                 result = try do BIC.Sol.verify(sol, %{diff_bits: diff_bits, segment_vr_hash: segment_vr_hash}) catch _,_ -> false end
