@@ -13,20 +13,15 @@ defmodule NodeOps do
   To add an op, add it here once.
   """
 
-  # uint32 max: effectively unlimited — for ops we accept but do not throttle.
-  @unlimited 4_294_967_295
-
-  # op atom => max messages per 6 seconds, per peer IP.
+  # Wire op atom => max messages per 6 seconds, per peer IP.
+  #
   @quotas %{
     new_phone_who_dis: 20,
     new_phone_who_dis_reply: 20,
-    new_phone_who_dis_reply_ns: @unlimited,
     get_peer_anrs: 10,
     get_peer_anrs_reply: 10,
-    get_peer_anrs_reply_ns: @unlimited,
     ping: 30,
     ping_reply: 30,
-    ping_reply_ns: @unlimited,
     special_business: 200,
     special_business_reply: 200,
     catchup: 50,
@@ -45,7 +40,7 @@ defmodule NodeOps do
   @doc "Per-op rate-limit quota map (op atom => max per 6s)."
   def quotas(), do: @quotas
 
-  @doc "Rate-limit quota for `op`, or nil if the op is not an accepted op."
+  @doc "Rate-limit quota for a wire `op`, or nil if it is not accepted from peers."
   def quota(op), do: Map.get(@quotas, op)
 
   @doc "String -> atom allowlist of accepted ops (for decoding untrusted input)."

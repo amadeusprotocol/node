@@ -1,21 +1,29 @@
 defmodule Ama.MultiServer do
     @max_http_body_size 1024 * 1024
+    @max_request_line_bytes 8 * 1024
+    @max_header_bytes 32 * 1024
+    @http_idle_timeout_ms 60_000
+    @http_request_timeout_ms 300_000
 
     def init(state) do
         receive do
             :socket_ack -> :ok
         after 3000 -> throw(:no_socket_passed) end
 
-        state = Map.put(state, :request, %{buf: <<>>})
+        state = state
+        |> Map.put(:request, %{buf: <<>>})
+        |> Map.put(:request_started_ms, System.monotonic_time(:millisecond))
         :ok = :inet.setopts(state.socket, [{:active, :once}])
         loop_http(state)
     end
 
     def loop_http(state) do
+        {:ok, receive_timeout} = request_receive_timeout(state.request_started_ms)
         #IO.inspect "hooked"
         receive do
             {:tcp, socket, bin} ->
                 request = %{state.request | buf: state.request.buf <> bin}
+                :ok = validate_request_buffer(request)
                 case Photon.HTTP.Request.parse(request) do
                     {:partial, request} ->
                         state = put_in(state, [:request], request)
@@ -30,6 +38,7 @@ defmodule Ama.MultiServer do
                                     :gen_tcp.shutdown(socket, :write)
                                 else
                                     {_, state} = pop_in(state, [:request, :step])
+                                    state = %{state | request_started_ms: System.monotonic_time(:millisecond)}
                                     :inet.setopts(socket, [{:active, :once}])
                                     loop_http(state)
                                 end
@@ -42,7 +51,47 @@ defmodule Ama.MultiServer do
 
             {:tcp_closed, _socket} -> :closed
             m -> IO.inspect("MultiServer: #{inspect m}")
+        after
+            receive_timeout -> exit(:http_request_timeout)
         end
+    end
+
+    def request_receive_timeout(started_ms, now_ms \\ System.monotonic_time(:millisecond)) do
+        remaining = @http_request_timeout_ms - (now_ms - started_ms)
+        if remaining > 0 do
+            {:ok, min(@http_idle_timeout_ms, remaining)}
+        else
+            {:error, :request_timeout}
+        end
+    end
+
+    def validate_request_buffer(%{buf: buf} = request) when is_binary(buf) do
+        case Map.get(request, :step) do
+            nil -> validate_unparsed_request(buf)
+            :headers -> validate_header_buffer(buf)
+            _ -> :ok
+        end
+    end
+
+    defp validate_unparsed_request(buf) do
+        case :binary.match(buf, "\r\n") do
+            :nomatch ->
+                if byte_size(buf) <= @max_request_line_bytes, do: :ok, else: {:error, :request_line_too_large}
+            {line_size, 2} when line_size <= @max_request_line_bytes ->
+                <<_line::binary-size(line_size), "\r\n", headers::binary>> = buf
+                validate_header_buffer(headers)
+            _ ->
+                {:error, :request_line_too_large}
+        end
+    end
+
+    defp validate_header_buffer(buf) do
+        size = case :binary.match(buf, "\r\n\r\n") do
+            :nomatch -> byte_size(buf)
+            {header_size, 4} -> header_size + 4
+        end
+
+        if size <= @max_header_bytes, do: :ok, else: {:error, :headers_too_large}
     end
 
     def quick_reply(state, reply, status_code \\ 200) do
@@ -145,7 +194,6 @@ defmodule Ama.MultiServer do
       end)
     end
 
-    @doc false
     def validate_body_length(r, max_bytes) when is_integer(max_bytes) and max_bytes >= 0 do
         case Map.get(r.headers, "content-length") do
             nil ->
@@ -165,7 +213,32 @@ defmodule Ama.MultiServer do
 
     defp read_body_all_limited(state, r, max_bytes \\ @max_http_body_size) do
         :ok = validate_body_length(r, max_bytes)
-        Photon.HTTP.read_body_all(state.socket, r)
+        content_length = Map.fetch!(r.headers, "content-length") |> :erlang.binary_to_integer()
+        buffered = byte_size(r.buf)
+
+        if buffered >= content_length do
+            <<body::binary-size(content_length), rest::binary>> = r.buf
+            {%{r | buf: rest}, body}
+        else
+            needed = content_length - buffered
+            {chunks, rest} = receive_body(state.socket, needed, state.request_started_ms, [])
+            body = IO.iodata_to_binary([r.buf | Enum.reverse(chunks)])
+            {%{r | buf: rest}, body}
+        end
+    end
+
+    defp receive_body(_socket, 0, _started_ms, chunks), do: {chunks, <<>>}
+    defp receive_body(socket, needed, started_ms, chunks) do
+        {:ok, timeout} = request_receive_timeout(started_ms)
+        case :gen_tcp.recv(socket, 0, timeout) do
+            {:ok, bin} when byte_size(bin) <= needed ->
+                receive_body(socket, needed - byte_size(bin), started_ms, [bin | chunks])
+            {:ok, bin} ->
+                <<body::binary-size(needed), rest::binary>> = bin
+                {[body | chunks], rest}
+            {:error, reason} ->
+                exit({:http_body_read_failed, reason})
+        end
     end
 
     def handle_http(state) do
