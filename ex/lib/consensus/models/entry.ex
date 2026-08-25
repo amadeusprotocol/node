@@ -82,9 +82,8 @@ defmodule Entry do
           trainers = DB.Chain.validators_for_height(entry_header.height)
           true = is_integer(entry.mask_size)
           true = is_integer(entry.mask_set_size)
-          true = is_bitstring(entry.mask)
           true = entry.mask_size == length(trainers)
-          true = bit_size(entry.mask) >= entry.mask_size
+          ensure_valid_mask!(entry.mask, entry.mask_size)
 
           trainers_signed = BLS12AggSig.unmask_trainers(trainers, entry.mask, entry.mask_size)
           true = entry.mask_set_size == length(trainers_signed)
@@ -183,12 +182,14 @@ defmodule Entry do
           if mask do
               trainers = DB.Chain.validators_for_height(header.height)
               if !is_integer(e.mask_size), do: throw(%{error: :mask_size_not_integer})
-              if !is_bitstring(e.mask), do: throw(%{error: :mask_not_bitstring})
+              if !is_integer(e.mask_set_size), do: throw(%{error: :mask_set_size_not_integer})
               if e.mask_size != length(trainers), do: throw(%{error: :mask_size_mismatch})
-              if bit_size(e.mask) < e.mask_size, do: throw(%{error: :mask_too_short})
+              ensure_valid_mask!(e.mask, e.mask_size)
 
               trainers_signed = BLS12AggSig.unmask_trainers(trainers, e.mask, e.mask_size)
-              if nil in trainers_signed, do: throw(%{error: :wrong_epoch})
+              if e.mask_set_size != length(trainers_signed), do: throw(%{error: :mask_set_size_mismatch})
+              if !BLS12AggSig.quorum?(length(trainers_signed), length(trainers)),
+                do: throw(%{error: :insufficient_mask_quorum})
 
               aggpk = BlsEx.aggregate_public_keys!(trainers_signed)
               if !BlsEx.verify?(aggpk, e.signature, hash, BLS12AggSig.dst_entry()), do: throw(%{error: :invalid_mask_signature})
@@ -212,6 +213,13 @@ defmodule Entry do
             byte_size(entry.hash) != 32 -> throw(%{error: :hash_not_256_bits})
             entry.hash != hash -> throw(%{error: :invalid_hash})
             true -> true
+        end
+    end
+
+    defp ensure_valid_mask!(mask, mask_size) do
+        case BLS12AggSig.validate_mask(mask, mask_size) do
+            :ok -> :ok
+            {:error, error} -> throw(%{error: error})
         end
     end
 

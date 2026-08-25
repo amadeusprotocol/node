@@ -36,9 +36,11 @@ defmodule Consensus do
 
         validators = DB.Chain.validators_for_height(Entry.height(entry))
         if !is_integer(c.aggsig.mask_size), do: throw(%{error: :mask_size_not_integer})
-        if !is_bitstring(c.aggsig.mask), do: throw(%{error: :mask_not_bitstring})
         if length(validators) != c.aggsig.mask_size, do: throw(%{error: :validators_ne_mask_size})
-        if bit_size(c.aggsig.mask) < c.aggsig.mask_size, do: throw(%{error: :mask_too_short})
+        case BLS12AggSig.validate_mask(c.aggsig.mask, c.aggsig.mask_size) do
+            :ok -> :ok
+            {:error, error} -> throw(%{error: error})
+        end
 
         validators_signed = BLS12AggSig.unmask_trainers(validators, c.aggsig.mask, c.aggsig.mask_size)
         aggpk = BlsEx.aggregate_public_keys!(validators_signed)

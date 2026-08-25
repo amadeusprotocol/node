@@ -244,7 +244,7 @@ defmodule FabricGen do
         next_entry.header.signer == validator_for_entry -> true
         !!next_entry[:mask] ->
             trainers = DB.Chain.validators_for_height(Entry.height(next_entry))
-            score = BLS12AggSig.score(trainers, Util.pad_bitstring_to_bytes(next_entry.mask), bit_size(next_entry.mask))
+            score = BLS12AggSig.score(trainers, next_entry.mask, next_entry.mask_size)
             next_entry.header.signer in trainers and score >= 0.67
 
         true -> false
@@ -361,7 +361,7 @@ defmodule FabricGen do
     |> Enum.any?(fn(e)->
       cond do
         e.header.signer == next_validator -> true
-        !!e[:mask] -> BLS12AggSig.score(trainers_next, Util.pad_bitstring_to_bytes(e.mask), bit_size(e.mask)) >= 0.67
+        !!e[:mask] -> BLS12AggSig.score(trainers_next, e.mask, e.mask_size) >= 0.67
         true -> false
       end
     end)

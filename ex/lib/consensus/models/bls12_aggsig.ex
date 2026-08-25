@@ -68,25 +68,45 @@ defmodule BLS12AggSig do
         end
     end
 
-    #TODO: optimize walking with mask
-    def unmask_trainers(_trainers, _mask, mask_size) when mask_size == 0 do [] end
-    def unmask_trainers(trainers, mask, mask_size) do
-        Enum.reduce(0..mask_size-1, [], fn(index, acc)->
-            if !Util.get_bit(mask, index) do acc else
-                acc ++ [Enum.at(trainers, index)]
-            end
-        end)
+    def validate_mask(mask, mask_size) do
+        cond do
+            !is_integer(mask_size) -> {:error, :mask_size_not_integer}
+            mask_size < 0 -> {:error, :mask_size_negative}
+            !is_bitstring(mask) -> {:error, :mask_not_bitstring}
+            !is_binary(mask) -> {:error, :mask_not_byte_aligned}
+            byte_size(mask) != div(mask_size + 7, 8) -> {:error, :mask_wrong_size}
+            !padding_bits_zero?(mask, mask_size) -> {:error, :mask_nonzero_padding}
+            true -> :ok
+        end
     end
 
-    def score(_trainers, _mask, mask_size) when mask_size == 0 do 0.0 end
+    def quorum?(mask_set_size, mask_size)
+        when is_integer(mask_set_size) and is_integer(mask_size) and
+               mask_set_size >= 0 and mask_size > 0 and mask_set_size <= mask_size do
+        mask_set_size * 100 >= mask_size * 67
+    end
+    def quorum?(_mask_set_size, _mask_size), do: false
+
+    #TODO: optimize walking with mask
+    def unmask_trainers(trainers, mask, mask_size)
+        when is_list(trainers) and is_bitstring(mask) and is_integer(mask_size) and mask_size > 0 do
+        bound = min(mask_size, min(length(trainers), bit_size(mask)))
+
+        if bound == 0 do
+            []
+        else
+            Enum.reduce(0..(bound - 1), [], fn(index, acc)->
+                if Util.get_bit(mask, index), do: [Enum.at(trainers, index) | acc], else: acc
+            end)
+            |> Enum.reverse()
+        end
+    end
+    def unmask_trainers(_trainers, _mask, _mask_size), do: []
+
+    def score([], _mask, _mask_size), do: 0.0
     def score(trainers, mask, mask_size) do
         trainers_signed = unmask_trainers(trainers, mask, mask_size)
-
-        maxScore = length(trainers)
-        score = Enum.reduce(trainers_signed, 0, fn(_pk, acc)->
-            acc + 1
-        end)
-        score/maxScore
+        length(trainers_signed) / length(trainers)
     end
 
     def aggregate(total_signer_list, signer_signature_list) do
@@ -96,5 +116,16 @@ defmodule BLS12AggSig do
         BLS12AggSig.add_padded(aggsig, total_signer_list, signer_signature.signer, signer_signature.signature)
       end)
       |> Map.put(:mask_set_size, length(signer_signature_list))
+    end
+
+    defp padding_bits_zero?(mask, mask_size) do
+        padding_size = bit_size(mask) - mask_size
+
+        case padding_size do
+            0 -> true
+            _ ->
+                <<_::size(mask_size), padding::size(padding_size)>> = mask
+                padding == 0
+        end
     end
 end
