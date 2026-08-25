@@ -103,10 +103,8 @@ defmodule API.TX do
     end
 
     def submit(tx_packed) do
-        result = TX.validate(tx_packed |> TX.unpack())
+        result = TXPool.insert_and_broadcast(tx_packed |> TX.unpack())
         if result[:error] == :ok do
-            txu = result.txu
-            TXPool.insert_and_broadcast(txu)
             %{error: :ok, hash: Base58.encode(result.txu.hash)}
         else
             %{error: result.error}
@@ -114,10 +112,9 @@ defmodule API.TX do
     end
 
     def submit_and_wait(tx_packed, wait_finalized \\ false, broadcast \\ true) do
-      result = TX.validate(tx_packed |> TX.unpack())
+      txu = tx_packed |> TX.unpack()
+      result = if broadcast do TXPool.insert_and_broadcast(txu) else TXPool.insert(txu) end
       if result[:error] == :ok do
-          txu = result.txu
-          if broadcast do TXPool.insert_and_broadcast(txu) else TXPool.insert(txu) end
           txres = submit_and_wait_1(result.txu.hash, wait_finalized)
           %{error: :ok, hash: Base58.encode(result.txu.hash), metadata: txres.metadata, receipt: txres.receipt}
       else

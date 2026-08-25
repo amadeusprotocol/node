@@ -1,14 +1,25 @@
 defmodule TXPool do
-    def insert(tx) when is_map(tx) do insert([tx]) end
+    def insert(tx) when is_map(tx) do
+        {result, _batch_state} = validate_for_admission(tx, %{})
+        case result do
+          %{error: :ok, txu: txu} ->
+            :ets.insert(TXPool, {{txu.tx.nonce, txu.hash}, txu})
+            result
+          error -> error
+        end
+    end
     def insert([]) do :ok end
     def insert(txus) when is_list(txus) do
-        txus = Enum.flat_map(txus, fn(txu)->
-            case TX.validate(txu) do
-              %{error: :ok, txu: txu} -> [{{txu.tx.nonce, txu.hash}, txu}]
-              _ -> []
-            end
+        {txus, _batch_state} = Enum.reduce(txus, {[], %{}}, fn(txu, {accepted, batch_state})->
+          case validate_for_admission(txu, batch_state) do
+            {%{error: :ok, txu: txu}, batch_state} ->
+              {[{{txu.tx.nonce, txu.hash}, txu} | accepted], batch_state}
+            {_error, _proposed_batch_state} ->
+              {accepted, batch_state}
+          end
         end)
         if txus != [], do: :ets.insert(TXPool, txus)
+        :ok
     end
 
     def delete_packed(txu) when is_map(txu) do delete_packed([txu]) end
@@ -20,8 +31,27 @@ defmodule TXPool do
     end
 
     def insert_and_broadcast(txu, opts \\ %{}) do
-      TXPool.insert(txu)
-      NodeGen.broadcast(NodeProto.event_tx(txu), opts)
+      case TXPool.insert(txu) do
+        %{error: :ok, txu: txu} = result ->
+          NodeGen.broadcast(NodeProto.event_tx(txu), opts)
+          result
+        error -> error
+      end
+    end
+
+    defp validate_for_admission(txu, batch_state) do
+      case TX.validate_structure(txu) do
+        %{error: :ok, txu: txu} ->
+          case validate_tx(txu, %{batch_state: batch_state}) do
+            %{error: :ok, batch_state: proposed_batch_state} ->
+              case TX.validate_signature(txu) do
+                %{error: :ok} = result -> {result, proposed_batch_state}
+                error -> {error, batch_state}
+              end
+            error -> {error, batch_state}
+          end
+        error -> {error, batch_state}
+      end
     end
 
     def purge_stale() do

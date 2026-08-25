@@ -81,8 +81,7 @@ defmodule ComputorGen do
               %{hash: hash} = TX.unpack(packed_tx)
               IO.puts "🔢 tensor matmul complete! tx #{Base58.encode(hash)} key #{Base58.encode(key.pk)}"
 
-              TXPool.insert(packed_tx)
-              NodeGen.broadcast(NodeProto.event_tx(packed_tx))
+              TXPool.insert_and_broadcast(packed_tx)
               {Map.put(state, :key_idx, idx + 1), 0}
             else
               {Map.put(state, :key_idx, idx), 0}

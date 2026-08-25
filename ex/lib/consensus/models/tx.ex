@@ -57,26 +57,35 @@ defmodule TX do
    end
 
    def validate(txu_orig, is_special_meeting_block \\ false) do
+    case validate_structure(txu_orig, is_special_meeting_block) do
+      %{error: :ok, txu: txu} -> validate_signature(txu)
+      error -> error
+    end
+   end
+
+   def validate_structure(txu_orig, is_special_meeting_block \\ false) do
     try do
+      if !is_map(txu_orig), do: throw(%{error: :txu_must_be_map})
       txu = Map.take(txu_orig, @fields)
-      true = txu == txu_orig
+      if txu != txu_orig, do: throw(%{error: :txu_has_unknown_fields})
+      if !is_map(txu[:tx]), do: throw(%{error: :tx_must_be_map})
       tx = Map.take(txu.tx, @fields_tx)
-      true = txu.tx == tx
+      if txu.tx != tx, do: throw(%{error: :tx_has_unknown_fields})
       txu = put_in(txu, [:tx], tx)
+      if !is_map(txu.tx[:action]), do: throw(%{error: :action_must_be_map})
       action = Map.take(txu.tx.action, @fields_action)
-      true = txu.tx.action == action
+      if txu.tx.action != action, do: throw(%{error: :action_has_unknown_fields})
       txu = put_in(txu, [:tx, :action], action)
 
-      tx_encoded = RDB.vecpak_encode(txu.tx)
-      if byte_size(tx_encoded) >= Application.fetch_env!(:ama, :tx_size), do: throw(%{error: :too_large})
-      if txu.hash != :crypto.hash(:sha256, tx_encoded), do: throw(%{error: :invalid_hash})
-      if !BlsEx.verify?(txu.tx.signer, txu.signature, txu.hash, BLS12AggSig.dst_tx()), do: throw(%{error: :invalid_signature})
-
-      #if !!txu.tx[:genesis_hash] and !is_integer(txu.tx.chain_id), do: throw(%{error: :chain_id_not_integer})
+      if !is_binary(txu[:hash]), do: throw(%{error: :hash_not_binary})
+      if byte_size(txu.hash) != 32, do: throw(%{error: :hash_wrong_size})
+      if !is_binary(txu[:signature]), do: throw(%{error: :signature_not_binary})
+      if byte_size(txu.signature) != 96, do: throw(%{error: :signature_wrong_size})
+      if !is_binary(txu.tx[:signer]), do: throw(%{error: :signer_not_binary})
+      if byte_size(txu.tx.signer) != 48, do: throw(%{error: :signer_wrong_size})
       if !is_integer(txu.tx.nonce), do: throw(%{error: :nonce_not_integer})
       if txu.tx.nonce < 0, do: throw(%{error: :nonce_negative})
       if txu.tx.nonce > 18_446_744_073_709_551_615, do: throw(%{error: :nonce_too_high})
-      if !is_map(action), do: throw(%{error: :action_must_be_map})
       if action[:op] != "call", do: throw %{error: :op_must_be_call}
       if !is_binary(action[:contract]), do: throw %{error: :contract_must_be_binary}
       if !is_binary(action[:function]), do: throw %{error: :function_must_be_binary}
@@ -101,6 +110,10 @@ defmodule TX do
       if !!action[:attached_symbol] and !action[:attached_amount], do: throw %{error: :attached_amount_must_be_included}
       if !!action[:attached_amount] and !action[:attached_symbol], do: throw %{error: :attached_symbol_must_be_included}
 
+      tx_encoded = RDB.vecpak_encode(txu.tx)
+      if byte_size(tx_encoded) >= Application.fetch_env!(:ama, :tx_size), do: throw(%{error: :too_large})
+      if txu.hash != :crypto.hash(:sha256, tx_encoded), do: throw(%{error: :invalid_hash})
+
       #if !!txp.tx[:delay] and !is_integer(txp.tx.delay), do: throw %{error: :delay_not_integer}
       #if !!txp.tx[:delay] and txp.tx.delay <= 0, do: throw %{error: :delay_too_low}
       #if !!txp.tx[:delay] and txp.tx.delay > 100_000, do: throw %{error: :delay_too_hi}
@@ -111,6 +124,20 @@ defmodule TX do
         e,r ->
           IO.inspect {TX, :validate, e, r}
           %{error: :unknown, txu: nil}
+    end
+   end
+
+   def validate_signature(txu) do
+    try do
+      if !BlsEx.verify?(txu.tx.signer, txu.signature, txu.hash, BLS12AggSig.dst_tx()),
+        do: throw(%{error: :invalid_signature})
+
+      %{error: :ok, txu: txu}
+    catch
+        :throw,r -> r
+        e,r ->
+          IO.inspect {TX, :validate_signature, e, r}
+          %{error: :invalid_signature}
     end
    end
 
