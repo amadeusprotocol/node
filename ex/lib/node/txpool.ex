@@ -1,206 +1,344 @@
 defmodule TXPool do
-    def insert(tx) when is_map(tx) do
-        {result, _batch_state} = validate_for_admission(tx, %{})
-        case result do
-          %{error: :ok, txu: txu} ->
-            :ets.insert(TXPool, {{txu.tx.nonce, txu.hash}, txu})
-            result
-          error -> error
+  def init_byte_counter() do
+    counter = :atomics.new(1, [])
+    :persistent_term.put({__MODULE__, :byte_counter}, counter)
+    :ok
+  end
+
+  def bytes() do
+    :atomics.get(byte_counter(), 1)
+  end
+
+  def max_bytes() do
+    Application.fetch_env!(:ama, :txpool_max_bytes)
+  end
+
+  def insert(tx) when is_map(tx) do
+    insert(tx, %{})
+  end
+
+  def insert([]) do
+    :ok
+  end
+
+  def insert(txus) when is_list(txus) do
+    Enum.reduce(txus, %{}, fn txu, batch_state ->
+      {_result, batch_state} = validate_and_insert(txu, batch_state, %{})
+      batch_state
+    end)
+
+    :ok
+  end
+
+  @doc false
+  def insert(tx, validation_args) when is_map(tx) and is_map(validation_args) do
+    batch_state = Map.get(validation_args, :batch_state, %{})
+    validation_args = Map.delete(validation_args, :batch_state)
+    {result, _batch_state} = validate_and_insert(tx, batch_state, validation_args)
+    result
+  end
+
+  def delete_packed(txu) when is_map(txu) do
+    delete_packed([txu])
+  end
+
+  def delete_packed([]) do
+    :ok
+  end
+
+  def delete_packed(txus) do
+    Enum.each(txus, fn txu ->
+      delete_key({txu.tx.nonce, txu.hash})
+    end)
+  end
+
+  def insert_and_broadcast(txu, opts \\ %{}) do
+    case TXPool.insert(txu) do
+      %{error: :ok, txu: txu} = result ->
+        if result.inserted, do: NodeGen.broadcast(NodeProto.event_tx(txu), opts)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  defp validate_and_insert(txu, batch_state, validation_args) do
+    case TX.validate_structure(txu) do
+      %{error: :ok, txu: txu} ->
+        key = {txu.tx.nonce, txu.hash}
+
+        case :ets.lookup(TXPool, key) do
+          [{^key, existing, _tx_bytes}] ->
+            {%{error: :ok, txu: existing, inserted: false}, batch_state}
+
+          [] ->
+            validate_reserve_and_insert(key, txu, batch_state, validation_args)
         end
-    end
-    def insert([]) do :ok end
-    def insert(txus) when is_list(txus) do
-        {txus, _batch_state} = Enum.reduce(txus, {[], %{}}, fn(txu, {accepted, batch_state})->
-          case validate_for_admission(txu, batch_state) do
-            {%{error: :ok, txu: txu}, batch_state} ->
-              {[{{txu.tx.nonce, txu.hash}, txu} | accepted], batch_state}
-            {_error, _proposed_batch_state} ->
-              {accepted, batch_state}
-          end
-        end)
-        if txus != [], do: :ets.insert(TXPool, txus)
-        :ok
-    end
 
-    def delete_packed(txu) when is_map(txu) do delete_packed([txu]) end
-    def delete_packed([]) do :ok end
-    def delete_packed(txus) do
-        Enum.each(txus, fn(txu)->
-            :ets.delete(TXPool, {txu.tx.nonce, txu.hash})
-        end)
+      error ->
+        {error, batch_state}
     end
+  end
 
-    def insert_and_broadcast(txu, opts \\ %{}) do
-      case TXPool.insert(txu) do
-        %{error: :ok, txu: txu} = result ->
-          NodeGen.broadcast(NodeProto.event_tx(txu), opts)
-          result
-        error -> error
-      end
-    end
+  defp validate_reserve_and_insert(key, txu, batch_state, validation_args) do
+    case validate_tx(txu, Map.put(validation_args, :batch_state, batch_state)) do
+      %{error: :ok, batch_state: proposed_batch_state} ->
+        tx_bytes = byte_size(TX.pack(txu))
 
-    defp validate_for_admission(txu, batch_state) do
-      case TX.validate_structure(txu) do
-        %{error: :ok, txu: txu} ->
-          case validate_tx(txu, %{batch_state: batch_state}) do
-            %{error: :ok, batch_state: proposed_batch_state} ->
-              case TX.validate_signature(txu) do
-                %{error: :ok} = result -> {result, proposed_batch_state}
-                error -> {error, batch_state}
+        if reserve_pool_bytes(tx_bytes) do
+          case TX.validate_signature(txu) do
+            %{error: :ok} = result ->
+              if :ets.insert_new(TXPool, {key, txu, tx_bytes}) do
+                {Map.put(result, :inserted, true), proposed_batch_state}
+              else
+                release_pool_bytes(tx_bytes)
+                case :ets.lookup(TXPool, key) do
+                  [{^key, existing, _existing_bytes}] ->
+                    {%{error: :ok, txu: existing, inserted: false}, proposed_batch_state}
+                  [] -> validate_and_insert(txu, batch_state, validation_args)
+                end
               end
-            error -> {error, batch_state}
+
+            error ->
+              release_pool_bytes(tx_bytes)
+              {error, batch_state}
           end
-        error -> {error, batch_state}
+        else
+          {%{error: :txpool_full, current_bytes: bytes(), max_bytes: max_bytes()}, batch_state}
+        end
+
+      error ->
+        {error, batch_state}
+    end
+  end
+
+  def purge_stale() do
+    cur_epoch = DB.Chain.epoch()
+
+    :ets.foldl(
+      fn {key, txu, _tx_bytes}, :ok ->
+        is_stale(txu, cur_epoch) && delete_key(key)
+        :ok
+      end,
+    :ok, TXPool)
+  end
+
+  def is_stale(txu, cur_epoch) do
+    chainNonce = DB.Chain.nonce(txu.tx.signer)
+    nonceValid = !chainNonce or txu.tx.nonce > chainNonce
+
+    action = TX.action(txu)
+
+    solGateOk =
+      if action.function == "submit_sol" do
+        case action.args do
+          [<<sol_epoch::32-little, _::binary>> | _] -> cur_epoch == sol_epoch
+          _ -> false
+        end
+      else
+        true
       end
+
+    cond do
+      !solGateOk -> true
+      !nonceValid -> true
+      true -> false
     end
+  end
 
-    def purge_stale() do
-        cur_epoch = DB.Chain.epoch()
-        :ets.tab2list(TXPool)
-        |> Enum.each(fn {key, txu} ->
-            if is_stale(txu, cur_epoch) do
-                :ets.delete(TXPool, key)
-            end
-        end)
-    end
+  def validate_tx(txu, args \\ %{}) do
+    chain_epoch = Map.get_lazy(args, :epoch, fn -> DB.Chain.epoch() end)
+    chain_height = Map.get_lazy(args, :height, fn -> DB.Chain.height() end)
 
-    def is_stale(txu, cur_epoch) do
-        chainNonce = DB.Chain.nonce(txu.tx.signer)
-        nonceValid = !chainNonce or txu.tx.nonce > chainNonce
+    chain_segment_vr_hash =
+      Map.get_lazy(args, :segment_vr_hash, fn -> DB.Chain.segment_vr_hash() end)
 
-        action = TX.action(txu)
-        solGateOk =
-          if action.function == "submit_sol" do
-            case action.args do
-              [<<sol_epoch::32-little, _::binary>> | _] -> cur_epoch == sol_epoch
-              _ -> false
-            end
-          else
-            true
-          end
+    chain_diff_bits = Map.get_lazy(args, :diff_bits, fn -> DB.Chain.diff_bits() end)
+    batch_state = Map.get_lazy(args, :batch_state, fn -> %{} end)
 
-        cond do
-            !solGateOk -> true
-            !nonceValid -> true
-            true -> false
+    try do
+      chainNonce = Map.get_lazy(batch_state, 
+        {:chain_nonce, txu.tx.signer}, 
+        fn -> DB.Chain.nonce(txu.tx.signer) end)
+
+      nonceValid = !chainNonce or txu.tx.nonce > chainNonce
+      if !nonceValid, do: throw(%{error: :invalid_tx_nonce, key: {txu.tx.nonce, txu.hash}})
+      batch_state = Map.put(batch_state, {:chain_nonce, txu.tx.signer}, txu.tx.nonce)
+
+      balance = Map.get_lazy(batch_state, 
+        {:balance, txu.tx.signer}, 
+        fn -> DB.Chain.balance(txu.tx.signer) end)
+
+      balance = balance - RDBProtocol.reserve_ama_per_tx_exec() * 2
+      balance = balance - RDBProtocol.reserve_ama_per_tx_storage()
+      balance = balance - TX.historical_cost(chain_height, txu)
+
+      if balance < 0,
+        do: throw(%{error: :not_enough_tx_exec_balance, key: {txu.tx.nonce, txu.hash}})
+
+      batch_state = Map.put(batch_state, {:balance, txu.tx.signer}, balance)
+
+      action = TX.action(txu)
+
+      if action.function == "submit_sol" do
+        with [<<sol_epoch::32-little, sol_svrh::32-binary, _::binary>> = arg0 | _] <- action.args,
+             true <- sol_epoch == chain_epoch,
+             true <- sol_svrh == chain_segment_vr_hash,
+             true <- byte_size(arg0) == BIC.Sol.size(),
+             true <- BIC.Sol.verify_hash_diff(chain_epoch, Blake3.hash(arg0), chain_diff_bits) do
+          :ok
+        else
+          _ -> throw(%{error: :invalid_tx_sol, key: {txu.tx.nonce, txu.hash}})
         end
-    end
-
-    def validate_tx(txu, args \\ %{}) do
-      chain_epoch = Map.get_lazy(args, :epoch, fn()-> DB.Chain.epoch() end)
-      chain_height = Map.get_lazy(args, :height, fn()-> DB.Chain.height() end)
-      chain_segment_vr_hash = Map.get_lazy(args, :segment_vr_hash, fn()-> DB.Chain.segment_vr_hash() end)
-      chain_diff_bits = Map.get_lazy(args, :diff_bits, fn()-> DB.Chain.diff_bits() end)
-      batch_state = Map.get_lazy(args, :batch_state, fn()-> %{} end)
-
-      try do
-        chainNonce = Map.get_lazy(batch_state, {:chain_nonce, txu.tx.signer}, fn()-> DB.Chain.nonce(txu.tx.signer) end)
-        nonceValid = !chainNonce or txu.tx.nonce > chainNonce
-        if !nonceValid, do: throw(%{error: :invalid_tx_nonce, key: {txu.tx.nonce, txu.hash}})
-        batch_state = Map.put(batch_state, {:chain_nonce, txu.tx.signer}, txu.tx.nonce)
-
-        balance = Map.get_lazy(batch_state, {:balance, txu.tx.signer}, fn()-> DB.Chain.balance(txu.tx.signer) end)
-        balance = balance - (RDBProtocol.reserve_ama_per_tx_exec() * 2)
-        balance = balance - RDBProtocol.reserve_ama_per_tx_storage()
-        balance = balance - TX.historical_cost(chain_height, txu)
-        if balance < 0, do: throw(%{error: :not_enough_tx_exec_balance, key: {txu.tx.nonce, txu.hash}})
-        batch_state = Map.put(batch_state, {:balance, txu.tx.signer}, balance)
-
-        action = TX.action(txu)
-        if action.function == "submit_sol" do
-          with [<<sol_epoch::32-little, sol_svrh::32-binary, _::binary>> = arg0 | _] <- action.args,
-               true <- sol_epoch == chain_epoch,
-               true <- sol_svrh == chain_segment_vr_hash,
-               true <- byte_size(arg0) == BIC.Sol.size(),
-               true <- BIC.Sol.verify_hash_diff(chain_epoch, Blake3.hash(arg0), chain_diff_bits) do
-            :ok
-          else
-            _ -> throw(%{error: :invalid_tx_sol, key: {txu.tx.nonce, txu.hash}})
-          end
-        end
-
-        %{error: :ok, batch_state: batch_state}
-      catch
-        :throw, r -> r
       end
+
+      %{error: :ok, batch_state: batch_state}
+    catch
+      :throw, r -> r
     end
+  end
 
-    def grab_next_valid(chain_height, max_bytes \\ Entry.entry_max_txs_bytes()) do
-        try do
-            chain_epoch = div(chain_height, 100_000)
+  def grab_next_valid(chain_height, max_bytes \\ Entry.entry_max_txs_bytes()) do
+    try do
+      chain_epoch = div(chain_height, 100_000)
 
-            segment_vr_hash = DB.Chain.segment_vr_hash()
-            {acc, _state, _bytes} = :ets.foldl(fn({key, txu}, {acc, state_old, total_bytes})->
-                tx_size = byte_size(TX.pack(txu))
-                if total_bytes + tx_size > max_bytes do
-                    if length(acc) > 0 do
-                        throw {:choose, Enum.reverse(acc)}
-                    else
-                        {acc, state_old, total_bytes}
-                    end
-                else
-                  case validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, batch_state: state_old}) do
-                    %{error: :ok, batch_state: batch_state} ->
-                      acc = [txu | acc]
-                      if total_bytes + tx_size >= max_bytes do
-                          throw {:choose, Enum.reverse(acc)}
-                      end
-                      {acc, batch_state, total_bytes + tx_size}
-                    #delete stale
-                    %{key: key} ->
-                      :ets.delete(TXPool, key)
-                      {acc, state_old, total_bytes}
-                    _ ->
-                      :ets.delete(TXPool, key)
-                      {acc, state_old, total_bytes}
-                  end
-                end
-            end, {[], %{}, 0}, TXPool)
-            Enum.reverse(acc)
-        catch
-            :throw,{:choose, txs_packed} -> txs_packed
-        end
-    end
+      segment_vr_hash = DB.Chain.segment_vr_hash()
 
-    def random(amount \\ 2) do
-        :ets.tab2list(TXPool)
-        |> case do
-            [] -> nil
-            txus -> Enum.take(txus, amount)
-        end
-    end
-
-    def lowest_nonce(pk) do
-        :ets.tab2list(TXPool)
-        |> Enum.reduce(nil, fn({{nonce, _hash}, txu}, lowest_nonce) ->
-            if txu.tx.signer == pk do
-                cond do
-                    lowest_nonce == nil -> nonce
-                    nonce < lowest_nonce -> nonce
-                    true -> lowest_nonce
-                end
+      {acc, _state, _bytes} =
+        :ets.foldl(
+          fn {key, txu, tx_size}, {acc, state_old, total_bytes} ->
+            if total_bytes + tx_size > max_bytes do
+              if length(acc) > 0 do
+                throw({:choose, Enum.reverse(acc)})
+              else
+                {acc, state_old, total_bytes}
+              end
             else
-                lowest_nonce
-            end
-        end)
-    end
+              case validate_tx(txu, %{
+                     epoch: chain_epoch,
+                     height: chain_height,
+                     segment_vr_hash: segment_vr_hash,
+                     batch_state: state_old
+                   }) do
+                %{error: :ok, batch_state: batch_state} ->
+                  acc = [txu | acc]
 
-    def highest_nonce() do
-        Application.fetch_env!(:ama, :trainer_pk)
-        |> highest_nonce()
-    end
-    def highest_nonce(pk) do
-        :ets.tab2list(TXPool)
-        |> Enum.reduce({nil, 0}, fn({{nonce, _hash}, txu}, {highest_nonce, cnt})->
-            cond do
-                txu.tx.signer == pk and (highest_nonce == nil or nonce > highest_nonce) -> {nonce, cnt + 1}
-                txu.tx.signer == pk -> {highest_nonce, cnt + 1}
-                true -> {highest_nonce, cnt}
-            end
-        end)
-    end
+                  if total_bytes + tx_size >= max_bytes do
+                    throw({:choose, Enum.reverse(acc)})
+                  end
 
-    def size() do
-      :ets.info(TXPool, :size)
+                  {acc, batch_state, total_bytes + tx_size}
+
+                # delete stale
+                %{key: key} ->
+                  delete_key(key)
+                  {acc, state_old, total_bytes}
+
+                _ ->
+                  delete_key(key)
+                  {acc, state_old, total_bytes}
+              end
+            end
+          end,
+          {[], %{}, 0},
+          TXPool
+        )
+
+      Enum.reverse(acc)
+    catch
+      :throw, {:choose, txs_packed} -> txs_packed
     end
+  end
+
+  def random(amount \\ 2)
+  def random(0), do: []
+
+  def random(amount) when is_integer(amount) and amount > 0 do
+    match_spec = [{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}]
+
+    case :ets.select(TXPool, match_spec, amount) do
+      :"$end_of_table" -> nil
+      {[], _continuation} -> nil
+      {entries, _continuation} -> entries
+    end
+  end
+
+  def lowest_nonce(pk) do
+    :ets.foldl(
+      fn {{nonce, _hash}, txu, _tx_bytes}, lowest_nonce ->
+        if txu.tx.signer == pk do
+          cond do
+            lowest_nonce == nil -> nonce
+            nonce < lowest_nonce -> nonce
+            true -> lowest_nonce
+          end
+        else
+          lowest_nonce
+        end
+      end, 
+    nil, TXPool)
+  end
+
+  def highest_nonce() do
+    Application.fetch_env!(:ama, :trainer_pk)
+    |> highest_nonce()
+  end
+
+  def highest_nonce(pk) do
+    :ets.foldl(
+      fn {{nonce, _hash}, txu, _tx_bytes}, {highest_nonce, cnt} ->
+        cond do
+          txu.tx.signer == pk and (highest_nonce == nil or nonce > highest_nonce) ->
+            {nonce, cnt + 1}
+
+          txu.tx.signer == pk ->
+            {highest_nonce, cnt + 1}
+
+          true ->
+            {highest_nonce, cnt}
+        end
+      end,
+    {nil, 0}, TXPool)
+  end
+
+  def size() do
+    :ets.info(TXPool, :size)
+  end
+
+  @doc false
+  def reserve_bytes(counter, amount, limit)
+      when is_integer(amount) and amount >= 0 and is_integer(limit) and limit >= 0 do
+    current = :atomics.get(counter, 1)
+
+    if current + amount > limit do
+      false
+    else
+      case :atomics.compare_exchange(counter, 1, current, current + amount) do
+        :ok -> true
+        _actual -> reserve_bytes(counter, amount, limit)
+      end
+    end
+  end
+
+  @doc false
+  def release_bytes(counter, amount) when is_integer(amount) and amount >= 0 do
+    :atomics.sub_get(counter, 1, amount)
+  end
+
+  defp reserve_pool_bytes(amount), do: reserve_bytes(byte_counter(), amount, max_bytes())
+  defp release_pool_bytes(amount), do: release_bytes(byte_counter(), amount)
+
+  defp delete_key(key) do
+    case :ets.take(TXPool, key) do
+      [{^key, _txu, tx_bytes}] ->
+        release_pool_bytes(tx_bytes)
+        true
+      [] -> false
+    end
+  end
+
+  defp byte_counter() do
+    :persistent_term.get({__MODULE__, :byte_counter})
+  end
 end

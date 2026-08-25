@@ -13,6 +13,7 @@ config :ama, :version, Mix.Project.config[:version]
 
 config :ama, :entry_size, 1048576
 config :ama, :tx_size, 786432
+config :ama, :txpool_max_bytes, 2 * 1024 * 1024 * 1024
 config :ama, :quorum, 3
 #config :ama, :quorum, 1
 
