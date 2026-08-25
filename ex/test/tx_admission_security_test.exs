@@ -248,6 +248,39 @@ defmodule TXAdmissionSecurityTest do
     end
   end
 
+  test "purge processes at most its entry limit and resumes from its continuation" do
+    assert TXPool.purge_batch_size() == 100_000
+
+    sk = :crypto.strong_rand_bytes(64)
+    base_nonce = 9_000_000_000_000_000_000
+    txus = Enum.map(1..3, &TX.build(sk, "", "", [], base_nonce + &1))
+    signer = hd(txus).tx.signer
+    reserved_ama = TXPool.tx_reserve_ama()
+
+    try do
+      assert DB.Chain.balance(signer) == 0
+
+      Enum.each(txus, fn txu ->
+        assert %{error: :ok, inserted: true} = admit(txu, reserved_ama * length(txus))
+      end)
+
+      assert {:continue, continuation, 2} = TXPool.purge_stale(:start, 2)
+      assert TXPool.signer_reservation(signer).count == 1
+
+      remaining_nonces =
+        txus
+        |> Enum.filter(fn txu -> :ets.member(TXPool, {txu.tx.nonce, txu.hash}) end)
+        |> Enum.map(& &1.tx.nonce)
+
+      assert remaining_nonces == [base_nonce + 1]
+
+      assert {:done, 1} = TXPool.purge_stale(continuation, 2)
+      assert TXPool.signer_reservation(signer) == %{count: 0, reserved_ama: 0}
+    after
+      TXPool.delete_packed(txus)
+    end
+  end
+
   test "concurrent admission cannot cross the configured byte limit" do
     txus = signed_txus(12)
     tx_sizes = Map.new(txus, &{&1.hash, byte_size(TX.pack(&1))})

@@ -186,6 +186,53 @@ defmodule RocksDB do
         RDB.iterator_close(it)
         result
     end
+
+    def prefix_count_up_to(_prefix, 0, _opts), do: 0
+    def prefix_count_up_to(prefix, limit, opts = %{rtx: rtx})
+        when not is_nil(rtx) and is_integer(limit) and limit > 0 do
+        {_, rows} =
+            RDB.transaction_scan_cf(
+                rtx,
+                tx_scan_cf(opts),
+                prefix,
+                "",
+                :forward,
+                false,
+                0,
+                limit,
+                0
+            )
+
+        length(rows)
+    end
+    def prefix_count_up_to(prefix, limit, opts) when is_integer(limit) and limit > 0 do
+        {:ok, it} = iterator(opts)
+
+        try do
+            res = RDB.iterator_move(it, {:seek, prefix})
+            prefix_count_up_to_1(prefix, it, res, limit, 0)
+        after
+            RDB.iterator_close(it)
+        end
+    end
+
+    defp prefix_count_up_to_1(_prefix, _it, _res, 0, count), do: count
+    defp prefix_count_up_to_1(prefix, it, res, remaining, count) do
+        case res do
+            {:ok, <<^prefix::binary, _key::binary>>, _value} ->
+                prefix_count_up_to_1(
+                    prefix,
+                    it,
+                    RDB.iterator_move(it, :next),
+                    remaining - 1,
+                    count + 1
+                )
+
+            _ ->
+                count
+        end
+    end
+
     defp get_prefix_1(prefix, it, res, opts, acc) do
         case res do
             {:ok, <<^prefix::binary, key::binary>>, value} ->

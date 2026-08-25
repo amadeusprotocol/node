@@ -20,9 +20,44 @@ defmodule DB.Attestation do
     old_consensus = consensus(consensus.entry_hash, consensus.mutations_hash, db_opts)
     old_score = if old_consensus do old_consensus.aggsig.mask_set_size / old_consensus.aggsig.mask_size else 0.0 end
 
-    if score > old_score do
-      RocksDB.put("consensus:#{consensus.entry_hash}:#{consensus.mutations_hash}", RDB.vecpak_encode(consensus), db_handle(db_opts, :attestation, %{}))
+    cond do
+      score <= old_score ->
+        :ok
+
+      old_consensus ->
+        put_consensus(consensus, db_opts)
+
+      consensus_variant_limit_reached?(consensus.entry_hash, db_opts) ->
+        {:error, :consensus_variant_limit}
+
+      true ->
+        put_consensus(consensus, db_opts)
     end
+  end
+
+  defp consensus_variant_limit_reached?(entry_hash, db_opts) do
+    case DB.Entry.by_hash(entry_hash, db_opts) do
+      nil ->
+        true
+
+      entry ->
+        validator_count =
+          DB.Chain.validators_for_height(Entry.height(entry), db_opts)
+          |> length()
+
+        limit = validator_count * 2
+        prefix = "consensus:#{entry_hash}:"
+        opts = db_handle(db_opts, :attestation, %{})
+        RocksDB.prefix_count_up_to(prefix, limit, opts) >= limit
+    end
+  end
+
+  defp put_consensus(consensus, db_opts) do
+    RocksDB.put(
+      "consensus:#{consensus.entry_hash}:#{consensus.mutations_hash}",
+      RDB.vecpak_encode(consensus),
+      db_handle(db_opts, :attestation, %{})
+    )
   end
 
   def consensuses_by_height(height, db_opts \\ %{}) do

@@ -1,4 +1,7 @@
 defmodule TXPool do
+  @purge_batch_size 100_000
+  @purge_match_spec [{{:"$1", :"$2", :"$3", :"$4"}, [], [:"$_"]}]
+
   def init_byte_counter() do
     counter = :atomics.new(1, [])
     :persistent_term.put({__MODULE__, :byte_counter}, counter)
@@ -193,31 +196,60 @@ defmodule TXPool do
     end
   end
 
+  def purge_batch_size(), do: @purge_batch_size
+
   def purge_stale() do
+    purge_stale(:start, @purge_batch_size)
+    :ok
+  end
+
+  def purge_stale(continuation), do: purge_stale(continuation, @purge_batch_size)
+
+  def purge_stale(continuation, limit)
+      when is_integer(limit) and limit > 0 do
     cur_epoch = DB.Chain.epoch()
 
-    :ets.foldl(
-      fn {key, txu, _tx_bytes, reserved_ama}, account_state ->
-        signer = txu.tx.signer
+    case select_purge_batch(continuation, limit) do
+      :"$end_of_table" ->
+        {:done, 0}
 
-        if is_stale(txu, cur_epoch) do
-          delete_key(key)
-          account_state
+      {entries, next_continuation} ->
+        purge_entries(entries, cur_epoch)
+        processed = length(entries)
+
+        if next_continuation == :"$end_of_table" do
+          {:done, processed}
         else
-          {balance, accumulated_ama} =
-            Map.get_lazy(account_state, signer, fn -> {DB.Chain.balance(signer), 0} end)
-
-          if accumulated_ama + reserved_ama > balance do
-            delete_key(key)
-            Map.put(account_state, signer, {balance, accumulated_ama})
-          else
-            Map.put(account_state, signer, {balance, accumulated_ama + reserved_ama})
-          end
+          {:continue, next_continuation, processed}
         end
-      end,
-      %{},
-      TXPool
-    )
+    end
+  end
+
+  defp select_purge_batch(:start, limit) do
+    :ets.select_reverse(TXPool, @purge_match_spec, limit)
+  end
+
+  defp select_purge_batch(continuation, _limit) do
+    :ets.select(continuation)
+  end
+
+  defp purge_entries(entries, cur_epoch) do
+    Enum.reduce(entries, %{}, fn {key, txu, _tx_bytes, _reserved_ama}, balances ->
+      signer = txu.tx.signer
+
+      if is_stale(txu, cur_epoch) do
+        delete_key(key)
+        balances
+      else
+        balance = Map.get_lazy(balances, signer, fn -> DB.Chain.balance(signer) end)
+
+        if signer_reservation(signer).reserved_ama > balance do
+          delete_key(key)
+        end
+
+        Map.put(balances, signer, balance)
+      end
+    end)
 
     :ok
   end

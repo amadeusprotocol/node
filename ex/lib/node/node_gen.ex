@@ -10,7 +10,9 @@ defmodule NodeGen do
     NodeANR.seed()
 
     state = %{
-      ns: NodeState.init()
+      ns: NodeState.init(),
+      txpool_purge: nil,
+      txpool_purge_continuation: :start
     }
 
     :erlang.send_after(1000, self(), :tick)
@@ -120,16 +122,42 @@ defmodule NodeGen do
         state
 
       :tick_purge_txpool ->
-        :erlang.spawn(fn()->
-          task = Task.async(fn -> TXPool.purge_stale() end)
-          try do
-            Task.await(task, 600)
-          catch
-            :exit, {:timeout, _} -> Task.shutdown(task, :brutal_kill)
-          end
-        end)
         :erlang.send_after(6000, self(), :tick_purge_txpool)
-        state
+
+        if state.txpool_purge do
+          state
+        else
+          parent = self()
+          continuation = state.txpool_purge_continuation
+
+          {pid, monitor} = spawn_monitor(fn ->
+            result = TXPool.purge_stale(continuation)
+            send(parent, {:txpool_purge_done, self(), result})
+          end)
+
+          put_in(state, [:txpool_purge], {pid, monitor})
+        end
+
+      {:txpool_purge_done, pid, result} ->
+        case state.txpool_purge do
+          {^pid, monitor} ->
+            Process.demonitor(monitor, [:flush])
+
+            continuation = case result do
+              {:continue, next_continuation, _processed} -> next_continuation
+              {:done, _processed} -> :start
+            end
+
+            %{state | txpool_purge: nil, txpool_purge_continuation: continuation}
+
+          _ -> state
+        end
+
+      {:DOWN, monitor, :process, pid, _reason} ->
+        case state.txpool_purge do
+          {^pid, ^monitor} -> %{state | txpool_purge: nil}
+          _ -> state
+        end
 
       {:handle_sync, op, innerstate, args} ->
         #TODO: ns dropped
