@@ -32,6 +32,8 @@ defmodule Ama do
 
     :ets.new(TXPool, [:ordered_set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
+    :ets.new(TXPoolAccount, [:set, :named_table, :public,
+      {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
     TXPool.init_byte_counter()
     :ets.new(AttestationCache, [:ordered_set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])

@@ -28,13 +28,19 @@ defmodule TXAdmissionSecurityTest do
     TX.build(Application.fetch_env!(:ama, :trainer_sk), "", "", [], nonce)
   end
 
+  defp signed_txus(count) do
+    sk = :crypto.strong_rand_bytes(64)
+    base_nonce = fresh_nonce()
+    Enum.map(1..count, &TX.build(sk, "", "", [], base_nonce + &1))
+  end
+
   defp fresh_nonce(offset \\ 0) do
     chain_nonce = DB.Chain.nonce(Application.fetch_env!(:ama, :trainer_pk)) || -1
     max(:os.system_time(:nanosecond), chain_nonce + 1) + offset
   end
 
-  defp admit(txu) do
-    TXPool.insert(txu, admission_args(txu, nil, 10_000_000_000))
+  defp admit(txu, balance \\ 10_000_000_000) do
+    TXPool.insert(txu, admission_args(txu, nil, balance))
   end
 
   test "structural errors are returned before signature verification" do
@@ -69,16 +75,28 @@ defmodule TXAdmissionSecurityTest do
     assert TXPool.release_bytes(counter, 7) == 0
   end
 
+  test "each pending transaction reserves 1.2 AMA" do
+    assert TXPool.tx_reserve_ama() == 1_200_000_000
+  end
+
   test "successful insertion stores its packed size and deletion releases it" do
     txu = funded_txu(fresh_nonce())
     tx_bytes = byte_size(TX.pack(txu))
+    reserved_ama = TXPool.tx_reserve_ama()
     key = {txu.tx.nonce, txu.hash}
     initial_bytes = TXPool.bytes()
+    initial_reservation = TXPool.signer_reservation(txu.tx.signer)
 
     try do
       assert %{error: :ok, inserted: true, txu: ^txu} = admit(txu)
       assert TXPool.bytes() == initial_bytes + tx_bytes
-      assert [{^key, ^txu, ^tx_bytes}] = :ets.lookup(TXPool, key)
+      assert [{^key, ^txu, ^tx_bytes, ^reserved_ama}] = :ets.lookup(TXPool, key)
+
+      assert TXPool.signer_reservation(txu.tx.signer) == %{
+               count: initial_reservation.count + 1,
+               reserved_ama: initial_reservation.reserved_ama + reserved_ama
+             }
+
       assert [{_random_key, _random_txu}] = TXPool.random(1)
       assert TXPool.lowest_nonce(txu.tx.signer) <= txu.tx.nonce
       assert {highest_nonce, count} = TXPool.highest_nonce(txu.tx.signer)
@@ -87,17 +105,16 @@ defmodule TXAdmissionSecurityTest do
       assert txu in API.TXPool.get()
       assert txu in API.TXPool.get(txu.tx.signer)
 
-      assert TXPool.purge_stale() == :ok
-      assert [{^key, ^txu, ^tx_bytes}] = :ets.lookup(TXPool, key)
-
       assert %{error: :ok, inserted: false, txu: ^txu} = admit(txu)
       assert TXPool.bytes() == initial_bytes + tx_bytes
+      assert TXPool.signer_reservation(txu.tx.signer).count == initial_reservation.count + 1
     after
       TXPool.delete_packed(txu)
     end
 
     assert :ets.lookup(TXPool, key) == []
     assert TXPool.bytes() == initial_bytes
+    assert TXPool.signer_reservation(txu.tx.signer) == initial_reservation
   end
 
   test "invalid signatures release their byte reservation" do
@@ -105,21 +122,25 @@ defmodule TXAdmissionSecurityTest do
     invalid_txu = %{txu | signature: :binary.copy(<<0>>, 96)}
     key = {invalid_txu.tx.nonce, invalid_txu.hash}
     initial_bytes = TXPool.bytes()
+    initial_reservation = TXPool.signer_reservation(invalid_txu.tx.signer)
 
     assert admit(invalid_txu) == %{error: :invalid_signature}
     assert :ets.lookup(TXPool, key) == []
     assert TXPool.bytes() == initial_bytes
+    assert TXPool.signer_reservation(invalid_txu.tx.signer) == initial_reservation
   end
 
   test "concurrent duplicate admission stores and accounts for one transaction" do
     txu = funded_txu(fresh_nonce())
     tx_bytes = byte_size(TX.pack(txu))
+    reserved_ama = TXPool.tx_reserve_ama()
     initial_bytes = TXPool.bytes()
+    initial_reservation = TXPool.signer_reservation(txu.tx.signer)
 
     try do
       results =
         1..12
-        |> Task.async_stream(fn _ -> admit(txu) end,
+        |> Task.async_stream(fn _ -> admit(txu, TXPool.tx_reserve_ama() * 100) end,
           max_concurrency: 12,
           ordered: false,
           timeout: 30_000
@@ -130,15 +151,105 @@ defmodule TXAdmissionSecurityTest do
       assert Enum.count(results, &match?(%{inserted: true}, &1)) == 1
       assert Enum.count(results, &match?(%{inserted: false}, &1)) == 11
       assert TXPool.bytes() == initial_bytes + tx_bytes
+
+      assert TXPool.signer_reservation(txu.tx.signer) == %{
+               count: initial_reservation.count + 1,
+               reserved_ama: initial_reservation.reserved_ama + reserved_ama
+             }
     after
       TXPool.delete_packed(txu)
     end
 
     assert TXPool.bytes() == initial_bytes
+    assert TXPool.signer_reservation(txu.tx.signer) == initial_reservation
+  end
+
+  test "a signer cannot accumulate more collateral than its chain balance" do
+    reserved_ama = TXPool.tx_reserve_ama()
+    balance = reserved_ama * 3
+    txus = signed_txus(4)
+    signer = hd(txus).tx.signer
+    initial_reservation = TXPool.signer_reservation(signer)
+
+    try do
+      results = Enum.map(txus, &admit(&1, balance))
+
+      assert Enum.count(results, &match?(%{error: :ok, inserted: true}, &1)) == 3
+
+      assert %{
+               error: :not_enough_txpool_balance,
+               balance: ^balance,
+               reserved_ama: current_reserved,
+               required_ama: required_ama
+             } = List.last(results)
+
+      assert current_reserved == initial_reservation.reserved_ama + reserved_ama * 3
+      assert required_ama == current_reserved + reserved_ama
+
+      assert TXPool.signer_reservation(signer) == %{
+               count: initial_reservation.count + 3,
+               reserved_ama: current_reserved
+             }
+    after
+      TXPool.delete_packed(txus)
+    end
+
+    assert TXPool.signer_reservation(signer) == initial_reservation
+  end
+
+  test "concurrent admission cannot cross a signer's collateral limit" do
+    reserved_ama = TXPool.tx_reserve_ama()
+    balance = reserved_ama * 4
+    txus = signed_txus(16)
+    signer = hd(txus).tx.signer
+    initial_reservation = TXPool.signer_reservation(signer)
+
+    try do
+      results =
+        txus
+        |> Task.async_stream(&admit(&1, balance),
+          max_concurrency: length(txus),
+          ordered: false,
+          timeout: 30_000
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.count(results, &match?(%{error: :ok, inserted: true}, &1)) == 4
+      assert Enum.count(results, &match?(%{error: :not_enough_txpool_balance}, &1)) == 12
+
+      assert TXPool.signer_reservation(signer) == %{
+               count: initial_reservation.count + 4,
+               reserved_ama: initial_reservation.reserved_ama + balance
+             }
+    after
+      TXPool.delete_packed(txus)
+    end
+
+    assert TXPool.signer_reservation(signer) == initial_reservation
+  end
+
+  test "purging an underfunded signer releases byte and AMA reservations" do
+    sk = :crypto.strong_rand_bytes(64)
+    txu = TX.build(sk, "", "", [], fresh_nonce())
+    key = {txu.tx.nonce, txu.hash}
+    initial_bytes = TXPool.bytes()
+
+    try do
+      assert DB.Chain.balance(txu.tx.signer) == 0
+      assert %{error: :ok, inserted: true} = admit(txu, TXPool.tx_reserve_ama() * 2)
+      assert TXPool.signer_reservation(txu.tx.signer).count == 1
+
+      assert TXPool.purge_stale() == :ok
+      assert :ets.lookup(TXPool, key) == []
+      assert TXPool.bytes() == initial_bytes
+      assert TXPool.signer_reservation(txu.tx.signer) == %{count: 0, reserved_ama: 0}
+    after
+      TXPool.delete_packed(txu)
+    end
   end
 
   test "concurrent admission cannot cross the configured byte limit" do
-    txus = Enum.map(1..12, &funded_txu(fresh_nonce(&1)))
+    txus = signed_txus(12)
     tx_sizes = Map.new(txus, &{&1.hash, byte_size(TX.pack(&1))})
     initial_bytes = TXPool.bytes()
     previous_limit = TXPool.max_bytes()
@@ -149,7 +260,7 @@ defmodule TXAdmissionSecurityTest do
     try do
       results =
         txus
-        |> Task.async_stream(&admit/1,
+        |> Task.async_stream(&admit(&1, TXPool.tx_reserve_ama() * 100),
           max_concurrency: length(txus),
           ordered: false,
           timeout: 30_000
@@ -163,6 +274,12 @@ defmodule TXAdmissionSecurityTest do
       assert Enum.any?(results, &match?(%{error: :txpool_full}, &1))
       assert TXPool.bytes() == initial_bytes + inserted_bytes
       assert TXPool.bytes() <= test_limit
+
+      signer = hd(txus).tx.signer
+      assert TXPool.signer_reservation(signer).count == length(inserted)
+
+      assert TXPool.signer_reservation(signer).reserved_ama ==
+               length(inserted) * TXPool.tx_reserve_ama()
     after
       TXPool.delete_packed(txus)
       Application.put_env(:ama, :txpool_max_bytes, previous_limit)

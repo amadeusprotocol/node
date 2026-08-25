@@ -13,6 +13,17 @@ defmodule TXPool do
     Application.fetch_env!(:ama, :txpool_max_bytes)
   end
 
+  def tx_reserve_ama() do
+    RDBProtocol.reserve_ama_per_tx_exec() * 2 + RDBProtocol.reserve_ama_per_tx_storage()
+  end
+
+  def signer_reservation(signer) when is_binary(signer) do
+    case :ets.lookup(TXPoolAccount, signer) do
+      [{^signer, count, reserved_ama}] -> %{count: count, reserved_ama: reserved_ama}
+      [] -> %{count: 0, reserved_ama: 0}
+    end
+  end
+
   def insert(tx) when is_map(tx) do
     insert(tx, %{})
   end
@@ -69,7 +80,7 @@ defmodule TXPool do
         key = {txu.tx.nonce, txu.hash}
 
         case :ets.lookup(TXPool, key) do
-          [{^key, existing, _tx_bytes}] ->
+          [{^key, existing, _tx_bytes, _reserved_ama}] ->
             {%{error: :ok, txu: existing, inserted: false}, batch_state}
 
           [] ->
@@ -83,29 +94,28 @@ defmodule TXPool do
 
   defp validate_reserve_and_insert(key, txu, batch_state, validation_args) do
     case validate_tx(txu, Map.put(validation_args, :batch_state, batch_state)) do
-      %{error: :ok, batch_state: proposed_batch_state} ->
+      %{error: :ok, batch_state: proposed_batch_state, chain_balance: chain_balance} ->
         tx_bytes = byte_size(TX.pack(txu))
+        reserved_ama = tx_reserve_ama()
 
-        if reserve_pool_bytes(tx_bytes) do
-          case TX.validate_signature(txu) do
-            %{error: :ok} = result ->
-              if :ets.insert_new(TXPool, {key, txu, tx_bytes}) do
-                {Map.put(result, :inserted, true), proposed_batch_state}
-              else
-                release_pool_bytes(tx_bytes)
-                case :ets.lookup(TXPool, key) do
-                  [{^key, existing, _existing_bytes}] ->
-                    {%{error: :ok, txu: existing, inserted: false}, proposed_batch_state}
-                  [] -> validate_and_insert(txu, batch_state, validation_args)
-                end
-              end
+        cond do
+          bytes() + tx_bytes > max_bytes() ->
+            {pool_full_error(), batch_state}
 
-            error ->
-              release_pool_bytes(tx_bytes)
-              {error, batch_state}
-          end
-        else
-          {%{error: :txpool_full, current_bytes: bytes(), max_bytes: max_bytes()}, batch_state}
+          !signer_has_capacity?(txu.tx.signer, reserved_ama, chain_balance) ->
+            {signer_full_error(txu, chain_balance, reserved_ama), batch_state}
+
+          true ->
+            verify_and_insert(
+              key,
+              txu,
+              tx_bytes,
+              reserved_ama,
+              chain_balance,
+              batch_state,
+              proposed_batch_state,
+              validation_args
+            )
         end
 
       error ->
@@ -113,15 +123,103 @@ defmodule TXPool do
     end
   end
 
+  defp verify_and_insert(
+         key,
+         txu,
+         tx_bytes,
+         reserved_ama,
+         chain_balance,
+         batch_state,
+         proposed_batch_state,
+         validation_args
+       ) do
+    case TX.validate_signature(txu) do
+      %{error: :ok} = result ->
+        case reserve_signer_ama(
+               TXPoolAccount,
+               txu.tx.signer,
+               reserved_ama,
+               chain_balance
+             ) do
+          {:ok, _count, _total_reserved} ->
+            reserve_bytes_and_insert(
+              key,
+              txu,
+              tx_bytes,
+              reserved_ama,
+              batch_state,
+              proposed_batch_state,
+              validation_args,
+              result
+            )
+
+          {:error, _count, _total_reserved} ->
+            {signer_full_error(txu, chain_balance, reserved_ama), batch_state}
+        end
+
+      error ->
+        {error, batch_state}
+    end
+  end
+
+  defp reserve_bytes_and_insert(
+         key,
+         txu,
+         tx_bytes,
+         reserved_ama,
+         batch_state,
+         proposed_batch_state,
+         validation_args,
+         result
+       ) do
+    if reserve_pool_bytes(tx_bytes) do
+      if :ets.insert_new(TXPool, {key, txu, tx_bytes, reserved_ama}) do
+        {Map.put(result, :inserted, true), proposed_batch_state}
+      else
+        release_pool_bytes(tx_bytes)
+        release_signer_ama(TXPoolAccount, txu.tx.signer, reserved_ama)
+
+        case :ets.lookup(TXPool, key) do
+          [{^key, existing, _existing_bytes, _existing_reserve}] ->
+            {%{error: :ok, txu: existing, inserted: false}, proposed_batch_state}
+
+          [] ->
+            validate_and_insert(txu, batch_state, validation_args)
+        end
+      end
+    else
+      release_signer_ama(TXPoolAccount, txu.tx.signer, reserved_ama)
+      {pool_full_error(), batch_state}
+    end
+  end
+
   def purge_stale() do
     cur_epoch = DB.Chain.epoch()
 
     :ets.foldl(
-      fn {key, txu, _tx_bytes}, :ok ->
-        is_stale(txu, cur_epoch) && delete_key(key)
-        :ok
+      fn {key, txu, _tx_bytes, reserved_ama}, account_state ->
+        signer = txu.tx.signer
+
+        if is_stale(txu, cur_epoch) do
+          delete_key(key)
+          account_state
+        else
+          {balance, accumulated_ama} =
+            Map.get_lazy(account_state, signer, fn -> {DB.Chain.balance(signer), 0} end)
+
+          if accumulated_ama + reserved_ama > balance do
+            delete_key(key)
+            Map.put(account_state, signer, {balance, accumulated_ama})
+          else
+            Map.put(account_state, signer, {balance, accumulated_ama + reserved_ama})
+          end
+        end
       end,
-    :ok, TXPool)
+      %{},
+      TXPool
+    )
+
+    :ok
   end
 
   def is_stale(txu, cur_epoch) do
@@ -158,17 +256,29 @@ defmodule TXPool do
     batch_state = Map.get_lazy(args, :batch_state, fn -> %{} end)
 
     try do
-      chainNonce = Map.get_lazy(batch_state, 
-        {:chain_nonce, txu.tx.signer}, 
-        fn -> DB.Chain.nonce(txu.tx.signer) end)
+      chainNonce =
+        Map.get_lazy(
+          batch_state,
+          {:chain_nonce, txu.tx.signer},
+          fn -> DB.Chain.nonce(txu.tx.signer) end
+        )
 
       nonceValid = !chainNonce or txu.tx.nonce > chainNonce
       if !nonceValid, do: throw(%{error: :invalid_tx_nonce, key: {txu.tx.nonce, txu.hash}})
       batch_state = Map.put(batch_state, {:chain_nonce, txu.tx.signer}, txu.tx.nonce)
 
-      balance = Map.get_lazy(batch_state, 
-        {:balance, txu.tx.signer}, 
-        fn -> DB.Chain.balance(txu.tx.signer) end)
+      chain_balance =
+        case Map.fetch(batch_state, {:chain_balance, txu.tx.signer}) do
+          {:ok, balance} ->
+            balance
+
+          :error ->
+            Map.get_lazy(batch_state, {:balance, txu.tx.signer}, fn ->
+              DB.Chain.balance(txu.tx.signer)
+            end)
+        end
+
+      balance = Map.get(batch_state, {:balance, txu.tx.signer}, chain_balance)
 
       balance = balance - RDBProtocol.reserve_ama_per_tx_exec() * 2
       balance = balance - RDBProtocol.reserve_ama_per_tx_storage()
@@ -177,7 +287,10 @@ defmodule TXPool do
       if balance < 0,
         do: throw(%{error: :not_enough_tx_exec_balance, key: {txu.tx.nonce, txu.hash}})
 
-      batch_state = Map.put(batch_state, {:balance, txu.tx.signer}, balance)
+      batch_state =
+        batch_state
+        |> Map.put({:chain_balance, txu.tx.signer}, chain_balance)
+        |> Map.put({:balance, txu.tx.signer}, balance)
 
       action = TX.action(txu)
 
@@ -193,7 +306,7 @@ defmodule TXPool do
         end
       end
 
-      %{error: :ok, batch_state: batch_state}
+      %{error: :ok, batch_state: batch_state, chain_balance: chain_balance}
     catch
       :throw, r -> r
     end
@@ -207,7 +320,7 @@ defmodule TXPool do
 
       {acc, _state, _bytes} =
         :ets.foldl(
-          fn {key, txu, tx_size}, {acc, state_old, total_bytes} ->
+          fn {key, txu, tx_size, _reserved_ama}, {acc, state_old, total_bytes} ->
             if total_bytes + tx_size > max_bytes do
               if length(acc) > 0 do
                 throw({:choose, Enum.reverse(acc)})
@@ -255,7 +368,7 @@ defmodule TXPool do
   def random(0), do: []
 
   def random(amount) when is_integer(amount) and amount > 0 do
-    match_spec = [{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}]
+    match_spec = [{{:"$1", :"$2", :_, :_}, [], [{{:"$1", :"$2"}}]}]
 
     case :ets.select(TXPool, match_spec, amount) do
       :"$end_of_table" -> nil
@@ -266,7 +379,7 @@ defmodule TXPool do
 
   def lowest_nonce(pk) do
     :ets.foldl(
-      fn {{nonce, _hash}, txu, _tx_bytes}, lowest_nonce ->
+      fn {{nonce, _hash}, txu, _tx_bytes, _reserved_ama}, lowest_nonce ->
         if txu.tx.signer == pk do
           cond do
             lowest_nonce == nil -> nonce
@@ -276,8 +389,10 @@ defmodule TXPool do
         else
           lowest_nonce
         end
-      end, 
-    nil, TXPool)
+      end,
+      nil,
+      TXPool
+    )
   end
 
   def highest_nonce() do
@@ -287,7 +402,7 @@ defmodule TXPool do
 
   def highest_nonce(pk) do
     :ets.foldl(
-      fn {{nonce, _hash}, txu, _tx_bytes}, {highest_nonce, cnt} ->
+      fn {{nonce, _hash}, txu, _tx_bytes, _reserved_ama}, {highest_nonce, cnt} ->
         cond do
           txu.tx.signer == pk and (highest_nonce == nil or nonce > highest_nonce) ->
             {nonce, cnt + 1}
@@ -299,7 +414,9 @@ defmodule TXPool do
             {highest_nonce, cnt}
         end
       end,
-    {nil, 0}, TXPool)
+      {nil, 0},
+      TXPool
+    )
   end
 
   def size() do
@@ -326,15 +443,71 @@ defmodule TXPool do
     :atomics.sub_get(counter, 1, amount)
   end
 
+  @doc false
+  def reserve_signer_ama(table, signer, amount, balance)
+      when is_binary(signer) and is_integer(amount) and amount > 0 and is_integer(balance) and
+             balance >= 0 do
+    [count, reserved_ama] =
+      :ets.update_counter(table, signer, [{2, 1}, {3, amount}], {signer, 0, 0})
+
+    if reserved_ama <= balance do
+      {:ok, count, reserved_ama}
+    else
+      {count, reserved_ama} = release_signer_ama(table, signer, amount)
+      {:error, count, reserved_ama}
+    end
+  end
+
+  @doc false
+  def release_signer_ama(table, signer, amount)
+      when is_binary(signer) and is_integer(amount) and amount > 0 do
+    [count, reserved_ama] = :ets.update_counter(table, signer, [{2, -1}, {3, -amount}])
+    zero_count? = count == 0
+    zero_reservation? = reserved_ama == 0
+
+    if count < 0 or reserved_ama < 0 or zero_count? != zero_reservation? do
+      raise "TXPool signer reservation accounting underflow"
+    end
+
+    if zero_count? do
+      :ets.delete_object(table, {signer, 0, 0})
+    end
+
+    {count, reserved_ama}
+  end
+
   defp reserve_pool_bytes(amount), do: reserve_bytes(byte_counter(), amount, max_bytes())
   defp release_pool_bytes(amount), do: release_bytes(byte_counter(), amount)
 
+  defp signer_has_capacity?(signer, amount, balance) do
+    signer_reservation(signer).reserved_ama + amount <= balance
+  end
+
+  defp signer_full_error(txu, balance, amount) do
+    reservation = signer_reservation(txu.tx.signer)
+
+    %{
+      error: :not_enough_txpool_balance,
+      key: {txu.tx.nonce, txu.hash},
+      balance: balance,
+      reserved_ama: reservation.reserved_ama,
+      required_ama: reservation.reserved_ama + amount
+    }
+  end
+
+  defp pool_full_error() do
+    %{error: :txpool_full, current_bytes: bytes(), max_bytes: max_bytes()}
+  end
+
   defp delete_key(key) do
     case :ets.take(TXPool, key) do
-      [{^key, _txu, tx_bytes}] ->
+      [{^key, txu, tx_bytes, reserved_ama}] ->
         release_pool_bytes(tx_bytes)
+        release_signer_ama(TXPoolAccount, txu.tx.signer, reserved_ama)
         true
-      [] -> false
+
+      [] ->
+        false
     end
   end
 
