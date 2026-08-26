@@ -107,8 +107,10 @@ defmodule ReplicaGen do
     end
   end
 
-  #called after signing a produced entry, before it leaves the box, so a restart
-  #can never forget a height we signed
+  #called after signing a produced entry (before it leaves the box) and for every
+  #heartbeat with the height a peer advertises: durable on ALL replicas, so
+  #neither a restart nor the signer dying can make the group forget a signed
+  #height. adopting into our own HWM also re-advertises the group max transitively
   def note_signed_height(height) do
     case :persistent_term.get({ReplicaGen, :config}, nil) do
       nil -> :ok
@@ -171,6 +173,50 @@ defmodule ReplicaGen do
     end
   end
 
+  #ordinary-attestation single-shot lock, durable in ReplicaKV (sync) and gossiped
+  #on the heartbeat so peers adopt it durably: after a failover the new leader
+  #cannot attest a conflicting {entry, muts} at a height the group already
+  #attested. node-local guard, like the HWM — the chain never reads it.
+  def my_attest_lock() do
+    case MnesiaKV.get(ReplicaKV, "attest_lock") do
+      %{height: h, entry_hash: eh, muts_hash: mh} -> {h, eh, mh}
+      _ -> {0, @empty_hash, @empty_hash}
+    end
+  end
+
+  def put_attest_lock(height, entry_hash, muts_hash) do
+    MnesiaKV.merge(ReplicaKV, "attest_lock", %{height: height, entry_hash: entry_hash, muts_hash: muts_hash})
+  end
+
+  #true when our keys may attest {entry_hash, muts_hash} at height; the lock is
+  #written (sync) BEFORE any signature is released so a crash cannot forget it.
+  #re-signing the exact same payload is always allowed (net retries, retro attest
+  #of pack keys missing from consensus); a DIFFERENT payload at or below the
+  #locked height is refused — callers may force_attest_lock past that only with
+  #proof the network already reached consensus on the new payload
+  def acquire_attest_lock(height, entry_hash, muts_hash) do
+    case :persistent_term.get({ReplicaGen, :config}, nil) do
+      nil -> true
+      _ ->
+        {lh, leh, lmh} = my_attest_lock()
+        cond do
+          height == lh and entry_hash == leh and muts_hash == lmh -> true
+          height > lh ->
+            put_attest_lock(height, entry_hash, muts_hash)
+            flush_heartbeat()
+            true
+          true -> false
+        end
+    end
+  end
+
+  #softfork re-apply only: the network already carries >=0.67 consensus for a
+  #payload conflicting with our lock — we join that formed consensus, never lead
+  def force_attest_lock(height, entry_hash, muts_hash) do
+    put_attest_lock(height, entry_hash, muts_hash)
+    flush_heartbeat()
+  end
+
   def init(state) do
     :ets.new(ReplicaGen, [:named_table, :public, read_concurrency: true])
     replicas = Application.fetch_env!(:ama, :replicas)
@@ -183,8 +229,9 @@ defmodule ReplicaGen do
       peers = Enum.reject(replicas, & &1.id == my_id)
       {:ok, socket} = :gen_udp.open(me.port, [:binary, {:active, true}, {:ip, {0, 0, 0, 0}}])
 
-      #volatile leadership state only — the durable HWM and slash lock live in the
-      #ReplicaKV MnesiaKV table (my_signed_height/0, my_slash_lock/0), never cached here
+      #volatile leadership state only — the durable HWM, slash lock and attest lock
+      #live in the ReplicaKV MnesiaKV table (my_signed_height/0, my_slash_lock/0,
+      #my_attest_lock/0), never cached here
       :ets.insert(ReplicaGen, {:self_ack, nil})
       :ets.insert(ReplicaGen, {:synced, false})
       #not ready (can_sign? false) until persisted state is restored
@@ -284,8 +331,8 @@ defmodule ReplicaGen do
     end
   end
 
-  #build and gossip one heartbeat: our ack target + HWM + slash lock + sync
-  #state. carry my pk
+  #build and gossip one heartbeat: our ack target + HWM + slash lock + attest
+  #lock + sync state. carry my pk
   #so peers can mesh me without assuming any particular seed-pack ordering.
   #seq must strictly increase so peers dedup/order correctly (they drop
   #seq <= last_seq). ms wall clock + the bump past last_seq: the bump keeps two
@@ -297,7 +344,8 @@ defmodule ReplicaGen do
     seq = max(:os.system_time(:millisecond), state.last_seq + 1)
     my_h = my_signed_height()
     {sh, shash} = my_slash_lock()
-    payload = :erlang.term_to_binary({state.my_id, state.my_pk, state.ack_target, my_h, sh, shash, seq, synced_for_leadership?()})
+    {ah, aeh, amh} = my_attest_lock()
+    payload = :erlang.term_to_binary({state.my_id, state.my_pk, state.ack_target, my_h, sh, shash, seq, synced_for_leadership?(), ah, aeh, amh})
     packet = encrypt(payload, state.psk)
     Enum.each(state.peers, fn(p)->
       :gen_udp.send(state.socket, p.ip, p.port, packet)
@@ -324,9 +372,11 @@ defmodule ReplicaGen do
     payload = decrypt(packet, state.psk)
     case :erlang.binary_to_term(payload, [:safe]) do
       {:keypack, id, pks} -> handle_keypack(id, pks, state)
-      {id, pk, acking, h, sh, shash, seq, synced} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, state)
+      {id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh, state)
+      #pre-attest-lock builds: no attest lock on the wire
+      {id, pk, acking, h, sh, shash, seq, synced} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, 0, @empty_hash, @empty_hash, state)
       #pre-syncstate builds: no flag on the wire, count them as synced
-      {id, pk, acking, h, sh, shash, seq} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, true, state)
+      {id, pk, acking, h, sh, shash, seq} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, true, 0, @empty_hash, @empty_hash, state)
     end
   end
 
@@ -348,8 +398,8 @@ defmodule ReplicaGen do
     state
   end
 
-  defp handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, state) do
-    true = is_integer(id) and is_binary(pk) and is_integer(h) and is_integer(sh) and is_integer(seq) and is_boolean(synced)
+  defp handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh, state) do
+    true = is_integer(id) and is_binary(pk) and is_integer(h) and is_integer(sh) and is_integer(seq) and is_boolean(synced) and is_integer(ah)
     true = Enum.any?(state.peers, & &1.id == id)
     last_seq = Map.get(state.last_seqs, id, 0)
     if seq <= last_seq do state else
@@ -370,6 +420,15 @@ defmodule ReplicaGen do
       {my_sh, _} = my_slash_lock()
       if sh > my_sh and is_binary(shash) and byte_size(shash) == 32 do
         SpecialMeetingAttestGen.adopt_entry_sign_lock(sh, shash)
+      end
+      #durably adopt the peer's signed-height HWM: parked only in ETS it would
+      #not survive our restart, and with the signer dead the group could then
+      #re-sign that height
+      note_signed_height(h)
+      #adopt a newer ordinary-attestation lock from a peer
+      {my_ah, _, _} = my_attest_lock()
+      if ah > my_ah and is_binary(aeh) and byte_size(aeh) == 32 and is_binary(amh) and byte_size(amh) == 32 do
+        put_attest_lock(ah, aeh, amh)
       end
       state = %{state | last_seqs: Map.put(state.last_seqs, id, seq)}
       if fresh_connect do maybe_broadcast_keypack(%{state | last_keypack: 0}, now) else state end

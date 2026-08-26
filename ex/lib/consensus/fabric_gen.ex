@@ -310,9 +310,7 @@ defmodule FabricGen do
       !seen or now - seen < @retro_attest_grace_ms -> nil
       true ->
         validators = DB.Chain.validators_for_height(height)
-        root_receipts = DB.Entry.root_receipts(hash)
-        root_contractstate = DB.Entry.root_contractstate(hash)
-        attestations = Application.fetch_env!(:ama, :keys)
+        seeds = Application.fetch_env!(:ama, :keys)
         |> Enum.filter(& &1.pk in validators)
         |> Enum.filter(fn(seed)->
           #never sign twice at one height, and skip once our signature is
@@ -321,12 +319,16 @@ defmodule FabricGen do
           !DB.Attestation.by_height_by_signer(height, seed.pk)
             and !signer_in_consensus?(hash, muts_hash, validators, seed.pk)
         end)
-        |> Enum.map(fn(seed)->
-          attestation = Attestation.sign(seed.seed, hash, height, muts_hash, root_receipts, root_contractstate, :binary.copy(<<0>>, 32))
-          DB.Attestation.put(attestation, height)
-          send(FabricCoordinatorGen, {:add_attestation, attestation})
-          attestation
-        end)
+        attestations = if seeds == [] or !attest_lock_acquired?(entry, muts_hash) do [] else
+          root_receipts = DB.Entry.root_receipts(hash)
+          root_contractstate = DB.Entry.root_contractstate(hash)
+          Enum.map(seeds, fn(seed)->
+            attestation = Attestation.sign(seed.seed, hash, height, muts_hash, root_receipts, root_contractstate, :binary.copy(<<0>>, 32))
+            DB.Attestation.put(attestation, height)
+            send(FabricCoordinatorGen, {:add_attestation, attestation})
+            attestation
+          end)
+        end
         if attestations != [] do
           IO.puts "🩹 retro-attested tip #{height} entry #{Base58.encode(hash)}"
           msg = NodeProto.event_attestation(attestations)
@@ -334,6 +336,30 @@ defmodule FabricGen do
           peers = Application.fetch_env!(:ama, :seedanrs_as_peers)
           send(NodeGen.get_socket_gen(), {:send_to, peers, msg})
         end
+    end
+  end
+
+  #replica-group equivocation guard for ordinary attestations. the lock —
+  #durable in ReplicaKV, gossiped on the replica heartbeat — refuses a different
+  #{entry, muts} at a height the group already attested (failover onto a
+  #diverged chain). a conflicting payload is only co-signed once the network
+  #itself already carries >=0.67 consensus for it (softfork re-apply): we follow
+  #a formed consensus, never lead with a conflicting signature. a height skipped
+  #here self-heals via retro_attest_tip once that consensus arrives
+  defp attest_lock_acquired?(entry, muts_hash) do
+    height = entry.header.height
+    if ReplicaGen.acquire_attest_lock(height, entry.hash, muts_hash) do true else
+      case DB.Attestation.best_consensus_by_entryhash(entry.hash) do
+        {^muts_hash, score} when score >= 0.67 ->
+          ReplicaGen.force_attest_lock(height, entry.hash, muts_hash)
+          true
+        _ ->
+          if :persistent_term.get({FabricGen, :attest_withheld}, nil) != height do
+            :persistent_term.put({FabricGen, :attest_withheld}, height)
+            IO.puts "🔒 withholding attestation at #{height}: replica group already attested a different payload there"
+          end
+          false
+      end
     end
   end
 
@@ -513,6 +539,10 @@ defmodule FabricGen do
       my_validators = if !ReplicaGen.can_sign?() do [] else
         Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
       end
+      #never release an attestation conflicting with one the replica group already
+      #signed at this height (failover onto a diverged chain); lock is durable
+      #before any signature exists
+      my_validators = if my_validators != [] and !attest_lock_acquired?(next_entry, mutations_hash) do [] else my_validators end
       # {next_entry, mutations_hash} = {%{hash: DB.Chain.tip(), header_unpacked: %{height: DB.Chain.height()}}, DB.Entry.muts_hash(DB.Chain.tip())}
       # my_validators = Application.fetch_env!(:ama, :keys)
       # rtx = RocksDB.transaction(:persistent_term.get({:rocksdb, Fabric}).db)
