@@ -25,7 +25,7 @@ defmodule ReplicaGen do
           _ -> 0
         end
         fresh = :ets.foldl(fn
-          ({{:peer, _id}, acking, _h, _sh, _shash, _synced, seen}, acc)->
+          ({{:peer, _id}, acking, _h, _sh, _shash, _th, _rh, _synced, seen}, acc)->
             if acking == my_id and now - seen <= @ack_ttl_ms do acc + 1 else acc end
           (_, acc)-> acc
         end, 0, ReplicaGen)
@@ -68,7 +68,7 @@ defmodule ReplicaGen do
       replicas ->
         now = :erlang.monotonic_time(:millisecond)
         {synced, syncing} = :ets.foldl(fn
-          ({{:peer, _id}, _acking, _h, _sh, _shash, p_synced, seen}, {s, b})->
+          ({{:peer, _id}, _acking, _h, _sh, _shash, _th, _rh, p_synced, seen}, {s, b})->
             cond do
               now - seen > @silence_timeout_ms -> {s, b}
               p_synced -> {s + 1, b}
@@ -91,7 +91,7 @@ defmodule ReplicaGen do
 
   def max_seen_signed_height() do
     peers_max = :ets.foldl(fn
-      ({{:peer, _id}, _acking, h, _sh, _shash, _synced, _seen}, acc)-> max(h, acc)
+      ({{:peer, _id}, _acking, h, _sh, _shash, _th, _rh, _synced, _seen}, acc)-> max(h, acc)
       (_, acc)-> acc
     end, 0, ReplicaGen)
     max(my_signed_height(), peers_max)
@@ -159,7 +159,7 @@ defmodule ReplicaGen do
   defp await_slash_1(height, hash, majority, deadline) do
     now = :erlang.monotonic_time(:millisecond)
     replicated = :ets.foldl(fn
-      ({{:peer, _id}, _acking, _h, sh, shash, _synced, seen}, acc)->
+      ({{:peer, _id}, _acking, _h, sh, shash, _th, _rh, _synced, seen}, acc)->
         ok = (sh > height or (sh == height and shash == hash)) and now - seen <= @silence_timeout_ms
         if ok do acc + 1 else acc end
       (_, acc)-> acc
@@ -302,15 +302,27 @@ defmodule ReplicaGen do
     #leadership candidates: fresh AND self-reporting synced. an unsynced
     #member (self included) is never endorsed; with no synced member at all
     #the target goes nil and nobody signs until someone catches up
-    candidate_ids = Enum.filter(state.peers, fn(p)->
+    candidates = Enum.flat_map(state.peers, fn(p)->
       case :ets.lookup(ReplicaGen, {:peer, p.id}) do
-        [{{:peer, _}, _acking, _h, _sh, _shash, synced, seen}] -> synced and now - seen <= @silence_timeout_ms
-        _ -> false
+        [{{:peer, _}, _acking, _h, _sh, _shash, th, _rh, synced, seen}] ->
+          if synced and now - seen <= @silence_timeout_ms do [{p.id, th}] else [] end
+        _ -> []
       end
     end)
-    |> Enum.map(& &1.id)
-    candidate_ids = if state.synced do [state.my_id | candidate_ids] else candidate_ids end
-    desired = case candidate_ids do [] -> nil; ids -> Enum.min(ids) end
+    candidates = if state.synced do [{state.my_id, DB.Chain.height() || 0} | candidates] else candidates end
+    #elect the freshest: drop any candidate 2+ temporal blocks behind the
+    #freshest one, then lowest id among the rest. heartbeat views are up to
+    #@heartbeat_ms stale, so a 1-block gap is normal propagation jitter and
+    #must not churn leadership; a 2+ gap is a genuinely stale replica that
+    #would burn its slots producing on an old tip. the within-1 band (vs a
+    #pairwise threshold) keeps the verdict a total order, consistent across
+    #the replicas' differing views
+    desired = case candidates do
+      [] -> nil
+      cs ->
+        freshest = cs |> Enum.map(fn({_, th})-> th end) |> Enum.max()
+        cs |> Enum.filter(fn({_, th})-> th >= freshest - 1 end) |> Enum.map(fn({id, _})-> id end) |> Enum.min()
+    end
     state = update_ack_target(state, desired, now)
 
     state = broadcast_heartbeat(state)
@@ -332,7 +344,8 @@ defmodule ReplicaGen do
   end
 
   #build and gossip one heartbeat: our ack target + HWM + slash lock + attest
-  #lock + sync state. carry my pk
+  #lock + sync state + temporal/rooted heights (freshest-replica election).
+  #carry my pk
   #so peers can mesh me without assuming any particular seed-pack ordering.
   #seq must strictly increase so peers dedup/order correctly (they drop
   #seq <= last_seq). ms wall clock + the bump past last_seq: the bump keeps two
@@ -345,7 +358,9 @@ defmodule ReplicaGen do
     my_h = my_signed_height()
     {sh, shash} = my_slash_lock()
     {ah, aeh, amh} = my_attest_lock()
-    payload = :erlang.term_to_binary({state.my_id, state.my_pk, state.ack_target, my_h, sh, shash, seq, synced_for_leadership?(), ah, aeh, amh})
+    th = DB.Chain.height() || 0
+    rh = DB.Chain.rooted_height() || 0
+    payload = :erlang.term_to_binary({state.my_id, state.my_pk, state.ack_target, my_h, sh, shash, seq, synced_for_leadership?(), ah, aeh, amh, th, rh})
     packet = encrypt(payload, state.psk)
     Enum.each(state.peers, fn(p)->
       :gen_udp.send(state.socket, p.ip, p.port, packet)
@@ -372,11 +387,12 @@ defmodule ReplicaGen do
     payload = decrypt(packet, state.psk)
     case :erlang.binary_to_term(payload, [:safe]) do
       {:keypack, id, pks} -> handle_keypack(id, pks, state)
-      {id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh, state)
-      #pre-attest-lock builds: no attest lock on the wire
-      {id, pk, acking, h, sh, shash, seq, synced} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, 0, @empty_hash, @empty_hash, state)
+      {id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh, th, rh} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh, th, rh, state)
+      #pre-attest-lock/tip-height builds: neither on the wire. th 0 drops them
+      #from freshest-election candidacy — restart a mixed group together
+      {id, pk, acking, h, sh, shash, seq, synced} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, 0, @empty_hash, @empty_hash, 0, 0, state)
       #pre-syncstate builds: no flag on the wire, count them as synced
-      {id, pk, acking, h, sh, shash, seq} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, true, 0, @empty_hash, @empty_hash, state)
+      {id, pk, acking, h, sh, shash, seq} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, true, 0, @empty_hash, @empty_hash, 0, 0, state)
     end
   end
 
@@ -398,8 +414,8 @@ defmodule ReplicaGen do
     state
   end
 
-  defp handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh, state) do
-    true = is_integer(id) and is_binary(pk) and is_integer(h) and is_integer(sh) and is_integer(seq) and is_boolean(synced) and is_integer(ah)
+  defp handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, ah, aeh, amh, th, rh, state) do
+    true = is_integer(id) and is_binary(pk) and is_integer(h) and is_integer(sh) and is_integer(seq) and is_boolean(synced) and is_integer(ah) and is_integer(th) and is_integer(rh)
     true = Enum.any?(state.peers, & &1.id == id)
     last_seq = Map.get(state.last_seqs, id, 0)
     if seq <= last_seq do state else
@@ -407,10 +423,10 @@ defmodule ReplicaGen do
       #first heartbeat, or back from silence: push our keypack right away so
       #pack divergence surfaces at connect time, not up to @keypack_ms later
       fresh_connect = case :ets.lookup(ReplicaGen, {:peer, id}) do
-        [{{:peer, _}, _acking, _h, _sh, _shash, _synced, seen}] -> now - seen > @silence_timeout_ms
+        [{{:peer, _}, _acking, _h, _sh, _shash, _th, _rh, _synced, seen}] -> now - seen > @silence_timeout_ms
         _ -> true
       end
-      :ets.insert(ReplicaGen, {{:peer, id}, acking, h, sh, shash, synced, now})
+      :ets.insert(ReplicaGen, {{:peer, id}, acking, h, sh, shash, th, rh, synced, now})
       #mesh the peer the first time we see it, then keep it live: a heartbeat is
       #proof the peer is up, so keep it in the gossip online set so the leader's
       #entry/attestation broadcasts keep reaching it

@@ -191,15 +191,19 @@ defmodule FabricSyncGen do
         IO.puts "Behind Root: #{behind_root_local} unrooted, #{length(holes)} consensus holes"
       end
 
-      #live-edge holes get their own a+c request: the network-wide aggregate
+      #live-edge holes get their own e+a+c request: the network-wide aggregate
       #may not exist yet, peers' raw attestations (a) let us aggregate our own
-      #consensus locally. kept SEPARATE from the deep c-only chunks — the
-      #a-flag caps a served message at 20 heights and must not truncate them
+      #consensus locally, and the hash-deduped e recovers a doubleblock sibling
+      #we lack at an already-applied height (set_consensus drops consensus for
+      #an entry we don't hold, so without the sibling entry rooting wedges
+      #below it forever). normally the dedup means peers send no entries at
+      #all. kept SEPARATE from the deep c-only chunks — the e/a flags cap a
+      #served message at 20 heights and must not truncate them
       {tip_holes, deep_holes} = Enum.split_with(holes, & temporal_height - &1 <= 2)
 
       if tip_holes != [] do
         {_rooted_peers, tip_peers} = NodeANR.peers_w_min_height(List.first(tip_holes), :any)
-        chunk = Enum.map(tip_holes, & %{height: &1, a: true, c: true})
+        chunk = Enum.map(tip_holes, & %{height: &1, hashes: DB.Entry.by_height_return_hashes(&1), e: true, a: true, c: true})
         Enum.take(Enum.shuffle(tip_peers), 3)
         |> Enum.each(fn(peer)->
           send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup(chunk)})
