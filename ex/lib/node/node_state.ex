@@ -96,6 +96,15 @@ defmodule NodeState do
     pruned_below = term[:pruned_below_height] || 0
     if rooted || temporal do
       NodeANR.set_tips(istate.peer.pk, rooted, temporal, pruned_below)
+
+      advertised_height = [rooted, temporal]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(& &1.header.height)
+      |> Enum.max()
+
+      if advertised_height > DB.Chain.height() do
+        FabricSyncGen.higher_tip(%{pk: istate.peer.pk, ip4: istate.peer.ip4}, advertised_height)
+      end
     end
   end
 
