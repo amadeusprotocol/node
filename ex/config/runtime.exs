@@ -27,7 +27,12 @@ config :ama, :snapshot_height, (System.get_env("SNAPSHOT_HEIGHT") || "77736265")
 
 
 #Bind Interaces
-config :ama, :offline, (!!System.get_env("OFFLINE") || nil)
+#`mix test` always runs offline (Ama.offline_node: no UDP/STUN/peers/sync gens):
+#a network-connected test node pulls live event_tx gossip into the shared TXPool
+#and flakes any test that assumes an isolated pool. Mix is absent in releases,
+#so the guard cannot misfire there.
+in_mix_test = Code.ensure_loaded?(Mix) and function_exported?(Mix, :env, 0) and Mix.env() == :test
+config :ama, :offline, (!!System.get_env("OFFLINE") || in_mix_test || nil)
 config :ama, :testnet, (!!System.get_env("TESTNET") || nil)
 testnet_sleep_default = if !!System.get_env("TESTNET") do "350" else "0" end
 config :ama, :testnet_sleep, (System.get_env("TESTNET_SLEEP") || testnet_sleep_default) |> :erlang.binary_to_integer()

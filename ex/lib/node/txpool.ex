@@ -138,26 +138,32 @@ defmodule TXPool do
        ) do
     case TX.validate_signature(txu) do
       %{error: :ok} = result ->
-        case reserve_signer_ama(
-               TXPoolAccount,
-               txu.tx.signer,
-               reserved_ama,
-               chain_balance
-             ) do
-          {:ok, _count, _total_reserved} ->
-            reserve_bytes_and_insert(
-              key,
-              txu,
-              tx_bytes,
-              reserved_ama,
-              batch_state,
-              proposed_batch_state,
-              validation_args,
-              result
-            )
+        mutation_result = accounting_mutation(fn ->
+          case reserve_signer_ama(
+                 TXPoolAccount,
+                 txu.tx.signer,
+                 reserved_ama,
+                 chain_balance
+               ) do
+            {:ok, _count, _total_reserved} ->
+              reserve_bytes_and_insert(
+                key,
+                txu,
+                tx_bytes,
+                reserved_ama,
+                batch_state,
+                proposed_batch_state,
+                result
+              )
 
-          {:error, _count, _total_reserved} ->
-            {signer_full_error(txu, chain_balance, reserved_ama), batch_state}
+            {:error, _count, _total_reserved} ->
+              {signer_full_error(txu, chain_balance, reserved_ama), batch_state}
+          end
+        end)
+
+        case mutation_result do
+          {:retry, retry_batch_state} -> validate_and_insert(txu, retry_batch_state, validation_args)
+          result -> result
         end
 
       error ->
@@ -172,7 +178,6 @@ defmodule TXPool do
          reserved_ama,
          batch_state,
          proposed_batch_state,
-         validation_args,
          result
        ) do
     if reserve_pool_bytes(tx_bytes) do
@@ -187,7 +192,7 @@ defmodule TXPool do
             {%{error: :ok, txu: existing, inserted: false}, proposed_batch_state}
 
           [] ->
-            validate_and_insert(txu, batch_state, validation_args)
+            {:retry, batch_state}
         end
       end
     else
@@ -532,14 +537,121 @@ defmodule TXPool do
   end
 
   defp delete_key(key) do
-    case :ets.take(TXPool, key) do
-      [{^key, txu, tx_bytes, reserved_ama}] ->
-        release_pool_bytes(tx_bytes)
-        release_signer_ama(TXPoolAccount, txu.tx.signer, reserved_ama)
-        true
+    accounting_mutation(fn ->
+      case :ets.take(TXPool, key) do
+        [{^key, txu, tx_bytes, reserved_ama}] ->
+          release_pool_bytes(tx_bytes)
+          release_signer_ama(TXPoolAccount, txu.tx.signer, reserved_ama)
+          true
 
+        [] ->
+          false
+      end
+    end)
+  end
+
+  def reconcile_accounting() do
+    case acquire_reconcile_gate() do
+      :busy ->
+        :busy
+
+      :ok ->
+        try do
+          wait_for_accounting_writers()
+          :ets.delete_all_objects(TXPoolAccount)
+
+          {entries, total_bytes} = :ets.foldl(fn
+            {_key, txu, tx_bytes, reserved_ama}, {count, bytes} ->
+              :ets.update_counter(
+                TXPoolAccount,
+                txu.tx.signer,
+                [{2, 1}, {3, reserved_ama}],
+                {txu.tx.signer, 0, 0}
+              )
+
+              {count + 1, bytes + tx_bytes}
+          end, {0, 0}, TXPool)
+
+          :atomics.put(byte_counter(), 1, total_bytes)
+          %{entries: entries, bytes: total_bytes, signers: :ets.info(TXPoolAccount, :size)}
+        after
+          :ets.delete(TXPoolAccountingWriters, :gate)
+        end
+    end
+  end
+
+  defp accounting_mutation(fun) do
+    acquire_accounting_writer()
+
+    try do
+      fun.()
+    after
+      :ets.delete(TXPoolAccountingWriters, self())
+    end
+  end
+
+  defp acquire_accounting_writer() do
+    case :ets.lookup(TXPoolAccountingWriters, :gate) do
       [] ->
-        false
+        :ets.insert(TXPoolAccountingWriters, {self(), true})
+
+        case :ets.lookup(TXPoolAccountingWriters, :gate) do
+          [] -> :ok
+          _ ->
+            :ets.delete(TXPoolAccountingWriters, self())
+            acquire_accounting_writer()
+        end
+
+      [{:gate, owner}] ->
+        if Process.alive?(owner) do
+          Process.sleep(1)
+        else
+          :ets.delete_object(TXPoolAccountingWriters, {:gate, owner})
+          reconcile_accounting()
+        end
+
+        acquire_accounting_writer()
+    end
+  end
+
+  defp acquire_reconcile_gate() do
+    if :ets.insert_new(TXPoolAccountingWriters, {:gate, self()}) do
+      :ok
+    else
+      case :ets.lookup(TXPoolAccountingWriters, :gate) do
+        [{:gate, owner}] ->
+          if Process.alive?(owner) do
+            :busy
+          else
+            :ets.delete_object(TXPoolAccountingWriters, {:gate, owner})
+            acquire_reconcile_gate()
+          end
+
+        [] ->
+          acquire_reconcile_gate()
+      end
+    end
+  end
+
+  defp wait_for_accounting_writers() do
+    alive = :ets.foldl(fn
+      {pid, true}, count when is_pid(pid) ->
+        if Process.alive?(pid) do
+          count + 1
+        else
+          :ets.delete(TXPoolAccountingWriters, pid)
+          count
+        end
+
+      _, count ->
+        count
+    end, 0, TXPoolAccountingWriters)
+
+    if alive > 0 do
+      Process.sleep(1)
+      wait_for_accounting_writers()
+    else
+      :ok
     end
   end
 

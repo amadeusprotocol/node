@@ -33,10 +33,9 @@ defmodule DB.Pruner do
         # Never prune above rooted_height — rewind would break.
         rooted = DB.Chain.rooted_height() || 0
         safe_cutoff = min(cutoff, rooted)
-        # pruned_below_height is seeded at boot in Ex.full_node/0 (set to
-        # rooted_height for fresh non-archival nodes). The pruner walks
-        # from there upward, actually deleting data — no cursor "jump"
-        # that would orphan rows.
+        # Bundle import seeds pruned_below_height transactionally. Existing
+        # full-history nodes keep a zero cursor and must actually delete their
+        # old rows while walking forward — never jump the cursor at boot.
         prune_up_to(safe_cutoff)
       end
     catch

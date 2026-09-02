@@ -232,8 +232,12 @@ defmodule SpecialMeetingAttestGen do
         !guilty -> []
         my_keys == [] -> []
         !ReplicaGen.can_sign?() -> []
+        #cross-lock: a block we proposed/produced under the block lock at this
+        #height carries our signature too — never responder-sign a competitor
+        ReplicaGen.block_lock_conflict?(entry.header.height, entry.hash) -> []
         !acquire_entry_sign_lock(entry.header.height, entry.hash) -> []
         !ReplicaGen.await_slash_lock_replicated(entry.header.height, entry.hash) -> []
+        !ReplicaGen.can_sign?() -> []
 
         true ->
           h = :crypto.hash(:sha256, RDB.vecpak_encode(entry.header))

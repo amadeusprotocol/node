@@ -1,3 +1,5 @@
 _build/
 deps/
 priv/index.html
+amadeusd
+native/rdb/target/

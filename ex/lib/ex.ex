@@ -34,6 +34,8 @@ defmodule Ama do
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
     :ets.new(TXPoolAccount, [:set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
+    :ets.new(TXPoolAccountingWriters, [:set, :named_table, :public,
+      {:write_concurrency, true}, {:read_concurrency, true}])
     TXPool.init_byte_counter()
     :ets.new(AttestationCache, [:ordered_set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
@@ -43,6 +45,7 @@ defmodule Ama do
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
     :ets.new(NODEANRHOT, [:ordered_set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
+    :ets.new(FabricSyncRequests, [:named_table, :public, :set, read_concurrency: true])
     #rate-limit table for identity-collision warnings (same pk seen from 2 IPs)
     :ets.new(NODECollisionLog, [:set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}])
@@ -67,13 +70,18 @@ defmodule Ama do
   end
 
   def offline_node() do
-    %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-    if !DB.Entry.by_hash(EntryGenesis.get().hash) do
+    #bootstrap genesis only into a truly empty datadir: on an existing chain the
+    #genesis ENTRY may legitimately be pruned away, and an offline boot (incl.
+    #mix test) over a live datadir must not write into it
+    if !DB.Chain.tip() do
+      %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       RocksDB.put("bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}",
         RDB.vecpak_encode([EntryGenesis.signer()]), %{db: db, cf: cf.contractstate})
 
+      #the embedded genesis carries its header still packed
       entry = EntryGenesis.get()
-      DB.Entry.insert(entry)
+      entry = Map.put(entry, :header, RDB.vecpak_decode(entry.header))
+      :ok = DB.Entry.insert(entry)
       FabricGen.apply_entry(entry)
     end
   end
@@ -112,15 +120,11 @@ defmodule Ama do
       end
     end
 
+    #MMR must be verified/rebuilt BEFORE the background bundle builder can
+    #snapshot the db: a bundle ships the MMR, and one built from a stale MMR
+    #would be signed and served to every bootstrapping node
+    ensure_mmr_synced()
     FabricSnapshot.check_or_build_statepeerdownload()
-
-    if Application.fetch_env!(:ama, :pruner_enabled) do
-      rooted = DB.Chain.rooted_height()
-      if is_integer(rooted) and rooted > 0 and DB.Chain.pruned_below_height() == 0 do
-        DB.Chain.set_pruned_below_height(rooted)
-        IO.puts "seeded pruned_below_height = #{rooted} (lowest block we serve)"
-      end
-    end
 
     run_node_services()
   end
@@ -152,24 +156,52 @@ defmodule Ama do
   end
 
   defp ensure_mmr_synced() do
-    cond do
-      is_nil(DB.Chain.tip()) ->
-        :ok
+    try do
+      cond do
+        is_nil(DB.Chain.tip()) ->
+          :ok
 
-      true ->
-        tip_height = DB.Chain.height()
-        expected_size = tip_height + 1
-        current = DB.MMR.load() || %{size: 0, peaks: []}
-        if current.size != expected_size do
-          IO.puts "MMR not synced with chain (have size=#{current.size}, expected #{expected_size}) — rebuilding"
-          if Application.fetch_env!(:ama, :testnet) && current.size == 0 do
-            IO.puts "MMR: testnet with no MMR — rebuilding from genesis (height 0)"
-            MMR.Bootstrap.rebuild_from_genesis()
-          else
-            MMR.Bootstrap.rebuild_from_checkpoint()
+        true ->
+          tip_height = DB.Chain.height()
+          expected_size = tip_height + 1
+          current = DB.MMR.load() || %{size: 0, peaks: []}
+          if current.size != expected_size do
+            IO.puts "MMR not synced with chain (have size=#{current.size}, expected #{expected_size}) — rebuilding"
+            result =
+              if Application.fetch_env!(:ama, :testnet) && current.size == 0 do
+                IO.puts "MMR: testnet with no MMR — rebuilding from genesis (height 0)"
+                MMR.Bootstrap.rebuild_from_genesis()
+              else
+                MMR.Bootstrap.rebuild_from_checkpoint()
+              end
+
+            case result do
+              %{size: ^expected_size} ->
+                case DB.MMR.load() do
+                  %{size: ^expected_size} -> :ok
+                  persisted -> halt_mmr("rebuild did not persist expected size #{expected_size}; got #{inspect(persisted)}")
+                end
+
+              {:error, reason} ->
+                halt_mmr("rebuild failed: #{inspect(reason)}")
+
+              other ->
+                halt_mmr("rebuild returned invalid state: #{inspect(other)}")
+            end
           end
-        end
+      end
+    catch
+      kind, reason -> halt_mmr("rebuild crashed: #{inspect({kind, reason})}")
     end
+  end
+
+  #never run with an MMR that disagrees with the chain: root_chain would be
+  #wrong on every entry we validate or produce. halting beats limping on; a
+  #supervisor restart loops back here until the operator repairs the datadir
+  defp halt_mmr(reason) do
+    IO.puts(:stderr, "FATAL: MMR recovery failed: #{reason}")
+    IO.puts(:stderr, "FATAL: refusing to run with an inconsistent MMR. recovery: pruned/bundle node -> wipe the datadir and re-bootstrap from the RPC state bundle (it ships a consistent MMR); full-history node -> ensure the compiled-in MMR checkpoint height is present locally")
+    :erlang.halt(1)
   end
 
   def run_udp_listener() do

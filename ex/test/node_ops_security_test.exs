@@ -21,6 +21,11 @@ defmodule NodeOpsSecurityTest do
     end)
   end
 
+  test "frontier retry traffic fits within catchup quotas" do
+    assert NodeOps.quota(:catchup) == 75
+    assert NodeOps.quota(:catchup_reply) == 75
+  end
+
   test "the network decoder rejects local state-transition operations" do
     Enum.each(@internal_ops, fn op ->
       compressed = NodeProto.compress(%{op: Atom.to_string(op)})

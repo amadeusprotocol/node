@@ -11,6 +11,13 @@ defmodule FabricSyncFrontierTest do
              a: true,
              c: true
            }
+
+    assert FabricSyncGen.root_hole_request(7, [<<2>>]) == %{
+             height: 7,
+             hashes: [<<2>>],
+             e: true,
+             c: true
+           }
   end
 
   test "advertising peer is prioritized and peers of any type can fill the hedge" do
@@ -44,5 +51,15 @@ defmodule FabricSyncFrontierTest do
     selected = FabricSyncGen.select_frontier_peers([], peers, nil, 3)
 
     assert MapSet.new(selected) == MapSet.new(peers)
+  end
+
+  test "frontier advertisements expire instead of pinning a permanent retry target" do
+    advertisements = %{
+      <<1>> => %{peer: %{pk: <<1>>, ip4: "10.0.0.1"}, height: 1_000_000, seen: 100},
+      <<2>> => %{peer: %{pk: <<2>>, ip4: "10.0.0.2"}, height: 42, seen: 2_000}
+    }
+
+    assert FabricSyncGen.active_frontier_advertisements(advertisements, 2_100, 500)
+           |> Map.keys() == [<<2>>]
   end
 end

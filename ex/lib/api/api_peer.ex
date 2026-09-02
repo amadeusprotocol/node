@@ -55,7 +55,8 @@ defmodule API.Peer do
     end
 
     def version_ratio_score_by_target(target_ver) do
-      version_ratio() |> Enum.filter(& elem(&1,0) >= target_ver) |> Enum.sum_by(& elem(&1,1))
+      target = AutoUpdateGen.parse_version(target_ver)
+      version_ratio() |> Enum.filter(&(AutoUpdateGen.parse_version(elem(&1,0)) >= target)) |> Enum.sum_by(& elem(&1,1))
     end
 
     def all_for_web() do

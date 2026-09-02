@@ -1,5 +1,6 @@
 defmodule NodeGen do
   use GenServer
+  @txpool_reconcile_ms 300_000
 
   def start_link(ip_tuple, port) do
     GenServer.start_link(__MODULE__, [ip_tuple, port], name: __MODULE__)
@@ -19,6 +20,7 @@ defmodule NodeGen do
     :erlang.send_after(1000, self(), :tick_ping)
     :erlang.send_after(1000, self(), :tick_anr)
     :erlang.send_after(6000, self(), :tick_purge_txpool)
+    :erlang.send_after(@txpool_reconcile_ms, self(), :tick_reconcile_txpool)
     {:ok, state}
   end
 
@@ -33,14 +35,17 @@ defmodule NodeGen do
   end
 
   def broadcast(msg, opts \\ %{validators: 1000, peers: 10}) do
-    {vals, peers} = NodeANR.handshaked_and_online()
-    self = if !opts[:self] do [] else
-      anr = NodeANR.by_pk(Application.fetch_env!(:ama, :trainer_pk))
-      [%{ip4: anr.ip4, pk: anr.pk}]
+    #offline node (incl. mix test): no listener is running, broadcast is a no-op
+    if Process.whereis(__MODULE__) == nil do :ok else
+      {vals, peers} = NodeANR.handshaked_and_online()
+      self = if !opts[:self] do [] else
+        anr = NodeANR.by_pk(Application.fetch_env!(:ama, :trainer_pk))
+        [%{ip4: anr.ip4, pk: anr.pk}]
+      end
+      vals = Enum.take(vals, opts[:validators] || 1000)
+      peers = Enum.take(peers, opts[:peers] || 10)
+      send(get_socket_gen(), {:send_to, self ++ vals ++ peers, msg})
     end
-    vals = Enum.take(vals, opts[:validators] || 1000)
-    peers = Enum.take(peers, opts[:peers] || 10)
-    send(get_socket_gen(), {:send_to, self ++ vals ++ peers, msg})
   end
 
   def broadcast_check_unverified_anr() do
@@ -87,6 +92,11 @@ defmodule NodeGen do
     #testnet DOES need pings/handshakes/gossip, so let the normal handlers run.
     testnet_solo = !!Application.fetch_env!(:ama, :testnet) and is_nil(Application.fetch_env!(:ama, :replicas))
     state = case msg do
+      :tick_reconcile_txpool ->
+        :erlang.send_after(@txpool_reconcile_ms, self(), :tick_reconcile_txpool)
+        Task.start(fn -> TXPool.reconcile_accounting() end)
+        state
+
       #NOOP for solo testnet
       _ when testnet_solo -> state
 

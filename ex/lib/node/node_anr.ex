@@ -349,14 +349,43 @@ defmodule NodeANR do
     :ets.update_element(NODEANRHOT, pk, [{2, ts_m}, {3, version}, {4, latency}], {pk, ts_m, version, latency, %{}, %{}, 0})
   end
 
-  def set_tips(pk, rooted, temporal, pruned_below \\ 0) do
+  def set_tips(pk, rooted, temporal, pruned_below \\ nil) do
     ts_m = :os.system_time(1000)
-    #nil rooted/temporal means "no valid tip of that kind in this update":
-    #keep whatever was stored before instead of clobbering it
-    updates = [{2, ts_m}, {7, pruned_below}]
+    # nil rooted/temporal means "no valid tip of that kind in this update":
+    # keep whatever was stored before instead of clobbering it
+    current = get_peer_hotdata(pk) || %{}
+    rooted = newest_tip(current[:rooted], rooted)
+    temporal = newest_tip(current[:temporal], temporal)
+    updates = [{2, ts_m}]
+
+    updates =
+      if is_integer(pruned_below) and pruned_below >= 0 do updates ++ [{7, pruned_below}] else updates end
     updates = if rooted do updates ++ [{5, rooted}] else updates end
     updates = if temporal do updates ++ [{6, temporal}] else updates end
     :ets.update_element(NODEANRHOT, pk, updates, {pk, ts_m, "", 0, %{}, %{}, 0})
+  end
+
+  defp newest_tip(_old, nil), do: nil
+
+  defp newest_tip(old, new) do
+    old_height = get_in(old || %{}, [:header, :height])
+    new_height = get_in(new || %{}, [:header, :height])
+
+    cond do
+      is_integer(old_height) and (!is_integer(new_height) or old_height > new_height) ->
+        old
+
+      is_integer(old_height) and old_height == new_height and !!old[:quorum_proof] and
+          !new[:quorum_proof] ->
+        old
+
+      is_integer(old_height) and old_height == new_height and old[:hash] == new[:hash] and
+          old[:known_entry] ->
+        Map.merge(new, Map.take(old, [:known_entry, :connects_to]))
+
+      true ->
+        new
+    end
   end
 
   def get_last_message(pk) do :ets.lookup_element(NODEANRHOT, pk, 2, 0) end
@@ -387,33 +416,53 @@ defmodule NodeANR do
   def reached_by_pct([], _key, _pct) do 0 end
   def reached_by_pct(peers, key, pct) do
       n = length(peers)
-      k = :math.ceil(pct * n) |> trunc()
+    reached_by_count(peers, key, :math.ceil(pct * n) |> trunc())
+  end
 
+  @doc false
+  def reached_by_count(_peers, _key, required) when required <= 0, do: 0
+
+  def reached_by_count(peers, key, required) do
+    result =
       peers
-      |> Enum.frequencies_by(& Map.get(&1, key))
+      |> Enum.frequencies_by(&Map.get(&1, key))
       |> Enum.sort_by(fn {h, _} -> h end, :desc)
       |> Enum.reduce_while(0, fn {h, cnt}, acc ->
         acc = acc + cnt
-        if acc >= k, do: {:halt, h}, else: {:cont, acc}
+        if acc >= required, do: {:halt, {:height, h}}, else: {:cont, acc}
       end)
+
+    case result do
+      {:height, height} -> height
+      _insufficient_count -> 0
+    end
   end
   def min_reached_by_pct(peers, pct \\ 0.67), do: reached_by_pct(peers, :height_root, pct)
 
   def highest_validator_height() do
     {vals, peers} = NodeANR.handshaked_and_online()
-    vals = Enum.map(vals, fn(%{ip4: ip4, pk: pk})->
-      height_root = :ets.lookup_element(NODEANRHOT, pk, 5, nil)[:header][:height]
-      height_temp = :ets.lookup_element(NODEANRHOT, pk, 6, nil)[:header][:height]
-      %{pk: pk, ip4: ip4, height_root: height_root, height_temp: height_temp}
-    end)
-    |> Enum.filter(& &1.height_root && &1.height_temp)
-    peers = Enum.map(peers, fn(%{ip4: ip4, pk: pk})->
-      height_root = :ets.lookup_element(NODEANRHOT, pk, 5, nil)[:header][:height]
-      height_temp = :ets.lookup_element(NODEANRHOT, pk, 6, nil)[:header][:height]
-      %{pk: pk, ip4: ip4, height_root: height_root, height_temp: height_temp}
-    end)
-    |> Enum.filter(& &1.height_root && &1.height_temp)
-    total = vals ++ peers
+    validators = DB.Chain.validators_for_height(DB.Chain.height() + 1) || []
+    local_root = DB.Chain.rooted_height() || 0
+    local_tip = DB.Chain.tip_entry()
+    local_temp = local_tip.header.height
+
+    remote_vals =
+      Enum.map(vals, &tip_observation(&1, local_tip)) |> Enum.filter(&(&1.height_root && &1.height_temp))
+
+    remote_all =
+      Enum.map(vals ++ peers, &tip_observation(&1, local_tip))
+      |> Enum.filter(&(&1.height_root && &1.height_temp))
+
+    local_vals =
+      Application.fetch_env!(:ama, :keys_all_pks)
+      |> Enum.filter(&(&1 in validators))
+      |> Enum.map(&%{pk: &1, ip4: nil, height_root: local_root,
+                    height_temp: local_temp, height_temp_decision: local_temp})
+
+    # One validator gets one observation even when its local ANR also appears in
+    # the online table. Local state wins because it is direct rather than gossip.
+    vals = (local_vals ++ remote_vals) |> Enum.uniq_by(& &1.pk)
+    total = local_vals ++ remote_all
 
     max_height_rooted = total
     |> Enum.sort_by(& &1.height_root, :desc)
@@ -423,7 +472,73 @@ defmodule NodeANR do
     |> Enum.sort_by(& &1.height_temp, :desc)
     |> List.first()
     |> case do nil -> 0; m -> m.height_temp end
-    {max_height_rooted, max_height_temp, min_reached_by_pct(vals), reached_by_pct(vals, :height_temp)}
+
+    required = :math.ceil(0.67 * length(validators)) |> trunc()
+
+    proven_rooted =
+      remote_all
+      |> Enum.filter(& &1.rooted_quorum_proof)
+      |> Enum.map(& &1.height_root)
+      |> Enum.max(fn -> 0 end)
+
+    # A quorum certificate already contains the validator quorum; it does not
+    # need to arrive over quorum-many validator ANRs. Raw temporal tips remain
+    # sync targets, but only a fully received, connectable entry or a
+    # connectable quorum-signed special entry may inhibit production.
+    decision_vals = Enum.filter(vals, &is_integer(&1.height_temp_decision))
+    observed_temporal = remote_all
+    |> Enum.map(& &1.height_temp_decision)
+    |> Enum.filter(&is_integer/1)
+    |> Enum.max(fn -> 0 end)
+
+    {max_height_rooted, max_height_temp,
+     max(proven_rooted, reached_by_count(vals, :height_root, required)),
+     max(observed_temporal, reached_by_count(decision_vals, :height_temp_decision, required))}
+  end
+
+  defp tip_observation(%{ip4: ip4, pk: pk}, local_tip) do
+    rooted = :ets.lookup_element(NODEANRHOT, pk, 5, nil)
+    temporal = :ets.lookup_element(NODEANRHOT, pk, 6, nil)
+
+    %{
+      pk: pk,
+      ip4: ip4,
+      height_root: get_in(rooted || %{}, [:header, :height]),
+      height_temp: get_in(temporal || %{}, [:header, :height]),
+      height_temp_decision: decision_temporal_height(temporal, local_tip),
+      rooted_quorum_proof: !!(is_map(rooted) and rooted[:quorum_proof])
+    }
+  end
+
+  @doc false
+  def decision_temporal_height(temporal, local_tip) do
+    height = get_in(temporal || %{}, [:header, :height])
+    local_height = get_in(local_tip || %{}, [:header, :height])
+
+    cond do
+      !is_integer(height) or !is_integer(local_height) -> nil
+      height <= local_height -> height
+      height == local_height + 1 and
+          (!!temporal[:known_entry] or !!temporal[:quorum_entry]) and
+          temporal[:connects_to] == local_tip.hash -> height
+      true -> nil
+    end
+  end
+
+  def has_online_quorum_tip?() do
+    min_height = max((DB.Chain.rooted_height() || 0) - 1, 0)
+    {vals, peers} = handshaked_and_online()
+
+    Enum.any?(vals ++ peers, fn peer ->
+      rooted = :ets.lookup_element(NODEANRHOT, peer.pk, 5, nil)
+      rooted_quorum_tip?(rooted, min_height)
+    end)
+  end
+
+  @doc false
+  def rooted_quorum_tip?(rooted, min_height) do
+    is_map(rooted) and !!rooted[:quorum_proof] and
+      (get_in(rooted, [:header, :height]) || -1) >= min_height
   end
 
   def peers_w_min_height(height, type \\ :any) do

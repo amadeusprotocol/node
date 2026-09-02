@@ -159,10 +159,12 @@ defmodule SpecialMeetingGen do
   end
 
   def tick(state) do
+    state = retain_motion_leadership(state, ReplicaGen.can_sign?())
     #IO.inspect state[:slash_trainer]
     st = state[:slash_trainer]
     cond do
-      !state[:slash_trainer] -> maybe_start_motion(state)
+      !state[:slash_trainer] -> maybe_resume_slash_entry(state) || maybe_start_motion(state)
+      !ReplicaGen.can_sign?() -> Map.delete(state, :slash_trainer)
       st.attempts > 3 -> Map.delete(state, :slash_trainer)
 
       #the slash already landed via another initiator: stand down
@@ -196,8 +198,19 @@ defmodule SpecialMeetingGen do
         entry = Map.merge(st.entry.entry, %{signature: st.entry.aggsig.aggsig,
           mask: st.entry.aggsig.mask, mask_size: st.entry.aggsig.mask_size, mask_set_size: st.entry.aggsig.mask_set_size})
         IO.inspect entry, limit: 1111111111, printable_limit: 1111111111
-        DB.Entry.insert(entry)
-        Map.delete(state, :slash_trainer)
+        case DB.Entry.insert(entry) do
+          :ok ->
+            if ReplicaGen.replicate_block(entry) and ReplicaGen.can_sign?() do
+              FabricGen.broadcast_prepared_entry(entry)
+              Map.delete(state, :slash_trainer)
+            else
+              state
+            end
+
+          {:error, reason} ->
+            IO.inspect({:slash_entry_rejected, entry.header.height, reason})
+            Map.delete(state, :slash_trainer)
+        end
 
       st.state == :gather_entry_sigs ->
         business = %{op: "slash_trainer_entry", entry_packed: Entry.pack_for_net(st.entry.entry)}
@@ -209,6 +222,10 @@ defmodule SpecialMeetingGen do
         state
     end
   end
+
+  @doc false
+  def retain_motion_leadership(state, true), do: state
+  def retain_motion_leadership(state, false), do: Map.delete(state, :slash_trainer)
 
   #prefer a key that is actually in the validator set to carry the slash
   def carrier_sk(st) do
@@ -230,18 +247,27 @@ defmodule SpecialMeetingGen do
       cur_entry = DB.Chain.tip_entry()
 
       txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)]
-      next_entry = Entry.build_next(sk, cur_entry, txs)
-      next_entry = Entry.sign(sk, next_entry)
 
-    #same single-shot rule as attesters: we sign our own entry, so it goes
-    #through the same persisted height lock, quorum-replicated before signing
-    cond do
-      !SpecialMeetingAttestGen.acquire_entry_sign_lock(next_entry.header.height, next_entry.hash) -> nil
-      !ReplicaGen.await_slash_lock_replicated(next_entry.header.height, next_entry.hash) -> nil
+      unsigned_entry = Entry.build_next(sk, cur_entry, txs)
+      entry_hash = Entry.header_hash(unsigned_entry.header)
+
+      # Same single-shot rule as attesters: reserve and quorum-replicate the exact
+      # full proposal before either the carrier or aggregate entry signature exists.
+      # This is the same recoverable lock used for normal blocks, so a replacement
+      # leader can finish this exact slash entry rather than being left with a hash.
+      cond do
+      #slash lock first (durable, gossiped, adopted group-wide) so no replica
+      #responder-signs a competing entry at this height; then the recoverable
+      #block-proposal lock, which itself refuses a slash-lock conflict
+      !SpecialMeetingAttestGen.acquire_entry_sign_lock(unsigned_entry.header.height, entry_hash) -> nil
+      !ReplicaGen.await_slash_lock_replicated(unsigned_entry.header.height, entry_hash) -> nil
+      !ReplicaGen.prepare_block_proposal(unsigned_entry) -> nil
+      !ReplicaGen.can_sign?() -> nil
       true ->
-        aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
-          h = :crypto.hash(:sha256, RDB.vecpak_encode(next_entry.header))
-          signature = BlsEx.sign!(seed, h, BLS12AggSig.dst_entry())
+          next_entry = Entry.sign(sk, unsigned_entry)
+
+          aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn %{pk: pk, seed: seed}, aggsig ->
+              signature = BlsEx.sign!(seed, entry_hash, BLS12AggSig.dst_entry())
           BLS12AggSig.add_padded(aggsig, st.validators, pk, signature)
         end)
 
@@ -249,6 +275,52 @@ defmodule SpecialMeetingGen do
     end
     else
       nil
+    end
+  end
+
+  defp maybe_resume_slash_entry(state) do
+    try do
+      proposal = ReplicaGen.my_block_proposal()
+
+      with true <- ReplicaGen.can_sign?(),
+           true <- ReplicaGen.pending_block?(),
+           true <- ReplicaGen.slash_block_proposal?(proposal),
+           true <- ReplicaGen.prepare_block_proposal(proposal),
+           true <- ReplicaGen.can_sign?(),
+           hash = Entry.header_hash(proposal.header),
+           true <- SpecialMeetingAttestGen.acquire_entry_sign_lock(proposal.header.height, hash),
+           %{seed: seed} <- Application.fetch_env!(:ama, :keys_by_pk)[proposal.header.signer],
+           [tx] <- proposal.txs,
+           %{args: [mpk, epoch | _]} <- TX.action(tx),
+           validators when validators != [] <- DB.Chain.validators_for_height(proposal.header.height),
+           my_validators when my_validators != [] <-
+             Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators) do
+        epoch = if is_binary(epoch), do: :erlang.binary_to_integer(epoch), else: epoch
+        entry = Entry.sign(seed, proposal)
+        aggsig = Enum.reduce(my_validators, BLS12AggSig.new_padded(length(validators)), fn %{pk: pk, seed: seed}, acc ->
+          signature = BlsEx.sign!(seed, hash, BLS12AggSig.dst_entry())
+          BLS12AggSig.add_padded(acc, validators, pk, signature)
+        end)
+
+        IO.puts "🔁 resuming replicated slash entry at height #{proposal.header.height}"
+
+        Map.put(state, :slash_trainer, %{
+          type: :entry,
+          tx: %{tx: tx, aggsig: BLS12AggSig.new_padded(length(validators))},
+          entry: %{entry: entry, aggsig: aggsig},
+          mpk: mpk,
+          state: :gather_entry_sigs,
+          attempts: 0,
+          height: proposal.header.height - 1,
+          epoch: epoch,
+          validators: validators,
+          my_validators: my_validators
+        })
+      else
+        _ -> nil
+      end
+    catch
+      _, _ -> nil
     end
   end
 

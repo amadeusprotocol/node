@@ -321,6 +321,39 @@ defmodule TXAdmissionSecurityTest do
     assert TXPool.bytes() == initial_bytes
   end
 
+  test "accounting reconciliation repairs leaked bytes and signer reservations" do
+    txu = funded_txu(fresh_nonce())
+    fake_signer = :crypto.strong_rand_bytes(48)
+    counter = :persistent_term.get({TXPool, :byte_counter})
+
+    try do
+      assert %{error: :ok, inserted: true} = admit(txu)
+      :atomics.add_get(counter, 1, 123)
+      :ets.insert(TXPoolAccount, {fake_signer, 7, TXPool.tx_reserve_ama() * 7})
+      dead_writer = spawn(fn -> :ok end)
+      monitor = Process.monitor(dead_writer)
+      assert_receive {:DOWN, ^monitor, :process, ^dead_writer, _}
+      :ets.insert(TXPoolAccountingWriters, {dead_writer, true})
+
+      expected_bytes = :ets.foldl(fn {_key, _txu, tx_bytes, _reserved}, acc -> acc + tx_bytes end, 0, TXPool)
+      expected_signer = :ets.foldl(fn
+        {_key, pool_txu, _tx_bytes, reserved}, %{count: count, reserved_ama: amount}
+            when pool_txu.tx.signer == txu.tx.signer ->
+          %{count: count + 1, reserved_ama: amount + reserved}
+        _, acc -> acc
+      end, %{count: 0, reserved_ama: 0}, TXPool)
+
+      assert %{bytes: ^expected_bytes} = TXPool.reconcile_accounting()
+      assert TXPool.bytes() == expected_bytes
+      assert TXPool.signer_reservation(txu.tx.signer) == expected_signer
+      assert TXPool.signer_reservation(fake_signer) == %{count: 0, reserved_ama: 0}
+      refute :ets.member(TXPoolAccountingWriters, dead_writer)
+    after
+      TXPool.delete_packed(txu)
+      TXPool.reconcile_accounting()
+    end
+  end
+
   test "mempool admission checks chain nonce before signature verification" do
     txu = txu(1_000)
 

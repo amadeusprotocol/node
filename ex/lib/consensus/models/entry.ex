@@ -172,6 +172,80 @@ defmodule Entry do
         end
     end
 
+  # Tip gossip intentionally omits transactions, so it cannot run the full
+  # root_tx validation. It still has to satisfy every fixed-size/range/header
+  # invariant and the validator-root commitment before its signed height is
+  # allowed to influence synchronization.
+  def validate_tip(e) do
+    try do
+      if !is_map(e) or !is_map(e[:header]), do: throw(%{error: :invalid_tip})
+      eh = e.header
+
+      if !is_integer(eh[:height]) or eh.height < 0 or eh.height > 0x7FFF_FFFF_FFFF_FFFF,
+        do: throw(%{error: :height_out_of_range})
+
+      if !is_integer(eh[:slot]) or eh.slot < 0 or eh.slot > 0x7FFF_FFFF_FFFF_FFFF,
+        do: throw(%{error: :slot_out_of_range})
+
+      if !is_integer(eh[:prev_slot]) or eh.prev_slot < -1 or eh.prev_slot > 0x7FFF_FFFF_FFFF_FFFF,
+        do: throw(%{error: :prev_slot_out_of_range})
+
+      Enum.each([:prev_hash, :dr, :root_tx, :root_validator, :root_chain], fn field ->
+        value = eh[field]
+
+        if !is_binary(value) or byte_size(value) != 32,
+          do: throw(%{error: {:invalid_tip_field, field}})
+      end)
+
+      if !is_binary(eh[:vr]) or byte_size(eh.vr) != 96, do: throw(%{error: :invalid_vr})
+
+      if !is_binary(eh[:signer]) or byte_size(eh.signer) != 48,
+        do: throw(%{error: :invalid_signer})
+
+      if !is_binary(e[:signature]) or byte_size(e.signature) != 96,
+        do: throw(%{error: :invalid_signature})
+
+      validators = DB.Chain.validators_for_height(eh.height) || []
+
+      if validators == [] or eh.signer not in validators,
+        do: throw(%{error: :signer_not_in_validator_set})
+
+      last_change = DB.Chain.validators_last_change_height(eh.height)
+
+      if eh.root_validator != root_validator(validators, last_change),
+        do: throw(%{error: :root_validator_invalid})
+
+      hash = header_hash(eh)
+      if Map.has_key?(e, :hash), do: validate_hash(e, hash)
+
+      if e[:mask] do
+        if !is_bitstring(e.mask), do: throw(%{error: :mask_not_bitstring})
+        if !is_integer(e[:mask_size]), do: throw(%{error: :mask_size_not_integer})
+        if !is_integer(e[:mask_set_size]), do: throw(%{error: :mask_set_size_not_integer})
+        if e.mask_size != length(validators), do: throw(%{error: :mask_size_mismatch})
+        ensure_valid_mask!(e.mask, e.mask_size)
+
+        signed = BLS12AggSig.unmask_trainers(validators, e.mask, e.mask_size)
+        if e.mask_set_size != length(signed), do: throw(%{error: :mask_set_size_mismatch})
+
+        if !BLS12AggSig.quorum?(length(signed), length(validators)),
+          do: throw(%{error: :insufficient_mask_quorum})
+      end
+
+      %{error: sig_error, hash: ^hash} = validate_signature(e)
+      if sig_error != :ok, do: throw(%{error: sig_error})
+
+      %{error: :ok, hash: hash}
+    catch
+      :throw, r ->
+        r
+
+      e, r ->
+        IO.inspect({Entry, :validate_tip, e, r})
+        %{error: :unknown}
+    end
+  end
+
     def validate_signature(e, require_hash \\ false) do
         header = e.header
         hash = header_hash(header)
@@ -203,9 +277,10 @@ defmodule Entry do
         end
     end
 
-    defp header_hash(header) do
-        :crypto.hash(:sha256, RDB.vecpak_encode(header))
-    end
+  @doc false
+  def header_hash(header) do
+    :crypto.hash(:sha256, RDB.vecpak_encode(header))
+  end
 
     defp validate_hash(entry, hash) do
         cond do
@@ -228,26 +303,60 @@ defmodule Entry do
       if header.root_chain == ours, do: :ok, else: {:mismatch, ours, header.root_chain}
     end
 
-    def validate_next(cur_entry, next_entry) do
+    # Header-only connectivity check for transaction-less tip advertisements and
+    # fully received entries. Callers must validate the entry signature first.
+    def validate_next_tip(cur_entry, next_entry, require_slot_signer \\ true) do
         try do
         ceh = cur_entry.header
         neh = next_entry.header
         if ceh.slot != neh.prev_slot, do: throw(%{error: :invalid_slot})
+        if ceh.slot + 1 != neh.slot, do: throw(%{error: :invalid_slot})
         if ceh.height != (neh.height - 1), do: throw(%{error: :invalid_height})
         if cur_entry.hash != neh.prev_hash, do: throw(%{error: :invalid_hash})
+
+        if require_slot_signer do
+          expected_signer = DB.Chain.validator_for_height(neh.height)
+          validators = DB.Chain.validators_for_height(neh.height) || []
+          in_slot = cond do
+            next_entry[:mask] ->
+              neh.signer in validators and
+                BLS12AggSig.score(validators, next_entry.mask, next_entry.mask_size) >= 0.67
+            true -> neh.signer == expected_signer
+          end
+          if !in_slot, do: throw(%{error: :invalid_slot_signer})
+        end
 
         if :crypto.hash(:sha256, ceh.dr) != neh.dr, do: throw(%{error: :invalid_dr})
         if !BlsEx.verify?(neh.signer, neh.vr, ceh.vr, BLS12AggSig.dst_vrf()), do: throw(%{error: :invalid_vr})
 
         mmr = DB.MMR.load_or_empty()
-        if mmr.size == neh.height do
-          case check_root_chain(neh, mmr) do
-            :ok -> :ok
-            {:mismatch, ours, theirs} ->
-              throw(%{error: :root_chain_mismatch, height: neh.height, ours: Base58.encode(ours), theirs: theirs && Base58.encode(theirs)})
-          end
+        if mmr.size != neh.height, do: throw(%{error: :invalid_mmr_height})
+        case check_root_chain(neh, mmr) do
+          :ok -> :ok
+          {:mismatch, ours, theirs} ->
+            throw(%{error: :root_chain_mismatch, height: neh.height, ours: Base58.encode(ours), theirs: theirs && Base58.encode(theirs)})
         end
 
+        %{error: :ok}
+        catch
+            :throw,r -> r
+            e,r ->
+                IO.inspect {Entry, :validate_next_tip, e, r}
+                %{error: :unknown}
+        end
+    end
+
+    def validate_next(cur_entry, next_entry) do
+        try do
+        # Special-meeting proposals circulate for validator signatures before
+        # their quorum mask is attached, so this shared transaction validator
+        # cannot classify an unmasked proposal as an ordinary finalized entry.
+        case validate_next_tip(cur_entry, next_entry, false) do
+          %{error: :ok} -> :ok
+          error -> throw(error)
+        end
+
+        neh = next_entry.header
         chain_epoch = div(neh.height, 100_000)
         chain_height = neh.height
         segment_vr_hash = DB.Chain.segment_vr_hash()

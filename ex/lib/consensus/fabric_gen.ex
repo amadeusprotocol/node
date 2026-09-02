@@ -20,10 +20,10 @@ defmodule FabricGen do
     GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
   end
 
-  def init(state) do
+  def init(_state) do
     :persistent_term.put(FabricSyncing, :atomics.new(1, []))
     :erlang.send_after(2000, self(), :tick)
-    {:ok, %{next_restart: :os.system_time(1000) + 3*60*60_000}}
+    {:ok, %{next_restart: :os.system_time(1000) + 3*60*60_000, bundle_worker: nil, bundle_last_attempt: 0}}
   end
 
   def handle_info(:tick, state) do
@@ -37,23 +37,37 @@ defmodule FabricGen do
     end
   end
 
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case state.bundle_worker do
+      {_worker, ^ref} ->
+        if reason != :normal, do: IO.inspect({:bundle_worker_failed, reason})
+        {:noreply, %{state | bundle_worker: nil}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def tick(state) do
     :persistent_term.get(FabricSyncing) |> :atomics.put(1, 1)
 
     proc_consensus()
     proc_entries()
-    maybe_produce_state_bundle()
+    state = maybe_produce_state_bundle(state)
     tick_slot(state)
 
     :persistent_term.get(FabricSyncing) |> :atomics.put(1, 0)
     state
   end
 
-  # Attempts a state-peer-download bundle inline (synchronously). One of
+  # Starts at most one state-peer-download bundle worker. One of
   # these three trigger windows must be open for an attempt to fire; each
-  # attempt is then gated inside produce_bundle_inline on the rtx-consistent
-  # check temporal_tip == rooted_tip, so a bundle only lands when the chain
-  # is quiescent enough that contractstate matches the rooted anchor:
+  # attempt then goes through FabricSnapshot.try_build_bundle — a :global
+  # bundle lock held by the worker itself (so a builder surviving this gen's
+  # 3h restart can never overlap a replacement's on the same .tmp path) plus
+  # the rtx-consistent check temporal_tip == rooted_tip, so a bundle only
+  # lands when the chain is quiescent enough that contractstate matches the
+  # rooted anchor:
   #
   #   * BOOTSTRAP     — no bundle anywhere yet (every tick retries until one
   #                     lands).
@@ -64,25 +78,37 @@ defmodule FabricGen do
   #
   # Only one bundle per epoch is produced — already_have_bundle_for_epoch?
   # short-circuits subsequent ticks once a bundle for this epoch is on disk.
-  defp maybe_produce_state_bundle() do
+  defp maybe_produce_state_bundle(state = %{bundle_worker: nil}) do
     if Application.fetch_env!(:ama, :statepeerdownload) do
       rooted = DB.Chain.rooted_height() || 0
       cond do
-        rooted == 0 -> :ok
-        already_have_bundle_for_epoch?(rooted) -> :ok
+        rooted == 0 -> state
+        already_have_bundle_for_epoch?(rooted) -> state
+        #while another builder (boot spawn, pre-restart survivor) holds the
+        #bundle lock, attempts abort instantly — don't respawn every 100ms tick
+        :os.system_time(1000) - state.bundle_last_attempt < 60_000 -> state
         true ->
           latest = :persistent_term.get(FabricSnapshot.bundle_latest_key(), nil)
           cond do
             # Bootstrap: no bundle anywhere.
-            is_nil(latest) -> produce_bundle_inline(rooted)
+            is_nil(latest) -> start_bundle_worker(state)
             # Validator: produce bundle right after block
-            in_current_validator_set?(rooted) and my_key_signed_rooted_tip?() -> produce_bundle_inline(rooted)
+            in_current_validator_set?(rooted) and my_key_signed_rooted_tip?() -> start_bundle_worker(state)
             # Non-validator fallback: rem(rooted, 100_000) == 1000.
-            FabricSnapshot.is_bundle_target?(rooted) -> produce_bundle_inline(rooted)
-            true -> :ok
+            FabricSnapshot.is_bundle_target?(rooted) -> start_bundle_worker(state)
+            true -> state
           end
       end
+    else
+      state
     end
+  end
+
+  defp maybe_produce_state_bundle(state), do: state
+
+  defp start_bundle_worker(state) do
+    {worker, ref} = spawn_monitor(fn -> FabricSnapshot.try_build_bundle(:tick) end)
+    %{state | bundle_worker: {worker, ref}, bundle_last_attempt: :os.system_time(1000)}
   end
 
   defp already_have_bundle_for_epoch?(rooted) do
@@ -103,34 +129,6 @@ defmodule FabricGen do
       %{header: %{signer: signer}} ->
         signer in (Application.fetch_env!(:ama, :keys_all_pks) || [])
       _ -> false
-    end
-  end
-
-  defp produce_bundle_inline(_height) do
-    %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-    case RDB.transaction_with_snapshot(db) do
-      {:ok, rtx} ->
-        r = RocksDB.get("rooted_tip",   %{rtx: rtx, cf: cf.sysconf})
-        t = RocksDB.get("temporal_tip", %{rtx: rtx, cf: cf.sysconf})
-        cond do
-          !is_binary(r) or !is_binary(t) ->
-            RDB.transaction_rollback(rtx)
-          r != t ->
-            RDB.transaction_rollback(rtx)
-          true ->
-            case RDB.transaction_get_cf(rtx, cf.entry, r) do
-              {:ok, entry_blob} when is_binary(entry_blob) ->
-                entry = Entry.unpack_from_db(entry_blob)
-                height = entry.header.height
-                FabricSnapshot.write_statepeerdownload_bundle(rtx, height)
-                IO.inspect {:bundle_produced_at, height}
-              _ ->
-                RDB.transaction_rollback(rtx)
-            end
-        end
-      err ->
-        IO.inspect {:bundle_snapshot_open_failed, err}
-        :error
     end
   end
 
@@ -220,6 +218,7 @@ defmodule FabricGen do
                 Application.fetch_env!(:ama, :rpc_events) && FabricEventGen.event_rooted(best_entry, muts_hash)
                 %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
                 RocksDB.put("rooted_tip", best_entry.hash, %{db: db, cf: cf.sysconf})
+                ReplicaGen.flush_heartbeat()
                 proc_consensus()
             end
         _ -> nil
@@ -352,7 +351,7 @@ defmodule FabricGen do
       case DB.Attestation.best_consensus_by_entryhash(entry.hash) do
         {^muts_hash, score} when score >= 0.67 ->
           ReplicaGen.force_attest_lock(height, entry.hash, muts_hash)
-          true
+
         _ ->
           if :persistent_term.get({FabricGen, :attest_withheld}, nil) != height do
             :persistent_term.put({FabricGen, :attest_withheld}, height)
@@ -373,45 +372,62 @@ defmodule FabricGen do
   end
 
   def proc_if_my_slot() do
+    case ReplicaGen.pending_block_ready() do
+      {:ok, entry} ->
+        broadcast_prepared_entry(entry)
+        entry
+
+      _ ->
+        proc_if_my_slot_1()
+    end
+  end
+
+  defp proc_if_my_slot_1() do
     entry = DB.Chain.tip_entry()
     next_slot = entry.header.slot + 1
     next_height = entry.header.height + 1
     next_validator = DB.Chain.validator_for_height(next_height)
 
-    am_i_next = Enum.find(Application.fetch_env!(:ama, :keys), & &1.pk == next_validator)
+    am_i_next = Enum.find(Application.fetch_env!(:ama, :keys), &(&1.pk == next_validator))
 
     rooted_tip = DB.Chain.rooted_tip()
 
     trainers_next = DB.Chain.validators_for_height(next_height)
-    slotFilled = DB.Entry.by_height(next_height)
-    |> Enum.any?(fn(e)->
-      cond do
-        e.header.signer == next_validator -> true
-        !!e[:mask] -> BLS12AggSig.score(trainers_next, e.mask, e.mask_size) >= 0.67
-        true -> false
-      end
-    end)
 
-    #before considering production: if the unrooted tip is missing our pack
-    #signatures (applied inside a replica leadership hole), re-attest it
+    slotFilled =
+      DB.Entry.by_height(next_height)
+      |> Enum.any?(fn e ->
+        cond do
+          e.header.signer == next_validator -> true
+          !!e[:mask] -> BLS12AggSig.score(trainers_next, e.mask, e.mask_size) >= 0.67
+          true -> false
+        end
+      end)
+
+    # before considering production: if the unrooted tip is missing our pack
+    # signatures (applied inside a replica leadership hole), re-attest it
     maybe_retro_attest(entry)
 
     cond do
-      slotFilled -> nil
+      slotFilled ->
+        nil
 
-      !FabricSyncAttestGen.isQuorumSynced() -> nil
+      !FabricSyncAttestGen.isQuorumSynced() ->
+        nil
 
-      #replica follower, or a replica already signed this height: never produce
-      !!am_i_next and !ReplicaGen.can_produce?(next_height) -> nil
+      # replica follower, or a replica already signed this height: never produce
+      !!am_i_next and !ReplicaGen.can_produce?(next_height) ->
+        nil
 
       am_i_next ->
         if :persistent_term.get(:snapshot_before_my_slot, nil) do
           :persistent_term.erase(:snapshot_before_my_slot)
-          IO.inspect "taking snapshot #{DB.Chain.rooted_height()}"
+          IO.inspect("taking snapshot #{DB.Chain.rooted_height()}")
           FabricSnapshot.snapshot_tmp()
         end
 
-        !Application.fetch_env!(:ama, :testnet) && IO.puts("🔧 im in slot #{next_slot}, working.. *Click Clak*")
+        !Application.fetch_env!(:ama, :testnet) &&
+          IO.puts("🔧 im in slot #{next_slot}, working.. *Click Clak*")
 
         produce_insert_and_broadcast_next_entry(am_i_next.seed, entry)
 
@@ -421,30 +437,51 @@ defmodule FabricGen do
   end
 
   def produce_insert_and_broadcast_next_entry(seed, cur_entry) do
-    next_entry = produce_entry(seed, cur_entry)
-    #record before anything leaves the box so replicas never re-sign this height
-    ReplicaGen.note_signed_height(next_entry.header.height)
-    ReplicaGen.flush_heartbeat()
-    DB.Entry.insert(next_entry)
+    unsigned_entry = build_next_entry(seed, cur_entry)
+    height = unsigned_entry.header.height
 
-    msg = NodeProto.event_entry(Entry.pack_for_net(next_entry))
+    # No BLS entry signature exists until a replica majority durably carries the
+    # complete unsigned proposal. Then replicate the signed body before gossip.
+    if ReplicaGen.prepare_block_proposal(unsigned_entry) and ReplicaGen.can_sign?() do
+      next_entry = Entry.sign(seed, unsigned_entry)
+
+      case DB.Entry.insert(next_entry) do
+        :ok ->
+          if ReplicaGen.replicate_block(next_entry) do
+            broadcast_prepared_entry(next_entry)
+            next_entry
+          else
+            nil
+          end
+
+        {:error, reason} ->
+          IO.inspect({:produced_entry_rejected, height, reason})
+          nil
+      end
+    else
+      nil
+    end
+  end
+
+  def broadcast_prepared_entry(entry) do
+    msg = NodeProto.event_entry(Entry.pack_for_net(entry))
     NodeGen.broadcast(msg)
 
-    #Ensure RPC nodes are as up-to-date as possible
-    #TODO: fix this in a better way later
+    # Ensure RPC nodes are as up-to-date as possible
     peers = Application.fetch_env!(:ama, :seedanrs_as_peers)
     send(NodeGen.get_socket_gen(), {:send_to, peers, msg})
     send(NodeGen, :signal_tips_change)
-
-    next_entry
+    ReplicaGen.mark_block_published(entry)
   end
 
   def produce_entry(seed, cur_entry) do
+    Entry.sign(seed, build_next_entry(seed, cur_entry))
+  end
+
+  defp build_next_entry(seed, cur_entry) do
     next_height = cur_entry.header.height + 1
     txs = TXPool.grab_next_valid(next_height, Entry.entry_max_txs_bytes())
-    next_entry = Entry.build_next(seed, cur_entry, txs)
-    next_entry = Entry.sign(seed, next_entry)
-    next_entry
+    Entry.build_next(seed, cur_entry, txs)
   end
 
   def make_mapenv(next_entry) do
@@ -543,6 +580,7 @@ defmodule FabricGen do
       #signed at this height (failover onto a diverged chain); lock is durable
       #before any signature exists
       my_validators = if my_validators != [] and !attest_lock_acquired?(next_entry, mutations_hash) do [] else my_validators end
+      my_validators = if my_validators != [] and !ReplicaGen.can_sign?() do [] else my_validators end
       # {next_entry, mutations_hash} = {%{hash: DB.Chain.tip(), header_unpacked: %{height: DB.Chain.height()}}, DB.Entry.muts_hash(DB.Chain.tip())}
       # my_validators = Application.fetch_env!(:ama, :keys)
       # rtx = RocksDB.transaction(:persistent_term.get({:rocksdb, Fabric}).db)
@@ -572,6 +610,7 @@ defmodule FabricGen do
       end
 
       :ok = RocksDB.transaction_commit(rtx)
+      ReplicaGen.flush_heartbeat()
 
       %{error: :ok, mutations_hash: mutations_hash, muts: m, receipts: receipts}
   end

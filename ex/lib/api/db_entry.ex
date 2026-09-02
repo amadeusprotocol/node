@@ -1,5 +1,6 @@
 defmodule DB.Entry do
   import DB.API
+  @variants_per_validator 10
 
   def by_hash(hash, db_opts \\ %{}) do
     RocksDB.get(hash, db_handle(db_opts, :entry, %{}))
@@ -71,22 +72,174 @@ defmodule DB.Entry do
   end
 
   def insert(entry, db_opts \\ %{}) when is_map(entry) do
-    db_opts = if db_opts[:rtx] do db_opts else
-      %{db: db, cf: _cf} = :persistent_term.get({:rocksdb, Fabric})
-      rtx = RocksDB.transaction(db)
-      db_opts = Map.put(db_opts, :rtx, rtx)
-      Map.put(db_opts, :rtx_commit, true)
+    case insert_with_status(entry, db_opts) do
+      {:ok, _status} -> :ok
+      error -> error
     end
-
-    entry_packed = Entry.pack_for_db(entry)
-    if !by_hash(entry.hash, db_opts) do
-      RocksDB.put(entry.hash, entry_packed, db_handle(db_opts, :entry, %{}))
-      RocksDB.put("by_height:#{pad_integer(entry.header.height)}:#{entry.hash}", entry.hash, db_handle(db_opts, :entry_meta, %{}))
-      RocksDB.put("entry:#{entry.hash}:seentime", :os.system_time(1000), db_handle(db_opts, :entry_meta, %{to_integer: true}))
-    end
-
-    db_opts[:rtx_commit] && RocksDB.transaction_commit(db_opts.rtx)
   end
+
+  def insert_with_status(entry, db_opts \\ %{}) when is_map(entry) do
+    if db_opts[:rtx] do
+      insert_in_transaction(entry, db_opts)
+    else
+      # The limit check and writes must be one node-local critical section.
+      # Otherwise concurrent network handlers can all observe the last free slot.
+      :global.trans({{__MODULE__, :entry_variants, entry.header.height}, self()}, fn ->
+        %{db: db, cf: _cf} = :persistent_term.get({:rocksdb, Fabric})
+      rtx = RocksDB.transaction(db)
+        result = insert_in_transaction(entry, Map.put(db_opts, :rtx, rtx))
+
+        case result do
+          {:ok, _status} = ok ->
+            :ok = RocksDB.transaction_commit(rtx)
+            ok
+
+          error ->
+            RocksDB.transaction_rollback(rtx)
+            error
+        end
+      end)
+    end
+  end
+
+  defp insert_in_transaction(entry, db_opts) do
+    cond do
+      by_hash(entry.hash, db_opts) ->
+        {:ok, :existing}
+
+      error = entry_variant_limit_error(entry, db_opts) ->
+        {:error, error}
+
+      true ->
+        entry_packed = Entry.pack_for_db(entry)
+        RocksDB.put(entry.hash, entry_packed, db_handle(db_opts, :entry, %{}))
+
+        RocksDB.put(
+          "by_height:#{pad_integer(entry.header.height)}:#{entry.hash}",
+          entry.hash,
+          db_handle(db_opts, :entry_meta, %{})
+        )
+
+        RocksDB.put(
+          "entry:#{entry.hash}:seentime",
+          :os.system_time(1000),
+          db_handle(db_opts, :entry_meta, %{to_integer: true})
+        )
+
+        {:ok, :inserted}
+    end
+  end
+
+  # Each stored variant consumes one slot from every validator whose signature
+  # it carries. This bounds both ordinary single-signer forks and quorum/masked
+  # variants, while an exact duplicate remains idempotent.
+  defp entry_variant_limit_error(entry, db_opts) do
+    validators = if entry.header.height == 0 and !DB.Chain.tip(db_opts) do
+      []
+    else
+      DB.Chain.validators_for_height(entry.header.height, db_opts) || []
+    end
+    variants = by_height(entry.header.height, db_opts)
+    total_limit = length(validators) * @variants_per_validator
+
+    candidate_signers = variant_signers(entry, validators)
+
+    counts =
+      Enum.reduce(variants, %{}, fn variant, acc ->
+        Enum.reduce(variant_signers(variant, validators), acc, fn signer, acc2 ->
+          Map.update(acc2, signer, 1, &(&1 + 1))
+        end)
+      end)
+
+    error = cond do
+      validators == [] ->
+        nil
+
+      length(variants) >= total_limit ->
+        :entry_variant_limit
+
+      candidate_signers == [] ->
+        :entry_variant_limit
+
+      Enum.any?(candidate_signers, &(Map.get(counts, &1, 0) >= @variants_per_validator)) ->
+        :entry_variant_limit
+
+      true ->
+        nil
+    end
+
+    if error && quorum_variant?(entry, validators) do
+      make_room_for_quorum_entry(entry, variants, validators, total_limit, db_opts)
+    else
+      error
+    end
+  end
+
+  defp quorum_variant?(entry, validators) do
+    signers = variant_signers(entry, validators)
+    !!entry[:mask] and BLS12AggSig.quorum?(length(signers), length(validators))
+  end
+
+  defp make_room_for_quorum_entry(candidate, variants, validators, total_limit, db_opts) do
+    replaceable =
+      variants
+      |> Enum.reject(&in_chain(&1.hash, db_opts))
+      |> Enum.sort_by(&{quorum_variant?(&1, validators), length(variant_signers(&1, validators))})
+
+    evict_entry_variants(candidate, variants, replaceable, validators, total_limit, [], db_opts)
+  end
+
+  defp evict_entry_variants(candidate, variants, replaceable, validators, total_limit, evicted, db_opts) do
+    kept = variants -- evicted
+
+    if entry_limits_ok?([candidate | kept], validators, total_limit) do
+      Enum.each(evicted, &delete_stored_variant(&1, db_opts))
+      nil
+    else
+      case replaceable do
+        [victim | rest] ->
+          evict_entry_variants(candidate, variants, rest, validators, total_limit, [victim | evicted], db_opts)
+
+        [] ->
+          :entry_variant_limit
+      end
+    end
+  end
+
+  defp entry_limits_ok?(variants, validators, total_limit) do
+    counts = Enum.reduce(variants, %{}, fn variant, acc ->
+      Enum.reduce(variant_signers(variant, validators), acc, fn signer, acc2 ->
+        Map.update(acc2, signer, 1, &(&1 + 1))
+      end)
+    end)
+
+    total_limit > 0 and length(variants) <= total_limit and
+      Enum.all?(counts, fn {_signer, count} -> count <= @variants_per_validator end)
+  end
+
+  defp delete_stored_variant(entry, db_opts) do
+    height = entry.header.height
+    RocksDB.delete(entry.hash, db_handle(db_opts, :entry, %{}))
+    RocksDB.delete("by_height:#{pad_integer(height)}:#{entry.hash}", db_handle(db_opts, :entry_meta, %{}))
+    RocksDB.delete("entry:#{entry.hash}:seentime", db_handle(db_opts, :entry_meta, %{}))
+    RocksDB.delete_prefix("consensus:#{entry.hash}:", db_handle(db_opts, :attestation, %{}))
+    RocksDB.delete_prefix("attestation:#{pad_integer(height)}:#{entry.hash}:", db_handle(db_opts, :attestation, %{}))
+  end
+
+  defp variant_signers(%{mask: mask, mask_size: mask_size} = entry, validators)
+       when is_bitstring(mask) and mask_size == length(validators) do
+    try do
+      BLS12AggSig.unmask_trainers(validators, entry.mask, entry.mask_size)
+    catch
+      _, _ -> []
+    end
+  end
+
+  defp variant_signers(%{header: %{signer: signer}}, validators) do
+    if signer in validators, do: [signer], else: []
+  end
+
+  defp variant_signers(_, _), do: []
 
   def apply_into_main_chain(entry, muts_hash, muts_rev, receipts, root_receipts, root_contractstate, db_opts = %{rtx: _}) do
     prev_mmr = DB.MMR.load_or_empty(db_opts)

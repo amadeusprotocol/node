@@ -54,7 +54,7 @@ defmodule FabricSyncAttestGen do
 
   def isQuorumSynced() do
     cond do
-      Application.fetch_env!(:ama, :testnet) -> true
+      solo_testnet?() -> true
       !hasQuorum() -> false
       isSynced() != :full -> false
       DB.Chain.rooted_height() < DB.Chain.height() -> false
@@ -64,7 +64,7 @@ defmodule FabricSyncAttestGen do
 
   def isQuorumSyncedOffBy1() do
     cond do
-      Application.fetch_env!(:ama, :testnet) -> true
+      solo_testnet?() -> true
       !hasQuorum() -> false
       DB.Chain.rooted_height() < (DB.Chain.height() - 1) -> false
       true -> isSynced() in [:full, :off_by_1]
@@ -73,7 +73,7 @@ defmodule FabricSyncAttestGen do
 
   def isQuorumSyncedOffByX(cnt) do
     cond do
-      Application.fetch_env!(:ama, :testnet) -> true
+      solo_testnet?() -> true
       !hasQuorum() -> false
       DB.Chain.rooted_height() < (DB.Chain.height() - cnt) -> false
       true -> isSynced() in [:full, :off_by_1]
@@ -82,14 +82,36 @@ defmodule FabricSyncAttestGen do
 
   def isQuorumTemporalSynced() do
     cond do
-      Application.fetch_env!(:ama, :testnet) -> true
+      solo_testnet?() -> true
       !hasQuorum() -> false
       true -> isSynced() in [:full, :off_by_1]
     end
   end
 
   def isQuorumIsInEpoch() do
-    !!Application.fetch_env!(:ama, :testnet) or (hasQuorum() and isInEpoch())
+    solo_testnet?() or (hasQuorum() and isInEpoch())
+  end
+
+  defp solo_testnet?() do
+    !!Application.fetch_env!(:ama, :testnet) and is_nil(Application.fetch_env!(:ama, :replicas))
+  end
+
+  @doc false
+  def quorum_counts(validators, my_val_pks, vals, peers, quorum_cnt, has_quorum_tip) do
+    cond do
+      # One live relay carrying a fresh rooted quorum certificate proves that
+      # the validator quorum signed, even when those keys deliberately sit
+      # behind a non-validator transport identity.
+      has_quorum_tip ->
+        {quorum_cnt, quorum_cnt}
+
+      validators == [] or my_val_pks == [] ->
+        {length(vals++peers) + 1, quorum_cnt}
+
+      true ->
+        online = length(Enum.uniq(Enum.map(vals, & &1.pk) ++ my_val_pks))
+        {online, min(quorum_cnt, max(1, div(length(validators), 2) + 1))}
+    end
   end
 
   def init(state) do
@@ -111,14 +133,9 @@ defmodule FabricSyncAttestGen do
     {vals, peers} = NodeANR.handshaked_and_online()
     validators = DB.Chain.validators_for_height(DB.Chain.height()+1) || []
     my_val_pks = Application.fetch_env!(:ama, :keys_all_pks) |> Enum.filter(& &1 in validators)
-    {online_vals_cnt, quorum_cnt} = cond do
-      validators == [] or my_val_pks == [] ->
-        {length(vals++peers) + 1, quorum_cnt}
-
-      true ->
-        online = length(Enum.uniq(Enum.map(vals, & &1.pk) ++ my_val_pks))
-        {online, min(quorum_cnt, max(1, div(length(validators), 2) + 1))}
-    end
+    {online_vals_cnt, quorum_cnt} =
+      quorum_counts(validators, my_val_pks, vals, peers, quorum_cnt,
+                    NodeANR.has_online_quorum_tip?())
 
     hasQ = hasQuorum()
     cond do

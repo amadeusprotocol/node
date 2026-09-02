@@ -4,17 +4,22 @@ defmodule FabricSyncGen do
   @frontier_retry_ms 100
   @frontier_probe_ms 500
   @frontier_peer_count 3
+  @frontier_advertisement_ttl_ms 2_000
+  @entry_request_ttl_ms 30_000
 
   def start_link() do
     GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
   end
 
   def init(_state) do
+    #FabricSyncRequests is created at app boot (ex.ex) with the other shared
+    #ETS tables, so requested_entry?/track work even when this gen is not
+    #running (offline mode, tests)
     :erlang.send_after(3000, self(), :tick)
     :erlang.send_after(@frontier_retry_ms, self(), :frontier_tick)
+    :erlang.send_after(@entry_request_ttl_ms, self(), :request_sweep)
     {:ok, %{
-      frontier_target: 0,
-      frontier_peer: nil,
+       frontier_advertisements: %{},
       last_frontier_request: nil,
       last_frontier_probe: nil
     }}
@@ -32,12 +37,13 @@ defmodule FabricSyncGen do
   def higher_tip(_peer, _height), do: :ok
 
   def handle_info({:higher_tip, peer, height}, state) do
-    old_target = state.frontier_target
-    state = if height > old_target do
-      %{state | frontier_target: height, frontier_peer: peer}
-    else
-      state
-    end
+    now = :erlang.monotonic_time(:millisecond)
+    old_target = frontier_target(state.frontier_advertisements, now)
+
+    advertisements =
+      Map.put(state.frontier_advertisements, peer.pk, %{peer: peer, height: height, seen: now})
+
+    state = %{state | frontier_advertisements: advertisements}
     state = pursue_frontier(state, height > old_target)
     {:noreply, state}
   end
@@ -48,11 +54,18 @@ defmodule FabricSyncGen do
     {:noreply, state}
   end
 
+  def handle_info(:request_sweep, state) do
+    now = :erlang.monotonic_time(:millisecond)
+    :ets.select_delete(FabricSyncRequests, [{{{:_, :_}, :"$1"}, [{:<, :"$1", now}], [true]}])
+    :erlang.send_after(@entry_request_ttl_ms, self(), :request_sweep)
+    {:noreply, state}
+  end
+
   #Bulk/root requester. The independent frontier loop above stays active while
   #this work is paused for quorum or an applying/coordinator process.
   def handle_info(:tick, state) do
     {interval, state} = cond do
-      FabricGen.isSyncing() or FabricCoordinatorGen.isSyncing() or !FabricSyncAttestGen.hasQuorum() -> {30, state}
+      FabricGen.isSyncing() or FabricCoordinatorGen.isSyncing() -> {30, state}
       true -> tick(state)
     end
     :erlang.send_after(interval, self(), :tick)
@@ -66,11 +79,20 @@ defmodule FabricSyncGen do
     local_height = DB.Chain.height()
     next_height = frontier_height(local_height)
     now = :erlang.monotonic_time(:millisecond)
+    advertisements = active_frontier_advertisements(state.frontier_advertisements, now)
+
+    {target, preferred_peer} =
+      case Enum.max_by(Map.values(advertisements), & &1.height, fn -> nil end) do
+        nil -> {local_height, nil}
+        advertisement -> {advertisement.height, advertisement.peer}
+      end
+
+    state = %{state | frontier_advertisements: advertisements}
 
     cond do
-      state.frontier_target > local_height ->
+      target > local_height ->
         if force? or request_due?(state.last_frontier_request, next_height, now, @frontier_retry_ms) do
-          request_frontier(next_height, state.frontier_peer)
+          request_frontier(next_height, preferred_peer)
           %{state | last_frontier_request: {next_height, now}}
         else
           state
@@ -78,10 +100,7 @@ defmodule FabricSyncGen do
 
       request_due?(state.last_frontier_probe, next_height, now, @frontier_probe_ms) ->
         request_frontier(next_height, nil)
-        %{state |
-          frontier_target: local_height,
-          frontier_peer: nil,
-          last_frontier_probe: {next_height, now}
+        %{state | last_frontier_probe: {next_height, now}
         }
 
       true -> state
@@ -91,6 +110,22 @@ defmodule FabricSyncGen do
   defp request_due?(nil, _height, _now, _interval), do: true
   defp request_due?({old_height, _then}, height, _now, _interval) when old_height != height, do: true
   defp request_due?({_height, then}, _height_now, now, interval), do: now - then >= interval
+
+  @doc false
+  def active_frontier_advertisements(
+        advertisements,
+        now,
+        ttl_ms \\ @frontier_advertisement_ttl_ms
+      ) do
+    Map.filter(advertisements, fn {_pk, advertisement} -> now - advertisement.seen <= ttl_ms end)
+  end
+
+  defp frontier_target(advertisements, now) do
+    advertisements
+    |> active_frontier_advertisements(now)
+    |> Map.values()
+    |> Enum.reduce(0, &max(&1.height, &2))
+  end
 
   defp request_frontier(height, preferred_peer) do
     {_rooted_peers, advertised_peers} = NodeANR.peers_w_min_height(height, :any)
@@ -105,8 +140,7 @@ defmodule FabricSyncGen do
 
     if peers != [] do
       hashes = DB.Entry.by_height_return_hashes(height)
-      msg = NodeProto.catchup([frontier_request(height, hashes)])
-      send(NodeGen.get_socket_gen(), {:send_to, peers, msg})
+      send_request(peers, [frontier_request(height, hashes)])
     end
   end
 
@@ -128,6 +162,11 @@ defmodule FabricSyncGen do
   end
 
   @doc false
+  def root_hole_request(height, hashes) do
+    %{height: height, hashes: hashes, e: true, c: true}
+  end
+
+  @doc false
   def select_frontier_peers(advertised_peers, online_peers, preferred_pk, count) do
     advertised_peers = Enum.uniq_by(advertised_peers, & &1.pk)
     advertised_pks = MapSet.new(advertised_peers, & &1.pk)
@@ -143,9 +182,36 @@ defmodule FabricSyncGen do
   def fetch_chunks(chunks, peers) do
     Enum.zip(chunks, Stream.cycle(Enum.shuffle(peers)))
     |> Enum.each(fn({chunk, peer})->
-      send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup(chunk)})
+      send_request([peer], chunk)
     end)
   end
+
+  def send_request(peers, height_flags) when is_list(peers) and is_list(height_flags) do
+    track_entry_requests(peers, height_flags)
+    send(NodeGen.get_socket_gen(), {:send_to, peers, NodeProto.catchup(height_flags)})
+  end
+
+  @doc false
+  def track_entry_requests(peers, height_flags) when is_list(peers) and is_list(height_flags) do
+    expires = :erlang.monotonic_time(:millisecond) + @entry_request_ttl_ms
+    heights = for %{height: height, e: true} <- height_flags, is_integer(height) and height >= 0, do: height
+
+    Enum.each(peers, fn peer ->
+      Enum.each(heights, &:ets.insert(FabricSyncRequests, {{peer.pk, &1}, expires}))
+    end)
+  end
+
+  def requested_entry?(peer_pk, height) when is_binary(peer_pk) and is_integer(height) do
+    if :ets.whereis(FabricSyncRequests) == :undefined do
+      false
+    else
+      case :ets.lookup(FabricSyncRequests, {peer_pk, height}) do
+        [{{^peer_pk, ^height}, expires}] -> expires >= :erlang.monotonic_time(:millisecond)
+        _ -> false
+      end
+    end
+  end
+  def requested_entry?(_, _), do: false
 
   def tick(state) do
     temporal = DB.Chain.tip_entry()
@@ -188,25 +254,26 @@ defmodule FabricSyncGen do
       end)
       |> Enum.take(2000)
       if behind_root_local > 100 do
-        IO.puts "Behind Root: #{behind_root_local} unrooted, #{length(holes)} consensus holes"
-      end
+        IO.puts("Behind Root: #{behind_root_local} unrooted, #{length(holes)} consensus holes")
+        end
 
-      #live-edge holes get their own e+a+c request: the network-wide aggregate
-      #may not exist yet, peers' raw attestations (a) let us aggregate our own
-      #consensus locally, and the hash-deduped e recovers a doubleblock sibling
-      #we lack at an already-applied height (set_consensus drops consensus for
-      #an entry we don't hold, so without the sibling entry rooting wedges
-      #below it forever). normally the dedup means peers send no entries at
-      #all. kept SEPARATE from the deep c-only chunks — the e/a flags cap a
-      #served message at 20 heights and must not truncate them
-      {tip_holes, deep_holes} = Enum.split_with(holes, & temporal_height - &1 <= 2)
+        # live-edge holes get their own e+a+c request: the network-wide aggregate
+        # may not exist yet, peers' raw attestations (a) let us aggregate our own
+        # consensus locally, and the hash-deduped e recovers a doubleblock sibling
+        # we lack at an already-applied height (set_consensus drops consensus for
+        # an entry we don't hold, so without the sibling entry rooting wedges
+        # below it forever). normally the dedup means peers send no entries at
+        # all. Deep holes also request the entry: consensus for an unknown winning
+        # sibling cannot be stored/applied. Entry-bearing requests are chunked at
+        # 20 heights to match the responder's bound.
+        {tip_holes, deep_holes} = Enum.split_with(holes, & temporal_height - &1 <= 2)
 
       if tip_holes != [] do
         {_rooted_peers, tip_peers} = NodeANR.peers_w_min_height(List.first(tip_holes), :any)
         chunk = Enum.map(tip_holes, & %{height: &1, hashes: DB.Entry.by_height_return_hashes(&1), e: true, a: true, c: true})
         Enum.take(Enum.shuffle(tip_peers), 3)
         |> Enum.each(fn(peer)->
-          send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup(chunk)})
+          send_request([peer], chunk)
         end)
       end
 
@@ -219,12 +286,14 @@ defmodule FabricSyncGen do
           #the blocker gates the whole drain so it goes to 3 peers redundantly
           {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(blocker, :any)
           Enum.take(Enum.shuffle(temporal_peers), 3)
-          |> Enum.each(fn(peer)->
-            send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup([%{height: blocker, c: true}])})
+          |> Enum.each(fn peer ->
+              request = root_hole_request(blocker, DB.Entry.by_height_return_hashes(blocker))
+
+              send_request([peer], [request])
           end)
           deep_holes
-          |> Enum.map(& %{height: &1, c: true})
-          |> Enum.chunk_every(200)
+          |> Enum.map(&root_hole_request(&1, DB.Entry.by_height_return_hashes(&1)))
+          |> Enum.chunk_every(20)
           |> fetch_chunks(temporal_peers)
       end
     end
@@ -265,7 +334,7 @@ defmodule FabricSyncGen do
             {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(frontier, :any)
             Enum.take(Enum.shuffle(temporal_peers), 3)
             |> Enum.each(fn(peer)->
-              send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: peer.ip4, pk: peer.pk}], NodeProto.catchup([%{height: frontier, e: true, c: true}])})
+              send_request([peer], [%{height: frontier, e: true, c: true}])
             end)
             holes
             |> Enum.map(& %{height: &1, e: true, c: true})

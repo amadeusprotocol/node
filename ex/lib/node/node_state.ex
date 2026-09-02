@@ -1,4 +1,6 @@
 defmodule NodeState do
+  @catchup_reply_max_bytes 8 * 1024 * 1024
+  @catchup_entries_per_height 2
 
   def init() do
     %{
@@ -71,29 +73,38 @@ defmodule NodeState do
   end
 
   def handle(:event_tip, istate, term) do
-    temporal = Entry.unpack_from_net(term.temporal)
-    rooted = Entry.unpack_from_net(term.rooted)
+    temporal = validate_advertised_tip(term[:temporal])
+    rooted_candidate = validate_advertised_tip(term[:rooted])
 
-    %{error: err_t, hash: hash_t} = Entry.validate_signature(temporal)
-    temporal = Map.merge(temporal, %{hash: hash_t, sig_error: err_t})
-    %{error: err_r, hash: hash_r} = Entry.validate_signature(rooted)
-    rooted = Map.merge(rooted, %{hash: hash_r, sig_error: err_r})
+    # A rooted height is trusted from any transport identity only when the peer
+    # also supplies a quorum certificate for that exact header. This lets a
+    # non-validator relay represent hidden validators without turning its ANR key
+    # into a consensus identity or trusting an unproved height claim.
+    rooted =
+      case {rooted_candidate, term[:rooted_consensus]} do
+        {%{} = entry, %{} = consensus} ->
+          case Consensus.validate_for_entry(consensus, entry) do
+            %{error: :ok} -> Map.put(entry, :quorum_proof, true)
+            _ -> nil
+          end
 
-    #highest_validator_height trusts these heights blindly: a tip only counts if
-    #it verifies AND a validator signed it, else a non-validator advertising a
-    #self-signed head pushes everyone to :off_by_1 and stalls production.
-    #checked per tip: a peer stuck on an invalid temporal (old version) still
-    #contributes its valid rooted for BFT height and sync targeting.
-    #empty validator set (pre-bundle bootstrap) skips the signer check.
-    tip_ok = fn(tip, err)->
-      is_map(tip) and Map.has_key?(tip, :header) and err == :ok and
-        (validators = DB.Chain.validators_for_height(tip.header[:height] || 0) || []
-         validators == [] or tip.header[:signer] in validators)
-    end
-    rooted = if tip_ok.(rooted, err_r) do rooted else nil end
-    temporal = if tip_ok.(temporal, err_t) do temporal else nil end
+        _ ->
+          nil
+      end
 
-    pruned_below = term[:pruned_below_height] || 0
+    # An ordinary validator signature may wake H+1 discovery, but it cannot set
+    # an arbitrary far-future target. Long jumps require the rooted quorum proof.
+    local_height = DB.Chain.height() || 0
+    max_unproved_height = max(local_height + 1, if(rooted, do: rooted.header.height + 1, else: 0))
+
+    temporal =
+      if temporal && temporal.header.height <= max_unproved_height,
+        do: mark_advertised_tip_connectivity(temporal), else: nil
+
+    # Old messages omit this field. Passing nil preserves the last advertised
+    # pruning floor instead of silently resetting the peer to archival.
+    pruned_below = term[:pruned_below_height]
+
     if rooted || temporal do
       NodeANR.set_tips(istate.peer.pk, rooted, temporal, pruned_below)
 
@@ -115,12 +126,15 @@ defmodule NodeState do
   def handle(:event_entry, istate, term) do
     case Entry.unpack_and_validate_from_net(term.entry_packed) do
       %{error: :ok, entry: entry} ->
-        if Entry.height(entry) >= DB.Chain.rooted_height() do
-          DB.Entry.insert(entry)
-          NodeANR.set_tips(istate.peer.pk, nil, Map.merge(entry, %{sig_error: :ok}))
+        if entry_height_allowed?(:gossip, Entry.height(entry)) do
+          insert_entry_from_peer(istate.peer.pk, entry)
         end
       _ -> :ok
     end
+  end
+
+  def handle(:replica_block_proposal, istate, term) do
+    ReplicaGen.adopt_block_proposal(istate.peer.pk, term.entry_packed)
   end
 
   def handle(:event_attestation, istate, term) do
@@ -135,30 +149,81 @@ defmodule NodeState do
   end
 
   def handle(:catchup, istate, term) do
-    max_heights = if Enum.any?(term.height_flags, & &1[:e] || &1[:a]) do 20 else 200 end
-    #reply byte budget: with multi-MB entries a full-height reply could blow
-    #the 64MB transport decompress ceiling. stop adding heights once entries
-    #pass ~16MB (first height always served); the requester's hole logic
-    #re-requests whatever was cut
-    {tries, _bytes} = Enum.take(term.height_flags, max_heights)
-    |> Enum.reduce_while({[], 0}, fn(opts, {tries, bytes})->
-      height = opts.height
-      hasHashes = Enum.take(opts[:hashes] || [], 100)
-      needEntry = opts[:e] || false
-      needAttest = opts[:a] || false
-      needConsensus = opts[:c] || false
-      trie = %{height: height}
-      trie = if !needEntry do trie else Map.put(trie, :entries, DB.Entry.by_height(height) |> Enum.filter(& &1.hash not in hasHashes) |> Enum.map(& Entry.pack_for_net(&1))) end
-      trie = if !needAttest do trie else Map.put(trie, :attestations, DB.Attestation.by_height_my(height)) end
-      trie = if !needConsensus do trie else Map.put(trie, :consensuses, DB.Attestation.consensuses_by_height(height)) end
-      esz = case trie[:entries] do nil -> 0; es -> :erlang.external_size(es) end
-      cond do
-        tries != [] and bytes + esz > 16_777_216 -> {:halt, {tries, bytes}}
-        true -> {:cont, {[trie | tries], bytes + esz}}
+    height_flags =
+      if is_list(term[:height_flags]) do
+        term.height_flags |> Enum.take(200) |> Enum.filter(&is_map/1)
+      else
+        []
       end
-    end)
-    tries = Enum.reverse(tries)
-    send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.catchup_reply(tries)})
+
+    max_heights = if Enum.any?(height_flags, & &1[:e] || &1[:a]) do 20 else 200 end
+
+    tries = build_catchup_tries(height_flags, max_heights, @catchup_reply_max_bytes)
+
+    send(
+      NodeGen.get_socket_gen(),
+      {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.catchup_reply(tries)}
+    )
+  end
+
+  @doc false
+  def build_catchup_tries(height_flags, max_heights, max_bytes) do
+    {tries, _bytes} =
+      height_flags
+      |> Enum.take(max_heights)
+      |> Enum.reduce_while({[], 64 * 1024}, fn opts, {tries, bytes} ->
+        height = opts[:height]
+
+        if !is_integer(height) or height < 0 do
+          {:cont, {tries, bytes}}
+        else
+          has_hashes =
+            (opts[:hashes] || [])
+            |> Enum.take(100)
+            |> Enum.filter(&(is_binary(&1) and byte_size(&1) == 32))
+
+          trie = %{height: height}
+
+          trie =
+            if opts[:e] do
+              entries =
+                DB.Entry.by_height(height)
+                |> Enum.reject(&(&1.hash in has_hashes))
+                |> Enum.take(@catchup_entries_per_height)
+                |> Enum.map(&Entry.pack_for_net/1)
+
+              Map.put(trie, :entries, entries)
+            else
+              trie
+            end
+
+          trie =
+            if opts[:a],
+              do:
+                Map.put(trie, :attestations, Enum.take(DB.Attestation.by_height_my(height), 100)),
+              else: trie
+
+          trie =
+            if opts[:c],
+              do:
+                Map.put(
+                  trie,
+                  :consensuses,
+                  Enum.take(DB.Attestation.consensuses_by_height(height), 100)
+                ),
+              else: trie
+
+          encoded_bytes = byte_size(RDB.vecpak_encode(trie)) + 32
+
+          if bytes + encoded_bytes > max_bytes do
+            {:halt, {tries, bytes}}
+          else
+            {:cont, {[trie | tries], bytes + encoded_bytes}}
+          end
+        end
+      end)
+
+    Enum.reverse(tries)
   end
   def handle(:catchup_reply, istate, term) do
     Enum.take(term.tries, 200)
@@ -168,9 +233,11 @@ defmodule NodeState do
       Enum.each(Enum.take(trie[:entries]||[], 20), fn(entry_packed)->
         case Entry.unpack_and_validate_from_net(entry_packed) do
           %{error: :ok, entry: entry} ->
-            if Entry.height(entry) >= rooted_tip do
-              DB.Entry.insert(entry)
-              NodeANR.set_tips(istate.peer.pk, nil, Map.merge(entry, %{sig_error: :ok}))
+            height = Entry.height(entry)
+            requested = trie[:height] == height and FabricSyncGen.requested_entry?(istate.peer.pk, height)
+
+            if requested and height >= rooted_tip do
+              insert_entry_from_peer(istate.peer.pk, entry)
             end
           _ -> :ok
         end
@@ -257,9 +324,73 @@ defmodule NodeState do
     IO.inspect {:ukn_op, op}
   end
 
+  def entry_height_allowed?(:gossip, height) do
+    rooted_height = DB.Chain.rooted_height() || 0
+    local_height = DB.Chain.height() || 0
+    entry_height_allowed?(:gossip, height, local_height, rooted_height)
+  end
+
+
+  @doc false
+  def entry_height_allowed?(:gossip, height, local_height, rooted_height) do
+    is_integer(height) and height >= rooted_height and height <= local_height + 1
+  end
+
+  defp insert_entry_from_peer(peer_pk, entry) do
+    case DB.Entry.insert_with_status(entry) do
+      {:ok, status} ->
+        set_bounded_temporal_tip(peer_pk, entry)
+        if status == :inserted, do: ReplicaGen.flush_heartbeat()
+
+      _ ->
+        :ok
+    end
+  end
+
   defp cache_attestation_if_pending(attestation, error) do
     if error in [:entry_dne, :ahead_of_localchain] and :ets.info(AttestationCache, :size) < 100_000 do
       :ets.insert(AttestationCache, {{attestation.entry_hash, attestation.signer}, {attestation, :os.system_time(1000)}})
+    end
+  end
+
+  defp validate_advertised_tip(packed) do
+    try do
+      entry = Entry.unpack_from_net(packed)
+
+      case Entry.validate_tip(entry) do
+        %{error: :ok, hash: hash} -> Map.merge(entry, %{hash: hash, sig_error: :ok})
+        _ -> nil
+      end
+    catch
+      _, _ -> nil
+    end
+  end
+
+  defp mark_advertised_tip_connectivity(entry) do
+    local_tip = DB.Chain.tip_entry()
+
+    # Ordinary one-signature gossip is discovery-only until its body arrives.
+    # A quorum-signed special header must inhibit conflicting production now.
+    if !!entry[:mask] and entry.header.height == local_tip.header.height + 1 and
+       Entry.validate_next_tip(local_tip, entry) == %{error: :ok} do
+      Map.merge(entry, %{connects_to: local_tip.hash, quorum_entry: true})
+    else
+      entry
+    end
+  end
+
+  defp set_bounded_temporal_tip(peer_pk, entry) do
+    if entry.header.height <= (DB.Chain.height() || 0) + 1 do
+      local_tip = DB.Chain.tip_entry()
+      entry =
+        if entry.header.height == local_tip.header.height + 1 and
+           Entry.validate_next_tip(local_tip, entry) == %{error: :ok} do
+          Map.merge(entry, %{sig_error: :ok, known_entry: true,
+                             connects_to: local_tip.hash, quorum_entry: !!entry[:mask]})
+        else
+          Map.merge(entry, %{sig_error: :ok})
+        end
+      NodeANR.set_tips(peer_pk, nil, entry)
     end
   end
 end

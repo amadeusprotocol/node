@@ -26,8 +26,20 @@ defmodule NodeProto do
   def event_tip() do
     tip = DB.Chain.tip_entry()
     temporal = tip |> Map.take([:header, :signature, :mask, :mask_size, :mask_set_size])
-    rooted = DB.Chain.rooted_tip_entry() |> Map.take([:header, :signature, :mask, :mask_size, :mask_set_size])
+    rooted_entry = DB.Chain.rooted_tip_entry()
+    rooted = rooted_entry |> Map.take([:header, :signature, :mask, :mask_size, :mask_set_size])
+
+    rooted_consensus =
+      case DB.Attestation.best_consensus_by_entryhash(rooted_entry.hash) do
+        {mutations_hash, score} when is_binary(mutations_hash) and score >= 0.67 ->
+          DB.Attestation.consensus(rooted_entry.hash, mutations_hash)
+
+        _ ->
+          nil
+      end
+
     %{op: :event_tip, temporal: temporal, rooted: rooted,
+      rooted_consensus: rooted_consensus,
       pruned_below_height: DB.Chain.pruned_below_height(),
       ts_m: :os.system_time(1000)}
   end
@@ -39,6 +51,10 @@ defmodule NodeProto do
 
   def event_entry(entry_packed) do
     %{op: :event_entry, entry_packed: entry_packed}
+  end
+
+  def replica_block_proposal(entry_packed) do
+    %{op: :replica_block_proposal, entry_packed: entry_packed}
   end
 
   def event_attestation(attestations) do
@@ -177,7 +193,7 @@ defmodule NodeProto do
       if pk == Application.fetch_env!(:ama, :trainer_pk), do: throw(%{error: :msg_to_self})
 
       version = "#{va}.#{vb}.#{vc}"
-      if version < "1.2.5", do: throw(%{error: :old_version})
+      if !version_supported?(va, vb, vc), do: throw(%{error: :old_version})
 
       if s_total >= 10_000, do: throw(%{error: :too_large_shard})
       if original_size >= 1024_0_000, do: throw(%{error: :too_large_size})
@@ -192,5 +208,11 @@ defmodule NodeProto do
 
   def unpack_message(data) do
     %{error: :unknown_data}
+  end
+
+  @doc false
+  def version_supported?(major, minor, patch)
+      when is_integer(major) and is_integer(minor) and is_integer(patch) do
+    {major, minor, patch} >= {1, 2, 5}
   end
 end
