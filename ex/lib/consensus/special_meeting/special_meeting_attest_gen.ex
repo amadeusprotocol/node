@@ -287,22 +287,13 @@ defmodule SpecialMeetingAttestGen do
   #at or below that height; re-signing the exact same hash is always allowed (net
   #retries). node-local guard — the chain never reads it.
   def acquire_entry_sign_lock(height, entry_hash) do
-    {last_height, last_hash} = ReplicaGen.my_slash_lock()
-    cond do
-        entry_hash == last_hash -> true
-        height <= last_height -> false
-        true ->
-            ReplicaGen.put_slash_lock(height, entry_hash)
-            true
-    end
+    ReplicaGen.put_slash_lock(height, entry_hash)
   end
 
   #adopt a replica peer's slash-entry lock heard via heartbeat; only ever advances
   def adopt_entry_sign_lock(height, entry_hash) do
     {current, _} = ReplicaGen.my_slash_lock()
-    if height > current do
-        ReplicaGen.put_slash_lock(height, entry_hash)
-    end
+    height > current and ReplicaGen.put_slash_lock(height, entry_hash)
   end
 
   def entries_last_x(cnt) do

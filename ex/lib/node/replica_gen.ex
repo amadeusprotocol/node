@@ -38,7 +38,7 @@ defmodule ReplicaGen do
             if acking == my_id and now - seen <= @ack_ttl_ms do acc + 1 else acc end
           (_, acc)-> acc
         end, 0, ReplicaGen)
-        synced_for_leadership?() and self_ack + fresh >= majority
+        self_ack == 1 and synced_for_leadership?() and self_ack + fresh >= majority
     end
   end
 
@@ -133,6 +133,10 @@ defmodule ReplicaGen do
   # Legacy height-only mirror retained for upgrade compatibility. New safety
   # decisions use the exact {height, hash} block lock below.
   def note_signed_height(height) do
+    with_sign_lock(fn -> note_signed_height_1(height) end)
+  end
+
+  defp note_signed_height_1(height) do
     case :persistent_term.get({ReplicaGen, :config}, nil) do
       nil -> :ok
       _ ->
@@ -162,7 +166,18 @@ defmodule ReplicaGen do
 
   defp put_block_lock(height, hash) do
     MnesiaKV.merge(ReplicaKV, "block_lock", %{height: height, hash: hash})
-    note_signed_height(height)
+    note_signed_height_1(height)
+  end
+
+  # Serialize durable check/write decisions on this VM only. Never hold this
+  # lock while waiting for heartbeat acknowledgements or doing network I/O.
+  defp with_sign_lock(fun) do
+    :global.trans({{__MODULE__, :entry_sign_lock}, self()}, fun, [node()])
+  end
+
+  defp slash_lock_conflict?(height, hash) do
+    {locked_height, locked_hash} = my_slash_lock()
+    locked_height > height or (locked_height == height and locked_hash != hash)
   end
 
   def my_block_proposal() do
@@ -252,31 +267,12 @@ defmodule ReplicaGen do
         false
 
       _ ->
-        {locked_height, locked_hash} = my_block_lock()
-        {slash_height, slash_hash} = my_slash_lock()
-
-        cond do
-          #cross-lock: an entry we responder-signed under the slash lock at this
-          #height (or above) carries our block signature too — never propose a
-          #different block there
-          slash_height > height or (slash_height == height and slash_hash != hash) ->
-            false
-
-          locked_height == height and locked_hash == hash ->
-            put_block_proposal(entry, hash)
-            broadcast_block_proposal(entry)
-            flush_heartbeat()
-            await_block_proposal(height, hash)
-
-          height > max(locked_height, my_signed_height()) ->
-            put_block_proposal(entry, hash)
-            put_block_lock(height, hash)
-            broadcast_block_proposal(entry)
-            flush_heartbeat()
-            await_block_proposal(height, hash)
-
-          true ->
-            false
+        if adopt_block_proposal_1(entry, hash) do
+          broadcast_block_proposal(entry)
+          flush_heartbeat()
+          await_block_proposal(height, hash)
+        else
+          false
         end
     end
   end
@@ -335,8 +331,8 @@ defmodule ReplicaGen do
       end
 
     with %{header: %{height: ^height}} <- proposal,
-         true <- Entry.header_hash(proposal.header) == hash do
-      put_block_proposal(proposal, hash)
+         true <- Entry.header_hash(proposal.header) == hash,
+         true <- adopt_block_proposal_1(proposal, hash) do
       broadcast_block_proposal(proposal)
       flush_heartbeat()
       await_block_proposal(height, hash)
@@ -479,21 +475,26 @@ defmodule ReplicaGen do
 
   defp adopt_block_proposal_1(entry, hash) do
     height = entry.header.height
-    {locked_height, locked_hash} = my_block_lock()
+    with_sign_lock(fn ->
+      {locked_height, locked_hash} = my_block_lock()
 
-    cond do
-      locked_height == height and locked_hash == hash ->
-        put_block_proposal(entry, hash)
-        true
+      cond do
+        slash_lock_conflict?(height, hash) ->
+          false
 
-      height > max(locked_height, my_signed_height()) ->
-        put_block_proposal(entry, hash)
-        put_block_lock(height, hash)
-        true
+        locked_height == height and locked_hash == hash ->
+          put_block_proposal(entry, hash)
+          true
 
-      true ->
-        false
-    end
+        height > max(locked_height, my_signed_height()) ->
+          put_block_proposal(entry, hash)
+          put_block_lock(height, hash)
+          true
+
+        true ->
+          false
+      end
+    end)
   end
 
   defp recover_block_proposal(height, hash) do
@@ -593,7 +594,17 @@ defmodule ReplicaGen do
   end
 
   def put_slash_lock(height, hash) do
-    MnesiaKV.merge(ReplicaKV, "slash_lock", %{height: height, hash: hash})
+    with_sign_lock(fn ->
+      {locked_height, locked_hash} = my_slash_lock()
+      cond do
+        block_lock_conflict?(height, hash) -> false
+        height == locked_height and hash == locked_hash -> true
+        height <= locked_height -> false
+        true ->
+          MnesiaKV.merge(ReplicaKV, "slash_lock", %{height: height, hash: hash})
+          true
+      end
+    end)
   end
 
   #before releasing a slash-entry signature the leader waits until a majority
@@ -802,14 +813,16 @@ defmodule ReplicaGen do
       # Migrate the legacy height-only HWM to an exact block lock. A block already
       # in the main chain was necessarily public, so do not create a false pending
       # publication during an upgrade.
-      if elem(my_block_lock(), 0) == 0 and my_signed_height() > 0 do
-        height = my_signed_height()
+      with_sign_lock(fn ->
+        if elem(my_block_lock(), 0) == 0 and my_signed_height() > 0 do
+          height = my_signed_height()
 
-        if hash = DB.Entry.by_height_in_main_chain(height) do
-          put_block_lock(height, hash)
-          MnesiaKV.merge(ReplicaKV, "published_block", %{height: height, hash: hash})
+          if hash = DB.Entry.by_height_in_main_chain(height) do
+            put_block_lock(height, hash)
+            MnesiaKV.merge(ReplicaKV, "published_block", %{height: height, hash: hash})
+          end
         end
-      end
+      end)
 
       :persistent_term.put({ReplicaGen, :config}, %{ready: true, my_id: state.my_id, majority: state.majority})
       :erlang.send_after(@heartbeat_ms, self(), :tick)
@@ -1120,32 +1133,27 @@ defmodule ReplicaGen do
       state = ensure_meshed(state, id, pk)
       NodeANR.set_last_message(pk)
       # adopt a newer slash-entry lock from a peer
-      {my_sh, _} = my_slash_lock()
-
-      slash_lock_adopted =
-        if sh > my_sh and is_binary(shash) and byte_size(shash) == 32 do
-          SpecialMeetingAttestGen.adopt_entry_sign_lock(sh, shash)
-          true
-        else
-          false
-        end
+      slash_lock_adopted = SpecialMeetingAttestGen.adopt_entry_sign_lock(sh, shash)
 
       # Never adopt a hash-only reservation: if the sender dies before signing,
       # it has no recoverable body and can wedge the replica group. Proposal
       # messages persist the body first and then install the local lock.
-      {my_bh, _} = my_block_lock()
       valid_block_lock = bh == 0 or bhash != @empty_hash
 
       local_proposal_ready = block_proposal_ready?(bh, bhash)
       local_signed_ready = match?(%{header: %{height: ^bh}}, DB.Entry.by_hash(bhash))
 
       block_lock_adopted =
-        if bh > my_bh and valid_block_lock and (local_proposal_ready or local_signed_ready) do
-          put_block_lock(bh, bhash)
-          true
-        else
-          false
-        end
+        with_sign_lock(fn ->
+          {my_bh, _} = my_block_lock()
+          if bh > my_bh and valid_block_lock and (local_proposal_ready or local_signed_ready) and
+               !slash_lock_conflict?(bh, bhash) do
+            put_block_lock(bh, bhash)
+            true
+          else
+            false
+          end
+        end)
 
       # Likewise, do not adopt/advertise an attestation lock unless its exact
       # entry and mutation result exist locally. An exact echo of our own durable

@@ -87,6 +87,7 @@ defmodule ConsensusStorageSecurityTest do
     rtx = RocksDB.transaction(db)
 
     try do
+      ensure_partial_validator_set(rtx)
       entry = DB.Chain.tip_entry(%{rtx: rtx})
       entry_hash = :crypto.strong_rand_bytes(32)
       DB.Entry.insert(Map.put(entry, :hash, entry_hash), %{rtx: rtx})
@@ -153,6 +154,7 @@ defmodule ConsensusStorageSecurityTest do
     rtx = RocksDB.transaction(db)
 
     try do
+      ensure_partial_validator_set(rtx)
       entry = DB.Chain.tip_entry(%{rtx: rtx})
       entry_hash = :crypto.strong_rand_bytes(32)
       assert :ok = DB.Entry.insert(Map.put(entry, :hash, entry_hash), %{rtx: rtx})
@@ -185,6 +187,7 @@ defmodule ConsensusStorageSecurityTest do
     rtx = RocksDB.transaction(db)
 
     try do
+      ensure_partial_validator_set(rtx)
       entry = DB.Chain.tip_entry(%{rtx: rtx})
       entry_hash = :crypto.strong_rand_bytes(32)
       assert :ok = DB.Entry.insert(Map.put(entry, :hash, entry_hash), %{rtx: rtx})
@@ -211,6 +214,17 @@ defmodule ConsensusStorageSecurityTest do
     after
       RocksDB.transaction_rollback(rtx)
     end
+  end
+
+  defp ensure_partial_validator_set(rtx) do
+    # One or two signatures must remain below quorum, including on a fresh DB
+    # whose historical genesis contains only one validator. Roll back with rtx.
+    %{cf: cf} = :persistent_term.get({:rocksdb, Fabric})
+    height = DB.Chain.height(%{rtx: rtx})
+    validators = DB.Chain.validators_for_height(height, %{rtx: rtx})
+    extra = for _ <- 1..max(4 - length(validators), 0)//1, do: BlsEx.get_public_key!(:crypto.strong_rand_bytes(64))
+    RocksDB.put("bic:epoch:validators:height:#{DB.API.pad_integer(height)}",
+      RDB.vecpak_encode(validators ++ extra), %{rtx: rtx, cf: cf.contractstate})
   end
 
   test "a quorum entry displaces ordinary variants instead of being locked out" do

@@ -75,14 +75,30 @@ defmodule Ama do
     #mix test) over a live datadir must not write into it
     if !DB.Chain.tip() do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-      RocksDB.put("bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}",
-        RDB.vecpak_encode([EntryGenesis.signer()]), %{db: db, cf: cf.contractstate})
-
-      #the embedded genesis carries its header still packed
+      # Install the historical anchor directly: its legacy header cannot be
+      # executed by the current block executor (no parent or modern roots).
       entry = EntryGenesis.get()
-      entry = Map.put(entry, :header, RDB.vecpak_decode(entry.header))
-      :ok = DB.Entry.insert(entry)
-      FabricGen.apply_entry(entry)
+      entry = Map.put(entry, :header, :erlang.binary_to_term(entry.header, [:safe]))
+      attestation = EntryGenesis.attestation()
+      validators = [EntryGenesis.signer()]
+      rtx = RocksDB.transaction(db)
+      try do
+        RocksDB.put("bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}",
+          RDB.vecpak_encode(validators), %{rtx: rtx, cf: cf.contractstate})
+        :ok = DB.Entry.insert(entry, %{rtx: rtx})
+        DB.Entry.apply_into_main_chain(entry, attestation.mutations_hash, [], [], "", "", %{rtx: rtx})
+        DB.Attestation.put(attestation, 0, %{rtx: rtx})
+        :ok = DB.Attestation.set_consensus(%{entry_hash: entry.hash,
+          mutations_hash: attestation.mutations_hash,
+          aggsig: BLS12AggSig.aggregate(validators, [attestation])}, %{rtx: rtx})
+        RocksDB.put("temporal_tip", entry.hash, %{rtx: rtx, cf: cf.sysconf})
+        RocksDB.put("rooted_tip", entry.hash, %{rtx: rtx, cf: cf.sysconf})
+        :ok = RocksDB.transaction_commit(rtx)
+      catch
+        kind, reason ->
+          RocksDB.transaction_rollback(rtx)
+          :erlang.raise(kind, reason, __STACKTRACE__)
+      end
     end
   end
 
