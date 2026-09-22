@@ -46,6 +46,23 @@ defmodule FabricSnapshot do
   @mainnet_bundle_signer_b58 "7UTNGrLTnL6HLZ5Gp3qVMtJvUVVHocKewN2y2cpstSh6oib9y4yZtWaWALg1j62CDH"
 
   def bundle_latest_key, do: @bundle_latest_key
+
+  # Reuse the bootstrap trust anchor for sync preference, including after a
+  # restart. Only a handshaked peer with this identity will be preferred.
+  def trusted_bundle_signer() do
+    try do
+      encoded = if URI.parse(Application.fetch_env!(:ama, :rpc_url)).host == @mainnet_rpc_host do
+        @mainnet_bundle_signer_b58
+      else
+        Path.join(Application.fetch_env!(:ama, :work_folder), "rpc_bundle_signer.pk") |> File.read!()
+      end
+      pk = encoded |> String.trim() |> Base58.decode()
+      if byte_size(pk) == 48, do: pk, else: nil
+    catch
+      _, _ -> nil
+    end
+  end
+
     def bundle_path(height), do: @bundle_path_prefix <> Integer.to_string(height) <> @bundle_path_suffix
     defp bundle_tmp_path(height), do: bundle_path(height) <> ".tmp"
 

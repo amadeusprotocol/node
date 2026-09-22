@@ -21,7 +21,10 @@ defmodule FabricSyncGen do
     {:ok, %{
        frontier_advertisements: %{},
       last_frontier_request: nil,
-      last_frontier_probe: nil
+      last_frontier_probe: nil,
+      preferred_sync_pk: FabricSnapshot.trusted_bundle_signer(),
+      requests: %{},
+      request_timer: nil
     }}
   end
 
@@ -61,6 +64,29 @@ defmodule FabricSyncGen do
     {:noreply, state}
   end
 
+  def handle_info({:catchup_request, peers, requests, priority}, state) do
+    now = :erlang.monotonic_time(:millisecond)
+    queue = FabricSyncRequestQueue.enqueue(state.requests, peers, requests, priority, now)
+    {:noreply, schedule_requests(%{state | requests: queue}, 0)}
+  end
+
+  def handle_info({:catchup_flush, token}, %{request_timer: {token, _, _}} = state) do
+    now = :erlang.monotonic_time(:millisecond)
+    {queue, outgoing, delay} = FabricSyncRequestQueue.drain(state.requests, now, DB.Chain.rooted_height())
+    queue = Enum.reduce(outgoing, queue, fn {peer, requests}, queue ->
+      requests = Enum.map(requests, fn request ->
+        if request[:e], do: Map.put(request, :hashes, DB.Entry.by_height_return_hashes(request.height)), else: request
+      end)
+      # Admission starts at actual dispatch, never while a request is queued.
+      track_entry_requests([peer], requests)
+      send(NodeGen.get_socket_gen(), {:send_to, [peer], NodeProto.catchup(requests)})
+      FabricSyncRequestQueue.dispatched(queue, peer, requests, :erlang.monotonic_time(:millisecond))
+    end)
+    state = %{state | requests: queue, request_timer: nil}
+    {:noreply, schedule_requests(state, delay)}
+  end
+  def handle_info({:catchup_flush, _stale_token}, state), do: {:noreply, state}
+
   #Bulk/root requester. The independent frontier loop above stays active while
   #this work is paused for quorum or an applying/coordinator process.
   def handle_info(:tick, state) do
@@ -72,9 +98,22 @@ defmodule FabricSyncGen do
     {:noreply, state}
   end
 
-  # This loop never consults hasQuorum/isSyncing. While behind it retries H+1
-  # every 100ms. While caught up it probes H+1 every 500ms so lost tip gossip
-  # cannot leave the node unaware of a new block.
+  defp schedule_requests(state, nil), do: state
+  defp schedule_requests(state, delay) do
+    deadline = :erlang.monotonic_time(:millisecond) + delay
+    case state.request_timer do
+      {_, _, scheduled} when scheduled <= deadline -> state
+      timer ->
+        if timer, do: Process.cancel_timer(elem(timer, 1))
+        token = make_ref()
+        ref = Process.send_after(self(), {:catchup_flush, token}, delay)
+        %{state | request_timer: {token, ref, deadline}}
+    end
+  end
+
+  # This loop never consults hasQuorum/isSyncing. It checks H+1 every 100ms;
+  # the shared sender coalesces and paces retries. While caught up it probes
+  # H+1 every 500ms so lost tip gossip cannot hide a new block.
   defp pursue_frontier(state, force?) do
     local_height = DB.Chain.height()
     next_height = frontier_height(local_height)
@@ -92,14 +131,14 @@ defmodule FabricSyncGen do
     cond do
       target > local_height ->
         if force? or request_due?(state.last_frontier_request, next_height, now, @frontier_retry_ms) do
-          request_frontier(next_height, preferred_peer)
+          request_frontier(next_height, preferred_peer, state.preferred_sync_pk)
           %{state | last_frontier_request: {next_height, now}}
         else
           state
         end
 
       request_due?(state.last_frontier_probe, next_height, now, @frontier_probe_ms) ->
-        request_frontier(next_height, nil)
+        request_frontier(next_height, nil, state.preferred_sync_pk)
         %{state | last_frontier_probe: {next_height, now}
         }
 
@@ -127,7 +166,7 @@ defmodule FabricSyncGen do
     |> Enum.reduce(0, &max(&1.height, &2))
   end
 
-  defp request_frontier(height, preferred_peer) do
+  defp request_frontier(height, preferred_peer, rpc_pk) do
     {_rooted_peers, advertised_peers} = NodeANR.peers_w_min_height(height, :any)
     online_peers = online_frontier_peers(height)
     preferred_pk = preferred_peer && preferred_peer[:pk]
@@ -136,11 +175,10 @@ defmodule FabricSyncGen do
     else
       online_peers
     end
-    peers = select_frontier_peers(advertised_peers, online_peers, preferred_pk, @frontier_peer_count)
+    peers = select_frontier_peers(advertised_peers, online_peers, preferred_pk, @frontier_peer_count, rpc_pk)
 
     if peers != [] do
-      hashes = DB.Entry.by_height_return_hashes(height)
-      send_request(peers, [frontier_request(height, hashes)])
+      send_request(peers, [frontier_request(height, [])])
     end
   end
 
@@ -167,28 +205,49 @@ defmodule FabricSyncGen do
   end
 
   @doc false
-  def select_frontier_peers(advertised_peers, online_peers, preferred_pk, count) do
+  def select_frontier_peers(advertised_peers, online_peers, preferred_pk, count, rpc_pk \\ nil) do
     advertised_peers = Enum.uniq_by(advertised_peers, & &1.pk)
     advertised_pks = MapSet.new(advertised_peers, & &1.pk)
     all = Enum.uniq_by(advertised_peers ++ online_peers, & &1.pk)
-    {preferred, rest} = Enum.split_with(all, & &1.pk == preferred_pk)
+    {rpc, rest} = Enum.split_with(all, & &1.pk == rpc_pk)
+    {preferred, rest} = Enum.split_with(rest, & &1.pk == preferred_pk)
     {advertised, fallback} = Enum.split_with(rest, & MapSet.member?(advertised_pks, &1.pk))
 
-    (preferred ++ Enum.shuffle(advertised) ++ Enum.shuffle(fallback))
+    (rpc ++ preferred ++ Enum.shuffle(advertised) ++ Enum.shuffle(fallback))
+    |> Enum.uniq_by(& &1.ip4)
     |> Enum.take(count)
   end
 
-  def fetch_chunks(_chunks, []) do nil end
-  def fetch_chunks(chunks, peers) do
-    Enum.zip(chunks, Stream.cycle(Enum.shuffle(peers)))
+  @doc false
+  def prioritize_sync_peers(peers, rpc_pk) do
+    {rpc, rest} = Enum.split_with(peers, & &1.pk == rpc_pk)
+    (rpc ++ Enum.shuffle(rest)) |> Enum.uniq_by(& &1.ip4)
+  end
+
+  @doc false
+  def bulk_sync_peers(peers, rpc_pk) do
+    case prioritize_sync_peers(peers, rpc_pk) do
+      [rpc | [_ | _] = rest] when rpc.pk == rpc_pk -> Enum.flat_map(rest, &[rpc, &1])
+      peers -> peers
+    end
+  end
+
+  def fetch_chunks(chunks, peers, rpc_pk \\ nil)
+  def fetch_chunks(_chunks, [], _rpc_pk) do nil end
+  def fetch_chunks(chunks, peers, rpc_pk) do
+    # Give the trusted RPC half the bulk work when alternatives exist. Each
+    # destination drains independently, so a slow RPC cannot block the hedge.
+    Enum.zip(chunks, Stream.cycle(bulk_sync_peers(peers, rpc_pk)))
     |> Enum.each(fn({chunk, peer})->
-      send_request([peer], chunk)
+      send_request([peer], chunk, 1)
     end)
   end
 
-  def send_request(peers, height_flags) when is_list(peers) and is_list(height_flags) do
-    track_entry_requests(peers, height_flags)
-    send(NodeGen.get_socket_gen(), {:send_to, peers, NodeProto.catchup(height_flags)})
+  def send_request(peers, height_flags, priority \\ 0) when is_list(peers) and is_list(height_flags) do
+    case Process.whereis(__MODULE__) do
+      nil -> :ok
+      pid -> send(pid, {:catchup_request, peers, height_flags, priority})
+    end
   end
 
   @doc false
@@ -214,6 +273,7 @@ defmodule FabricSyncGen do
   def requested_entry?(_, _), do: false
 
   def tick(state) do
+    rpc_pk = state[:preferred_sync_pk]
     temporal = DB.Chain.tip_entry()
     temporal_height = temporal.header.height
     rooted = DB.Chain.rooted_tip_entry()
@@ -233,8 +293,10 @@ defmodule FabricSyncGen do
     # handled continuously by pursue_frontier/2.
     target_sig = {temporal_height, rooted_height, height_network_temp, height_network_root, height_network_bft}
     now = :erlang.monotonic_time(:millisecond)
-    {last_sig, last_ts} = state[:last_bulk_fetch] || {nil, 0}
-    should_fetch_bulk? = (target_sig != last_sig) or (now - last_ts >= 1000)
+    should_fetch_bulk? = case state[:last_bulk_fetch] do
+      nil -> true
+      {_last_sig, last_ts} -> now - last_ts >= 1000
+    end
 
     if should_fetch_bulk? do
       if behind_root_local > 0 do
@@ -270,8 +332,8 @@ defmodule FabricSyncGen do
 
       if tip_holes != [] do
         {_rooted_peers, tip_peers} = NodeANR.peers_w_min_height(List.first(tip_holes), :any)
-        chunk = Enum.map(tip_holes, & %{height: &1, hashes: DB.Entry.by_height_return_hashes(&1), e: true, a: true, c: true})
-        Enum.take(Enum.shuffle(tip_peers), 3)
+        chunk = Enum.map(tip_holes, &frontier_request(&1, []))
+        Enum.take(prioritize_sync_peers(tip_peers, rpc_pk), 3)
         |> Enum.each(fn(peer)->
           send_request([peer], chunk)
         end)
@@ -285,16 +347,16 @@ defmodule FabricSyncGen do
           #peer eligibility keyed to the blocker: pruned_below must reach it;
           #the blocker gates the whole drain so it goes to 3 peers redundantly
           {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(blocker, :any)
-          Enum.take(Enum.shuffle(temporal_peers), 3)
+          Enum.take(prioritize_sync_peers(temporal_peers, rpc_pk), 3)
           |> Enum.each(fn peer ->
-              request = root_hole_request(blocker, DB.Entry.by_height_return_hashes(blocker))
+              request = root_hole_request(blocker, [])
 
               send_request([peer], [request])
           end)
-          deep_holes
-          |> Enum.map(&root_hole_request(&1, DB.Entry.by_height_return_hashes(&1)))
+          tl(deep_holes)
+          |> Enum.map(&root_hole_request(&1, []))
           |> Enum.chunk_every(20)
-          |> fetch_chunks(temporal_peers)
+          |> fetch_chunks(temporal_peers, rpc_pk)
       end
     end
 
@@ -328,18 +390,18 @@ defmodule FabricSyncGen do
           [] ->
             frontier = temporal_height + 1
             {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(frontier, :any)
-            chunk = [[%{height: frontier, hashes: DB.Entry.by_height_return_hashes(frontier), e: true, a: true, c: true}]]
-            fetch_chunks(chunk, temporal_peers)
+            chunk = [[frontier_request(frontier, [])]]
+            fetch_chunks(chunk, temporal_peers, rpc_pk)
           [frontier | _] ->
             {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(frontier, :any)
-            Enum.take(Enum.shuffle(temporal_peers), 3)
+            Enum.take(prioritize_sync_peers(temporal_peers, rpc_pk), 3)
             |> Enum.each(fn(peer)->
               send_request([peer], [%{height: frontier, e: true, c: true}])
             end)
-            holes
+            tl(holes)
             |> Enum.map(& %{height: &1, e: true, c: true})
             |> Enum.chunk_every(20)
-            |> fetch_chunks(temporal_peers)
+            |> fetch_chunks(temporal_peers, rpc_pk)
         end
 
       behind_network_root > 0 ->
@@ -348,9 +410,9 @@ defmodule FabricSyncGen do
         |> Enum.uniq()
         {rooted_peers, _temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
         next_heights
-        |> Enum.map(& %{height: &1, hashes: Enum.map(DB.Entry.by_height(&1), fn(%{hash: hash})-> hash end), e: true, c: true})
+        |> Enum.map(&root_hole_request(&1, []))
         |> Enum.chunk_every(20)
-        |> fetch_chunks(rooted_peers)
+        |> fetch_chunks(rooted_peers, rpc_pk)
 
       #TODO: only fetch missing attestations
       behind_temp > 0 ->
@@ -359,9 +421,9 @@ defmodule FabricSyncGen do
         |> Enum.uniq()
         {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
         next_heights
-        |> Enum.map(& %{height: &1, hashes: Enum.map(DB.Entry.by_height(&1), fn(%{hash: hash})-> hash end), e: true, a: true})
+        |> Enum.map(& %{height: &1, e: true, a: true})
         |> Enum.chunk_every(10)
-        |> fetch_chunks(temporal_peers)
+        |> fetch_chunks(temporal_peers, rpc_pk)
 
       #The independent frontier loop probes H+1 from several peers here.
       behind_temp <= 0 ->

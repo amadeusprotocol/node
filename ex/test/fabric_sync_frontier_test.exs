@@ -62,4 +62,22 @@ defmodule FabricSyncFrontierTest do
     assert FabricSyncGen.active_frontier_advertisements(advertisements, 2_100, 500)
            |> Map.keys() == [<<2>>]
   end
+
+  test "trusted RPC leads frontier and bulk selection with other peers as fallback" do
+    rpc = %{pk: <<1>>, ip4: "10.0.0.1"}
+    advertiser = %{pk: <<2>>, ip4: "10.0.0.2"}
+    relay = %{pk: <<3>>, ip4: "10.0.0.3"}
+    alias_peer = %{pk: <<4>>, ip4: rpc.ip4}
+    assert FabricSyncGen.select_frontier_peers([advertiser, relay], [rpc, alias_peer], advertiser.pk, 3, rpc.pk) ==
+      [rpc, advertiser, relay]
+    selected = FabricSyncGen.bulk_sync_peers([advertiser, rpc, relay, alias_peer], rpc.pk)
+    assert length(selected) == 4
+    assert Enum.take_every(selected, 2) == [rpc, rpc]
+    assert MapSet.new(selected) == MapSet.new([rpc, advertiser, relay])
+
+    # The preference never invents a peer: callers supply only online peers
+    # whose retained history includes the requested height.
+    assert FabricSyncGen.select_frontier_peers([advertiser], [relay], advertiser.pk, 3, rpc.pk) == [advertiser, relay]
+    assert MapSet.new(FabricSyncGen.bulk_sync_peers([advertiser, relay], rpc.pk)) == MapSet.new([advertiser, relay])
+  end
 end
