@@ -449,7 +449,11 @@ fn transaction_rollback_to_savepoint(tx: ResourceArc<TxResource>) -> NifResult<A
 fn transaction_get<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -> NifResult<Term<'a>> {
     let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
-    match txn.get(key.as_slice()) {
+    // TransactionOptions::set_snapshot only establishes the snapshot. Reads
+    // must explicitly use it; otherwise a bundle can mix concurrent commits.
+    // For ordinary transactions snapshot() has a null snapshot (latest view).
+    let snapshot = txn.snapshot();
+    match snapshot.get(key.as_slice()) {
         Ok(Some(value)) => {
             let mut ob = OwnedBinary::new(value.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
             ob.as_mut_slice().copy_from_slice(&value);
@@ -464,7 +468,8 @@ fn transaction_get<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -
 fn transaction_get_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource>, key: Binary) -> NifResult<Term<'a>> {
     let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
-    match txn.get_cf(&*cf, key.as_slice()) {
+    let snapshot = txn.snapshot();
+    match snapshot.get_cf(&*cf, key.as_slice()) {
         Ok(Some(value)) => {
             let mut ob = OwnedBinary::new(value.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
             ob.as_mut_slice().copy_from_slice(&value);
@@ -481,7 +486,8 @@ fn transaction_exists<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     let mut ro = ReadOptions::default();
     ro.fill_cache(false);
-    let rustlol = match txn.get_pinned_opt(key.as_slice(), &ro) {
+    let snapshot = txn.snapshot();
+    let rustlol = match snapshot.get_pinned_opt(key.as_slice(), ro) {
         Ok(Some(_)) => Ok((atoms::ok(), true).encode(env)),
         Ok(None) => Ok((atoms::ok(), false).encode(env)),
         Err(e) => Err(to_nif_rdb_err(e)),
@@ -495,7 +501,8 @@ fn transaction_exists_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: Reso
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     let mut ro = ReadOptions::default();
     ro.fill_cache(false);
-    let rustlol = match txn.get_pinned_cf_opt(&*cf, key.as_slice(), &ro) {
+    let snapshot = txn.snapshot();
+    let rustlol = match snapshot.get_pinned_cf_opt(&*cf, key.as_slice(), ro) {
         Ok(Some(_)) => Ok((atoms::ok(), true).encode(env)),
         Ok(None) => Ok((atoms::ok(), false).encode(env)),
         Err(e) => Err(to_nif_rdb_err(e)),
@@ -564,9 +571,10 @@ fn transaction_scan_cf<'a>(
 
     let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
+    let snapshot = txn.snapshot();
     let mut it = match cf {
-        Some(cf) => txn.raw_iterator_cf(&*cf),
-        None => txn.raw_iterator(),
+        Some(cf) => snapshot.raw_iterator_cf(&*cf),
+        None => snapshot.raw_iterator(),
     };
 
     if reverse {

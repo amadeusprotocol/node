@@ -44,9 +44,10 @@ defmodule ProtocolHardeningTest do
     signature =
       BlsEx.sign!(seed, FabricSnapshot.bundle_claim(height, hash), BLS12AggSig.dst_bundle())
 
-    metadata = %{version: 1, height: height, hash: hash, signer: signer, signature: signature}
+    metadata = %{version: 2, height: height, hash: hash, signer: signer, signature: signature}
 
     assert :ok = FabricSnapshot.verify_bundle_metadata(metadata)
+    assert {:error, :invalid_metadata} = FabricSnapshot.verify_bundle_metadata(%{metadata | version: 1})
 
     trailer = FabricSnapshot.bundle_trailer(height, hash, signer, signature)
     assert byte_size(trailer) == 201

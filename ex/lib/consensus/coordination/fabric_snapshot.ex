@@ -30,8 +30,10 @@ defmodule FabricSnapshot do
     @bundle_epoch_size 100_000
     @bundle_keep 2                       # number of latest bundles retained on disk
     @bundle_latest_key {__MODULE__, :statepeerdownload_latest}
-  @bundle_signature_version 1
-  @bundle_claim_prefix "AMA_STATE_BUNDLE_V1"
+  # V1 writers did not bind reads to the RocksDB snapshot and could mix heights.
+  # Reject their cached bundles so upgraded producers rebuild a consistent view.
+  @bundle_signature_version 2
+  @bundle_claim_prefix "AMA_STATE_BUNDLE_V2"
   @bundle_trailer_magic "AMA_STATE_BUNDLE"
   @bundle_trailer_size byte_size(@bundle_trailer_magic) + 1 + 8 + 32 + 48 + 96
   @bundle_download_max_bytes 100_000_000_000
@@ -158,8 +160,10 @@ defmodule FabricSnapshot do
               {:ok, entry_blob} when is_binary(entry_blob) ->
                 entry = Entry.unpack_from_db(entry_blob)
                 height = entry.header.height
-                write_statepeerdownload_bundle(rtx, height)
-                {:ok, height}
+                case write_statepeerdownload_bundle(rtx, height) do
+                  :ok -> {:ok, height}
+                  error -> error
+                end
 
               _ ->
                 RDB.transaction_rollback(rtx)
@@ -190,11 +194,16 @@ defmodule FabricSnapshot do
         {:ok, fd} = :file.open(tmp_path, [:write, :binary, :raw])
         {:ok, zctx} = :zstd.context(:compress, %{})
         try do
+          rooted_hash = RocksDB.get("rooted_tip", %{rtx: rtx, cf: cf.sysconf})
+          temporal_hash = RocksDB.get("temporal_tip", %{rtx: rtx, cf: cf.sysconf})
+          anchor = DB.Entry.by_hash(rooted_hash, %{rtx: rtx})
+          if rooted_hash != temporal_hash or !anchor or anchor.header.height != height,
+            do: raise("bundle anchor does not match the requested rooted height")
+
           # Bulk CFs — full state, read through the same snapshot for mutual consistency.
           stream_cf(rtx, "contractstate",      cf.contractstate,      fd, zctx)
           stream_cf(rtx, "contractstate_tree_hbsmt", cf.contractstate_tree_hbsmt, fd, zctx)
 
-          rooted_hash = RocksDB.get("rooted_tip", %{rtx: rtx, cf: cf.sysconf})
           if is_binary(rooted_hash) do
             write_record(fd, zctx, "sysconf", "rooted_tip",      rooted_hash)
             write_record(fd, zctx, "sysconf", "temporal_tip",    rooted_hash)
@@ -286,7 +295,7 @@ defmodule FabricSnapshot do
 
     IO.puts "FabricSnapshot: downloaded #{bytes} bytes, importing #{payload_bytes} payload bytes.."
 
-      case import_bundle_file(download_path, payload_bytes) do
+      case import_bundle_file(download_path, payload_bytes, metadata.height) do
         {:ok, count} ->
           File.rm!(download_path)
           IO.puts "FabricSnapshot: imported #{count} records, chain ready"
@@ -600,15 +609,15 @@ defmodule FabricSnapshot do
 
     def import_bundle_file(file_path) do
       case verify_bundle_file(file_path) do
-        {:ok, _metadata, payload_bytes} ->
-          import_bundle_file(file_path, payload_bytes)
+        {:ok, metadata, payload_bytes} ->
+          import_bundle_file(file_path, payload_bytes, metadata.height)
 
         error ->
           error
       end
     end
 
-    defp import_bundle_file(file_path, payload_bytes) do
+    defp import_bundle_file(file_path, payload_bytes, expected_height) do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       cf_by_name = %{
         "contractstate"            => cf.contractstate,
@@ -636,7 +645,7 @@ defmodule FabricSnapshot do
       result =
         try do
           {count, apply_payload} = import_loop(fd, zctx, rtx, cf_by_name, <<>>, 0, nil, payload_bytes)
-          finalize_import(rtx, cf, apply_payload)
+          finalize_import(rtx, cf, apply_payload, expected_height)
           :ok = RocksDB.transaction_commit(rtx)
           {:ok, count}
         catch
@@ -712,9 +721,9 @@ defmodule FabricSnapshot do
     # (entry blob, by_height*, entry:<hash>:*, tx_filter, cf.tx pointers) is
     # populated identically — no risk of a "weird hole" where one meta field
     # is missing on the synced tip.
-    defp finalize_import(_rtx, _cf, nil),
+    defp finalize_import(_rtx, _cf, nil, _expected_height),
       do: raise "bundle missing __apply__ sidecar"
-    defp finalize_import(rtx, cf, payload) do
+    defp finalize_import(rtx, cf, payload, expected_height) do
       %{
         entry: entry_packed,
         muts_hash: muts_hash,
@@ -726,6 +735,15 @@ defmodule FabricSnapshot do
 
       entry = Entry.unpack_from_db(entry_packed)
       height = entry.header.height
+
+      if height != expected_height,
+        do: raise("bundle anchor height #{height} != signed height #{expected_height}")
+      for key <- ["rooted_tip", "temporal_tip"] do
+        if RocksDB.get(key, %{rtx: rtx, cf: cf.sysconf}) != entry.hash,
+          do: raise("bundle #{key} does not match its anchor")
+      end
+      if RocksDB.get("temporal_height", %{rtx: rtx, cf: cf.sysconf}) != Integer.to_string(height),
+        do: raise("bundle temporal_height does not match its anchor")
 
       verify_rooted_entry!(entry, rtx)
 
@@ -778,18 +796,19 @@ defmodule FabricSnapshot do
   end
 
     defp stream_cf(rtx, cfname, cf, fd, zctx),
-      do: stream_cf_loop(rtx, cfname, cf, "", "", fd, zctx)
+      do: stream_cf_loop(rtx, cfname, cf, "", "", false, fd, zctx)
 
     defp stream_cf_prefix(rtx, cfname, cf, prefix, fd, zctx),
-      do: stream_cf_loop(rtx, cfname, cf, prefix, prefix, fd, zctx)
+      do: stream_cf_loop(rtx, cfname, cf, prefix, "", false, fd, zctx)
 
-    defp stream_cf_loop(rtx, cfname, cf, prefix, cursor, fd, zctx) do
-      {next_cursor, rows} = RDB.transaction_scan_cf(rtx, cf, prefix, cursor, :forward, true, 0, @scan_batch, 0)
-      Enum.each(rows, fn {k, v} -> write_record(fd, zctx, cfname, k, v) end)
+    defp stream_cf_loop(rtx, cfname, cf, prefix, cursor, skip_cursor, fd, zctx) do
+      {next_cursor, rows} = RDB.transaction_scan_cf(rtx, cf, prefix, cursor, :forward, skip_cursor, 0, @scan_batch, 0)
+      # transaction_scan_cf returns suffixes, so restore the prefix on the wire.
+      Enum.each(rows, fn {k, v} -> write_record(fd, zctx, cfname, prefix <> k, v) end)
       cond do
         rows == [] -> :ok
         next_cursor == nil -> :ok
-        true -> stream_cf_loop(rtx, cfname, cf, prefix, next_cursor, fd, zctx)
+        true -> stream_cf_loop(rtx, cfname, cf, prefix, next_cursor, true, fd, zctx)
       end
     end
 
