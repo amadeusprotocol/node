@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { dayWindow, METHODOLOGY } from './store.mjs';
 
-export function createMetricsServer(store) {
+export function createMetricsServer(store, health = () => ({healthy:true,mode:'read_only'})) {
   return createServer((req,res) => {
     const send = (status,data) => {
       res.writeHead(status, {'Content-Type':'application/json', 'Cache-Control':'no-store', 'Access-Control-Allow-Origin':'*', 'X-Content-Type-Options':'nosniff'});
@@ -11,6 +11,11 @@ export function createMetricsServer(store) {
     let url;
     try { url = new URL(req.url,'http://localhost'); }
     catch { return send(400,{ error:'invalid_request' }); }
+    if (url.pathname === '/healthz') {
+      const status = health();
+      const quarantined = !!store.db.prepare('SELECT reason FROM integrity').get();
+      return send(status.healthy && !quarantined ? 200 : 503,{...status,quarantined});
+    }
     if (url.pathname === '/v1/metrics/status') return send(200,store.status());
     if (url.pathname === '/v1/metrics/methodology') return send(200,METHODOLOGY);
     if (url.pathname !== '/v1/metrics/daily') return send(404,{ error:'not_found' });

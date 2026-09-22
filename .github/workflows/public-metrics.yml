@@ -1,0 +1,35 @@
+name: Public activity metrics
+on:
+  push:
+    branches: [main]
+    paths: ['tools/public-metrics/**', 'ex/lib/api/api_metrics.ex', 'ex/test/api_metrics_test.exs', '.github/workflows/public-metrics.yml']
+  pull_request:
+    paths: ['tools/public-metrics/**', 'ex/lib/api/api_metrics.ex', 'ex/test/api_metrics_test.exs', '.github/workflows/public-metrics.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --test tools/public-metrics/metrics.test.mjs tools/public-metrics/runtime.test.mjs
+      - run: docker build -t ama-public-metrics tools/public-metrics
+      - run: docker compose -f tools/public-metrics/compose.yaml config --quiet
+        env:
+          AMA_METRICS_RPC: http://archive.example.invalid:8000
+  exporter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          elixir-version: '1.19'
+      - working-directory: ex
+        run: elixir -r lib/api/api_metrics.ex -r test/test_helper.exs test/api_metrics_test.exs

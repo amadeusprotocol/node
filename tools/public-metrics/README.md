@@ -72,6 +72,50 @@ partial index; pass it consistently for all commands using that database.
 Globally new addresses remain null for partial indices. Never infer first-ever
 activity from a pruned archive or the current balance list.
 
+## Unattended deployment
+
+The container runs the public reader and one serial collector. It retries RPC
+outages with capped exponential backoff, resumes the durable checkpoint, aborts
+in-flight requests on shutdown, and exits on quarantined history. Retries never
+skip blocks. The container is unprivileged, its root filesystem is read-only,
+and the database lives on a persistent volume. Docker health does not imply
+that historical dates have complete time coverage.
+
+From this directory, after deploying the node exporter on an archival RPC:
+
+```sh
+export AMA_METRICS_RPC=https://YOUR-ARCHIVAL-RPC
+docker compose up -d --build
+docker compose logs --tail=50 metrics
+curl --fail http://127.0.0.1:8788/healthz
+```
+
+The host port is loopback-only. Configure the existing HTTPS reverse proxy to
+forward the metrics paths and health check to port 8788. No production hostname
+is assumed. `compose down` preserves the volume; do not use `down --volumes`.
+Pin the tested image digest in the production deployment after building it.
+Rollback code with the previous image while retaining the volume. Never reset
+quarantine to restore a green health check; reconcile the source first.
+
+Without containers, set `AMA_METRICS_DB`, `AMA_METRICS_CHAIN_ID`, and
+`AMA_METRICS_RPC`, then run `node tools/public-metrics/daemon.mjs` under the host
+supervisor. Optional variables: `AMA_METRICS_HOST` (default 127.0.0.1),
+`AMA_METRICS_PORT` (8788), `AMA_METRICS_START_HEIGHT` (0), `AMA_METRICS_BATCH`
+(100, maximum 10000), and `AMA_METRICS_POLL_MS` (10000). Health returns HTTP 503
+until the first successful batch, during source failures, when stale, or when
+quarantined. Full backfill batches yield immediately; caught-up polling waits.
+
+After importing reviewed time evidence and independently replaying three days,
+run the release contract check. Any failed check exits nonzero:
+
+```sh
+node tools/public-metrics/preflight.mjs --rpc https://YOUR-ARCHIVAL-RPC --public https://YOUR-METRICS-ORIGIN --day 2026-01-02 --day 2026-01-03 --day 2026-01-04
+```
+
+Replace the example dates with actual reviewed coverage. This checks exporter
+availability, genesis coverage, service health and complete daily responses;
+it does not independently authenticate timestamps or replace historical replay.
+
 ## Import reviewed time evidence
 
 Each JSONL line contains `chain_id`, `height`, `hash`, and `timestamp` (UTC Unix
@@ -118,7 +162,7 @@ with online backup tooling, not by copying an active main file without its WAL.
 ## Verify
 
 ```sh
-node --test tools/public-metrics/metrics.test.mjs
+node --test tools/public-metrics/metrics.test.mjs tools/public-metrics/runtime.test.mjs
 cd ex
 elixir -r lib/api/api_metrics.ex -r test/test_helper.exs test/api_metrics_test.exs
 ```

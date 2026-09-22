@@ -1,0 +1,25 @@
+services:
+  metrics:
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:8788:8788"
+    volumes:
+      - activity:/data
+    environment:
+      AMA_METRICS_CHAIN_ID: HsFp8cZeFuPxBmJcjvfwYu9MqXZi8fW6XxecLfyHEqEY
+      AMA_METRICS_RPC: ${AMA_METRICS_RPC:?Set a deployed archival metrics RPC URL}
+      AMA_METRICS_BATCH: "100"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  activity:

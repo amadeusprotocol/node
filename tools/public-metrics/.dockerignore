@@ -1,0 +1,4 @@
+*
+!*.mjs
+!Dockerfile
+*test.mjs
