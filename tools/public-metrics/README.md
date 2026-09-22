@@ -36,6 +36,14 @@ have been compared. No historical traction figures are manufactured.
 
 ## Node API
 
+Block exports also include nullable `node_seen_time_ms` (Unix milliseconds)
+and `node_seen_time_basis: "local_database_insertion"`. This exposes the
+existing DB.Entry.seentime value for historical provenance audits. It is local
+node insertion time, including blocks inserted during sync; it is not a
+consensus timestamp or proof of original reception. Missing values stay null.
+The collector does not use it for daily attribution. `timestamp` stays null
+until an independently reviewed time source supports the existing import flow.
+
 Deploy the accompanying API.Metrics module and HTTP routes on an archival node:
 
 - `GET /api/chain/metrics/status`: chain ID, rooted height, pruning boundary.

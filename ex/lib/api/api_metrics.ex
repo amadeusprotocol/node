@@ -40,6 +40,8 @@ defmodule API.Metrics do
               block: %{height: height, hash: source.encode(hash),
                 previous_hash: source.encode(entry.header.prev_hash), finalized: true,
                 timestamp: nil, timestamp_basis: :unavailable,
+                node_seen_time_ms: source.seen_time(hash),
+                node_seen_time_basis: :local_database_insertion,
                 transaction_count: length(transactions), transactions: transactions}}
         else
             {:error, reason} -> %{error: reason}
@@ -90,6 +92,7 @@ defmodule API.Metrics.Source do
     def pruned_below_height(), do: DB.Chain.pruned_below_height()
     def canonical_hash(height), do: DB.Entry.by_height_in_main_chain(height)
     def entry(hash), do: DB.Entry.by_hash(hash)
+    def seen_time(hash), do: DB.Entry.seentime(hash)
     def transaction(hash), do: DB.Chain.tx(hash)
     def unpack(tx), do: TX.unpack(tx)
     def encode(bytes), do: Base58.encode(bytes)

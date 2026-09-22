@@ -6,6 +6,7 @@ defmodule API.MetricsTest.Source do
   def encode(bytes), do: bytes
   def unpack(tx), do: tx
   def entry(hash), do: Process.get({:entry, hash})
+  def seen_time(hash), do: Process.get({:seen, hash})
   def transaction(hash), do: Process.get({:tx, hash})
 end
 
@@ -36,6 +37,16 @@ defmodule API.MetricsTest do
     Process.put(:pruned, 0)
     Process.put({:hash, 1}, nil)
     assert API.Metrics.block(1, Source).error == :history_missing
+  end
+
+  test "exposes stored insertion time separately without upgrading its trust" do
+    assert API.Metrics.block(1, Source).block.node_seen_time_ms == nil
+    Process.put({:seen, "block1"}, 1_750_000_000_123)
+    block = API.Metrics.block(1, Source).block
+    assert block.node_seen_time_ms == 1_750_000_000_123
+    assert block.node_seen_time_basis == :local_database_insertion
+    assert block.timestamp == nil
+    assert block.timestamp_basis == :unavailable
   end
 
   test "does not confuse unknown receipts or another fork with failures" do
