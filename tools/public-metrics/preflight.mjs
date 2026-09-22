@@ -1,8 +1,10 @@
 import { parseArgs } from 'node:util';
 import { getJson } from './collector.mjs';
 import { dayWindow, METHODOLOGY } from './store.mjs';
+import { replayWithDiskIndex } from './replay.mjs';
 
-const {values} = parseArgs({options:{rpc:{type:'string'},public:{type:'string'},day:{type:'string',multiple:true}}});
+const {values} = parseArgs({options:{rpc:{type:'string'},public:{type:'string'},day:{type:'string',multiple:true},
+  replay:{type:'boolean',default:false},'max-blocks':{type:'string',default:'10000'}}});
 const chainId='HsFp8cZeFuPxBmJcjvfwYu9MqXZi8fW6XxecLfyHEqEY';
 const checks=[];
 async function check(name,fn) {
@@ -47,6 +49,12 @@ await check('three_complete_days',async()=>{
     requireThat(row.source?.time_sources?.length>0,`${date}: missing time evidence`);
   }
 });
-console.log(JSON.stringify({checks,ready:checks.every(c=>c.status==='pass'),
-  note:'Contract checks do not replace independent replay or authenticate external timestamps.'},null,2));
+let replay=null;
+if (checks.every(c=>c.status==='pass')) await check('independent_replay',async()=>{
+  requireThat(values.replay,'Use --replay to verify source evidence before reporting readiness');
+  replay=await replayWithDiskIndex({rpc:values.rpc,publicUrl:values.public,days:values.day,
+    maxBlocks:Number(values['max-blocks']),onProgress:p=>console.error(JSON.stringify({event:'replay',...p}))});
+});
+console.log(JSON.stringify({checks,ready:checks.every(c=>c.status==='pass'),replay,
+  note:'Readiness includes source replay. External UTC methodology and DefiLlama acceptance still require review.'},null,2));
 if(checks.some(c=>c.status==='fail'))process.exitCode=1;

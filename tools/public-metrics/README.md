@@ -105,16 +105,43 @@ supervisor. Optional variables: `AMA_METRICS_HOST` (default 127.0.0.1),
 until the first successful batch, during source failures, when stale, or when
 quarantined. Full backfill batches yield immediately; caught-up polling waits.
 
-After importing reviewed time evidence and independently replaying three days,
-run the release contract check. Any failed check exits nonzero:
+After importing reviewed time evidence, run the release check with independent
+replay enabled. Any failed check exits nonzero:
 
 ```sh
-node tools/public-metrics/preflight.mjs --rpc https://YOUR-ARCHIVAL-RPC --public https://YOUR-METRICS-ORIGIN --day 2026-01-02 --day 2026-01-03 --day 2026-01-04
+node tools/public-metrics/preflight.mjs --rpc https://YOUR-ARCHIVAL-RPC --public https://YOUR-METRICS-ORIGIN --day 2026-01-02 --day 2026-01-03 --day 2026-01-04 --replay --max-blocks 10000
 ```
 
 Replace the example dates with actual reviewed coverage. This checks exporter
-availability, genesis coverage, service health and complete daily responses;
-it does not independently authenticate timestamps or replace historical replay.
+availability, genesis coverage, service health and complete daily responses,
+then recomputes counts from the canonical RPC and published timestamp files.
+Omitting `--replay` cannot produce `ready: true`. Readiness remains conditional
+on human review of the external UTC methodology and DefiLlama acceptance.
+
+The standalone replayer can check one or more days and emit a JSON evidence
+report, without reading the collector database or using its SQL aggregation:
+
+```sh
+node tools/public-metrics/verify-days.mjs --rpc https://YOUR-ARCHIVAL-RPC --public https://YOUR-METRICS-ORIGIN --day 2026-01-02 --max-blocks 10000 > replay-report.json
+```
+
+Replay reads canonical blocks **from genesis**, once for all selected days, to
+verify first-ever successful signers. It checks block continuity, receipt
+completeness, archive SHA-256, timestamp-to-block mappings, daily boundaries,
+per-day provenance, all five counts, and the final checkpoint. It includes
+failed transactions in transaction totals but excludes failed-only signers
+from active/new addresses. It trusts the archival RPC for canonical execution
+evidence; it does not implement independent consensus or signature validation.
+
+The default 10,000-block budget prevents accidental full-history scans. For
+real history, deliberately set it to at least the final boundary height plus
+one and use a dedicated archive. First-signer membership uses a disposable
+SQLite index in the system temp directory; daily active signer sets use memory.
+Ensure sufficient temp disk and memory. Progress goes to stderr, the report to
+stdout. An interrupted replay restarts from genesis; no partial success report
+is emitted. Published timestamp files must be at most 64 MiB each, with at most
+128 distinct files per invocation; split/review large archives accordingly.
+SHA pinning verifies bytes, not the truth of a publisher's UTC assertions.
 
 ## Import reviewed time evidence
 
@@ -162,7 +189,7 @@ with online backup tooling, not by copying an active main file without its WAL.
 ## Verify
 
 ```sh
-node --test tools/public-metrics/metrics.test.mjs tools/public-metrics/runtime.test.mjs
+node --test tools/public-metrics/metrics.test.mjs tools/public-metrics/runtime.test.mjs tools/public-metrics/replay.test.mjs
 cd ex
 elixir -r lib/api/api_metrics.ex -r test/test_helper.exs test/api_metrics_test.exs
 ```

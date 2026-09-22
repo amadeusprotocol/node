@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: node --test tools/public-metrics/metrics.test.mjs tools/public-metrics/runtime.test.mjs
+      - run: node --test tools/public-metrics/metrics.test.mjs tools/public-metrics/runtime.test.mjs tools/public-metrics/replay.test.mjs
       - run: docker build -t ama-public-metrics tools/public-metrics
       - run: docker compose -f tools/public-metrics/compose.yaml config --quiet
         env:
