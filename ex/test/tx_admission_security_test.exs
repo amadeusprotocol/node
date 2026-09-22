@@ -265,16 +265,30 @@ defmodule TXAdmissionSecurityTest do
       end)
 
       assert {:continue, continuation, 2} = TXPool.purge_stale(:start, 2)
-      assert TXPool.signer_reservation(signer).count == 1
+      # The first pass only removes stale reservations. Balance eviction starts
+      # after that pass, including when the pool spans multiple batches.
+      assert TXPool.signer_reservation(signer).count == 3
+      assert {:continue, continuation, 2} = TXPool.purge_stale(continuation, 2)
+      assert TXPool.signer_reservation(signer).count == 2
 
       remaining_nonces =
         txus
         |> Enum.filter(fn txu -> :ets.member(TXPool, {txu.tx.nonce, txu.hash}) end)
         |> Enum.map(& &1.tx.nonce)
 
-      assert remaining_nonces == [base_nonce + 1]
+      assert remaining_nonces == [base_nonce + 1, base_nonce + 2]
 
-      assert {:done, 1} = TXPool.purge_stale(continuation, 2)
+      result = Enum.reduce_while(1..10, {continuation, 0}, fn _, {cursor, total} ->
+        case TXPool.purge_stale(cursor, 2) do
+          {:continue, next, processed} ->
+            assert processed <= 2
+            {:cont, {next, total + processed}}
+          {:done, processed} ->
+            assert processed <= 2
+            {:halt, {:done, total + processed}}
+        end
+      end)
+      assert result == {:done, 2}
       assert TXPool.signer_reservation(signer) == %{count: 0, reserved_ama: 0}
     after
       TXPool.delete_packed(txus)

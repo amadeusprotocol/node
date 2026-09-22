@@ -213,22 +213,39 @@ defmodule TXPool do
   def purge_stale(continuation, limit)
       when is_integer(limit) and limit > 0 do
     cur_epoch = DB.Chain.epoch()
+    segment_vr_hash = DB.Chain.segment_vr_hash()
+    {phase, cursor} = if continuation == :start, do: {:stale, :start}, else: continuation
+    purge_pass(phase, cursor, limit, 0, cur_epoch, segment_vr_hash)
+  end
 
+  # Finish removing stale reservations across the entire pool before trimming
+  # newest transactions for balance. The phase travels with the bounded cursor.
+  defp purge_pass(phase, continuation, 0, processed, _epoch, _segment) do
+    {:continue, {phase, continuation}, processed}
+  end
+
+  defp purge_pass(phase, continuation, limit, processed, cur_epoch, segment_vr_hash) do
     case select_purge_batch(continuation, limit) do
       :"$end_of_table" ->
-        {:done, 0}
+        finish_purge_pass(phase, limit, processed, cur_epoch, segment_vr_hash)
 
       {entries, next_continuation} ->
-        purge_entries(entries, cur_epoch)
-        processed = length(entries)
+        purge_entries(entries, cur_epoch, segment_vr_hash, phase)
+        count = length(entries)
 
         if next_continuation == :"$end_of_table" do
-          {:done, processed}
+          finish_purge_pass(phase, limit - count, processed + count, cur_epoch, segment_vr_hash)
         else
-          {:continue, next_continuation, processed}
+          {:continue, {phase, next_continuation}, processed + count}
         end
     end
   end
+
+  defp finish_purge_pass(:stale, limit, processed, epoch, segment) do
+    purge_pass(:balance, :start, limit, processed, epoch, segment)
+  end
+
+  defp finish_purge_pass(:balance, _limit, processed, _epoch, _segment), do: {:done, processed}
 
   defp select_purge_batch(:start, limit) do
     :ets.select_reverse(TXPool, @purge_match_spec, limit)
@@ -238,21 +255,25 @@ defmodule TXPool do
     :ets.select(continuation)
   end
 
-  defp purge_entries(entries, cur_epoch) do
+  defp purge_entries(entries, cur_epoch, segment_vr_hash, phase) do
     Enum.reduce(entries, %{}, fn {key, txu, _tx_bytes, _reserved_ama}, balances ->
       signer = txu.tx.signer
 
-      if is_stale(txu, cur_epoch) do
+      if is_stale(txu, cur_epoch, segment_vr_hash) do
         delete_key(key)
         balances
       else
-        balance = Map.get_lazy(balances, signer, fn -> DB.Chain.balance(signer) end)
+        if phase == :balance do
+          balance = Map.get_lazy(balances, signer, fn -> DB.Chain.balance(signer) end)
 
-        if signer_reservation(signer).reserved_ama > balance do
-          delete_key(key)
+          if signer_reservation(signer).reserved_ama > balance do
+            delete_key(key)
+          end
+
+          Map.put(balances, signer, balance)
+        else
+          balances
         end
-
-        Map.put(balances, signer, balance)
       end
     end)
 
@@ -260,6 +281,10 @@ defmodule TXPool do
   end
 
   def is_stale(txu, cur_epoch) do
+    is_stale(txu, cur_epoch, DB.Chain.segment_vr_hash())
+  end
+
+  defp is_stale(txu, cur_epoch, segment_vr_hash) do
     chainNonce = DB.Chain.nonce(txu.tx.signer)
     nonceValid = !chainNonce or txu.tx.nonce > chainNonce
 
@@ -268,7 +293,8 @@ defmodule TXPool do
     solGateOk =
       if action.function == "submit_sol" do
         case action.args do
-          [<<sol_epoch::32-little, _::binary>> | _] -> cur_epoch == sol_epoch
+          [<<sol_epoch::32-little, sol_segment::32-binary, _::binary>> = sol | _] ->
+            cur_epoch == sol_epoch and sol_segment == segment_vr_hash and byte_size(sol) == BIC.Sol.size()
           _ -> false
         end
       else
