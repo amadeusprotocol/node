@@ -4,7 +4,8 @@ defmodule StateBundleSnapshotTest do
   setup do
     old_db = :persistent_term.get({:rocksdb, Fabric})
     old_latest = FabricSnapshot.latest_statepeerdownload()
-    saved_env = for key <- [:keys, :keys_all_pks, :testnet], do: {key, Application.fetch_env!(:ama, key)}
+    saved_env = for key <- [:keys, :keys_all_pks, :testnet, :statepeerdownload, :rpc_events],
+      do: {key, Application.fetch_env!(:ama, key)}
     first = %{seed: Application.fetch_env!(:ama, :trainer_sk), pk: Application.fetch_env!(:ama, :trainer_pk),
       pop: Application.fetch_env!(:ama, :trainer_pop)}
     keys = [first | for _ <- 1..9 do
@@ -22,22 +23,76 @@ defmodule StateBundleSnapshotTest do
     folder = Path.join(System.tmp_dir!(), "bundle-snapshot-#{System.unique_integer([:positive])}")
     File.mkdir_p!(folder)
     path = FabricSnapshot.bundle_path(1)
-    previous_file = File.read(path)
+    previous_files = for h <- [1, 2], do: {FabricSnapshot.bundle_path(h), File.read(FabricSnapshot.bundle_path(h))}
     on_exit(fn ->
       :persistent_term.put({:rocksdb, Fabric}, old_db)
       if old_latest, do: :persistent_term.put(FabricSnapshot.bundle_latest_key(), old_latest),
         else: :persistent_term.erase(FabricSnapshot.bundle_latest_key())
       Enum.each(saved_env, fn {key, value} -> Application.put_env(:ama, key, value) end)
-      case previous_file do
-        {:ok, bytes} -> File.write!(path, bytes)
-        _ -> File.rm(path)
+      for {bundle_path, previous_file} <- previous_files do
+        case previous_file do
+          {:ok, bytes} -> File.write!(bundle_path, bytes)
+          _ -> File.rm(bundle_path)
+        end
+        File.rm(bundle_path <> ".tmp")
       end
-      File.rm(path <> ".tmp")
       File.rm_rf!(folder)
     end)
     use_database(Path.join(folder, "source"))
     EntryGenesis.generate_testnet()
     {:ok, keys: keys, folder: folder, path: path}
+  end
+
+  test "rooted alignment captures the bundle before the same tick applies another block", ctx do
+    Application.put_env(:ama, :statepeerdownload, true)
+    Application.put_env(:ama, :rpc_events, false)
+    :persistent_term.erase(FabricSnapshot.bundle_latest_key())
+    previous_syncing = :persistent_term.get(FabricSyncing, nil)
+    :persistent_term.put(FabricSyncing, :atomics.new(1, []))
+    on_exit(fn ->
+      if previous_syncing, do: :persistent_term.put(FabricSyncing, previous_syncing),
+        else: :persistent_term.erase(FabricSyncing)
+    end)
+
+    apply_next(ctx.keys, 1)
+    anchor = next_entry(ctx.keys, 2)
+    assert %{error: :ok} = FabricGen.apply_entry(anchor)
+    %{db: db, cf: cf} = source = :persistent_term.get({:rocksdb, Fabric})
+    anchor_state = RocksDB.get_prefix("", %{db: db, cf: cf.contractstate})
+    anchor_tree = RocksDB.get_prefix("", %{db: db, cf: cf.contractstate_tree_hbsmt})
+    assert DB.Chain.rooted_height() == 1
+    assert DB.Chain.height() == 2
+    # An unaligned boot/manual request must wait; the rooting transition below
+    # will supply the signal. No periodic bundle worker is started.
+    assert FabricSnapshot.start_bundle_worker() == :skipped
+    assert FabricSnapshot.latest_statepeerdownload() == nil
+    following = next_entry(ctx.keys, 3)
+    assert :ok = DB.Entry.insert(following)
+
+    # Keep this tick from producing a fourth block or attesting the third.
+    Application.put_env(:ama, :keys, [])
+    state = %{bundle_worker: nil, bundle_last_attempt: 0}
+    next_state = FabricGen.tick(state)
+    assert {worker, ref} = next_state.bundle_worker
+    on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
+    assert DB.Chain.rooted_tip() == anchor.hash
+    assert DB.Chain.tip() == following.hash
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 5_000
+    assert %{height: 2, path: path} = FabricSnapshot.latest_statepeerdownload()
+    assert {:ok, %{height: 2}, _} = FabricSnapshot.verify_bundle_file(path)
+
+    use_database(Path.join(ctx.folder, "event-imported"))
+    assert {:ok, _} = FabricSnapshot.import_bundle_file(path)
+    %{db: imported_db, cf: imported_cf} = :persistent_term.get({:rocksdb, Fabric})
+    assert DB.Chain.tip() == anchor.hash
+    assert RocksDB.get_prefix("", %{db: imported_db, cf: imported_cf.contractstate}) == anchor_state
+    assert RocksDB.get_prefix("", %{db: imported_db, cf: imported_cf.contractstate_tree_hbsmt}) == anchor_tree
+
+    # Being aligned without a new rooting event does not poll/start a builder.
+    :persistent_term.erase(FabricSnapshot.bundle_latest_key())
+    assert FabricGen.tick(state) == state
+    assert FabricSnapshot.latest_statepeerdownload() == nil
+    :persistent_term.put({:rocksdb, Fabric}, source)
   end
 
   test "a frozen bundle survives advancing source state and replays subsequent blocks identically", ctx do
@@ -117,14 +172,18 @@ defmodule StateBundleSnapshotTest do
   end
 
   defp apply_next(keys, nonce) do
-    parent = DB.Chain.tip_entry()
-    pk = DB.Chain.validator_for_height(parent.header.height + 1)
-    proposer = Enum.find(keys, &(&1.pk == pk))
-    tx = TX.build(hd(keys).seed, "Coin", "transfer", [Enum.at(keys, 1).pk, "1000000000", "AMA"], nonce)
-    entry = Entry.sign(proposer.seed, Entry.build_next(proposer.seed, parent, [tx]))
+    entry = next_entry(keys, nonce)
     assert %{error: :ok} = result = FabricGen.apply_entry(entry)
     %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
     RocksDB.put("rooted_tip", entry.hash, %{db: db, cf: cf.sysconf})
     {entry, result}
+  end
+
+  defp next_entry(keys, nonce) do
+    parent = DB.Chain.tip_entry()
+    pk = DB.Chain.validator_for_height(parent.header.height + 1)
+    proposer = Enum.find(keys, &(&1.pk == pk))
+    tx = TX.build(hd(keys).seed, "Coin", "transfer", [Enum.at(keys, 1).pk, "1000000000", "AMA"], nonce)
+    Entry.sign(proposer.seed, Entry.build_next(proposer.seed, parent, [tx]))
   end
 end

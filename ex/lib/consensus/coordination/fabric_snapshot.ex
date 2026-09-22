@@ -62,8 +62,8 @@ defmodule FabricSnapshot do
     #     the highest height — HTTP queries work immediately on restart;
     #   * if no current-epoch bundle exists, attempt one at boot. The
     #     attempt is gated on temporal_tip == rooted_tip (same alignment
-    #     check as the FabricGen tick path); if the chain isn't quiescent
-    #     yet, skip and let FabricGen retry on its tick.
+    #     check as the FabricGen rooting path); if the chain isn't aligned
+    #     yet, wait for FabricGen's next rooted-alignment event.
     # No-op when STATEPEERDOWNLOAD is off.
     def check_or_build_statepeerdownload() do
       if Application.fetch_env!(:ama, :statepeerdownload) do
@@ -100,7 +100,7 @@ defmodule FabricSnapshot do
           # snapshot when temporal_tip == rooted_tip inside the frozen rtx
           # (otherwise contractstate reflects entries above rooted and the
           # bundle would be self-inconsistent). If the guard skips here, the
-          # FabricGen tick will retry until alignment is reached.
+          # FabricGen will call the builder when rooting next reaches alignment.
           true ->
             cond do
               existing_h == nil ->
@@ -108,11 +108,14 @@ defmodule FabricSnapshot do
               true ->
                 IO.puts "FabricSnapshot: bundle at height #{existing_h} (epoch #{existing_epoch}) is behind current epoch #{cur_epoch}, rebuilding in background (rooted #{rooted}).."
             end
-            #build in the background so node services (RPC included) come up
-            #immediately — a large state takes hours to bundle. the spawned
-            #builder holds the bundle lock, so it can never overlap the
-            #FabricGen tick builder on the same .tmp path
-            spawn(fn -> try_build_bundle(:boot) end)
+            # Pin the aligned view before node services can apply more entries.
+            # Only the writer runs in the background. Boot does not own a
+            # GenServer worker slot, so discard its monitor after spawning.
+            case start_bundle_worker() do
+              {:ok, {_pid, ref}} -> Process.demonitor(ref, [:flush])
+              :skipped -> IO.puts "FabricSnapshot: bundle deferred (boot) — waiting for rooted-tip alignment"
+              error -> IO.inspect({:bundle_snapshot_open_failed, :boot, error})
+            end
             :ok
         end
       end
@@ -123,9 +126,32 @@ defmodule FabricSnapshot do
   # that outlives a restarted FabricGen keeps it until it finishes or dies
   # (:global releases a dead holder's locks), and any replacement builder
   # aborts instead of racing the same .tmp path. 0 retries: busy -> skip,
-  # the caller's periodic path retries later.
+  # a later rooted-alignment event can retry.
   def try_build_bundle(reason \\ :tick) do
-    case :global.trans({{__MODULE__, :bundle_build}, self()}, fn -> build_bundle_locked(reason) end, [node()], 0) do
+    with_bundle_lock(reason, fn -> build_bundle_locked(reason) end)
+  end
+
+  # Called synchronously by FabricGen between rooting and applying entries.
+  # Only the cheap snapshot/anchor reads run here; compression stays in the
+  # monitored worker, which owns the single-flight lock until it exits.
+  def start_bundle_worker() do
+    case open_bundle_snapshot() do
+      {:ok, rtx, height} ->
+        worker = spawn_monitor(fn ->
+          case with_bundle_lock(:tick, fn -> write_statepeerdownload_bundle(rtx, height) end) do
+            :aborted -> RDB.transaction_rollback(rtx)
+            _ -> :ok
+          end
+        end)
+        {:ok, worker}
+
+      {:skipped, _reason} -> :skipped
+      error -> error
+    end
+  end
+
+  defp with_bundle_lock(reason, fun) do
+    case :global.trans({{__MODULE__, :bundle_build}, self()}, fun, [node()], 0) do
       :aborted ->
         IO.puts "FabricSnapshot: bundle build already running, skipped (#{reason})"
         :aborted
@@ -139,6 +165,24 @@ defmodule FabricSnapshot do
   # rooted_tip inside the frozen rtx, else contractstate reflects entries
   # above rooted and the bundle would be self-inconsistent.
   defp build_bundle_locked(reason) do
+    case open_bundle_snapshot() do
+      {:ok, rtx, height} ->
+        case write_statepeerdownload_bundle(rtx, height) do
+          :ok -> {:ok, height}
+          error -> error
+        end
+
+      {:skipped, why} ->
+        IO.puts "FabricSnapshot: bundle skipped (#{reason}) — #{why}; will retry"
+        :skipped
+
+      err ->
+        IO.inspect {:bundle_snapshot_open_failed, reason, err}
+        :error
+    end
+  end
+
+  defp open_bundle_snapshot() do
     %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
     case RDB.transaction_with_snapshot(db) do
       {:ok, rtx} ->
@@ -147,34 +191,26 @@ defmodule FabricSnapshot do
         cond do
           !is_binary(r) or !is_binary(t) ->
             RDB.transaction_rollback(rtx)
-            IO.puts "FabricSnapshot: bundle skipped (#{reason}) — sysconf incomplete; will retry"
-            :skipped
+            {:skipped, "sysconf incomplete"}
 
           r != t ->
             RDB.transaction_rollback(rtx)
-            IO.puts "FabricSnapshot: bundle skipped (#{reason}) — temporal_tip ahead of rooted_tip; will retry"
-            :skipped
+            {:skipped, "temporal_tip ahead of rooted_tip"}
 
           true ->
             case RDB.transaction_get_cf(rtx, cf.entry, r) do
               {:ok, entry_blob} when is_binary(entry_blob) ->
                 entry = Entry.unpack_from_db(entry_blob)
                 height = entry.header.height
-                case write_statepeerdownload_bundle(rtx, height) do
-                  :ok -> {:ok, height}
-                  error -> error
-                end
+                {:ok, rtx, height}
 
               _ ->
                 RDB.transaction_rollback(rtx)
-                IO.puts "FabricSnapshot: bundle skipped (#{reason}) — rooted entry blob missing; will retry"
-                :skipped
+                {:skipped, "rooted entry blob missing"}
             end
         end
 
-      err ->
-        IO.inspect {:bundle_snapshot_open_failed, reason, err}
-        :error
+      err -> err
     end
   end
 

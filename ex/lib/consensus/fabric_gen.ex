@@ -51,9 +51,8 @@ defmodule FabricGen do
   def tick(state) do
     :persistent_term.get(FabricSyncing) |> :atomics.put(1, 1)
 
-    proc_consensus()
+    state = proc_consensus(fn -> maybe_produce_state_bundle(state) end) || state
     proc_entries()
-    state = maybe_produce_state_bundle(state)
     tick_slot(state)
 
     :persistent_term.get(FabricSyncing) |> :atomics.put(1, 0)
@@ -62,19 +61,18 @@ defmodule FabricGen do
 
   # Starts at most one state-peer-download bundle worker. One of
   # these three trigger windows must be open for an attempt to fire; each
-  # attempt then goes through FabricSnapshot.try_build_bundle — a :global
+  # attempt then goes through FabricSnapshot.start_bundle_worker — a :global
   # bundle lock held by the worker itself (so a builder surviving this gen's
   # 3h restart can never overlap a replacement's on the same .tmp path) plus
-  # the rtx-consistent check temporal_tip == rooted_tip, so a bundle only
-  # lands when the chain is quiescent enough that contractstate matches the
-  # rooted anchor:
+  # the rtx-consistent check temporal_tip == rooted_tip. Capture that view
+  # on the rooting transition, before applying more entries; opening the snapshot
+  # later in the worker would race the next apply and miss this window:
   #
-  #   * BOOTSTRAP     — no bundle anywhere yet (every tick retries until one
-  #                     lands).
+  #   * BOOTSTRAP     — no bundle anywhere yet.
   #   * VALIDATOR     — we hold a key in the current epoch's validator set
   #                     and the rooted_tip was signed by one of our keys.
   #   * NON-VALIDATOR — rooted is past offset @bundle_target_offset into the
-  #                     current epoch (every tick retries inside the window).
+  #                     current epoch.
   #
   # Only one bundle per epoch is produced — already_have_bundle_for_epoch?
   # short-circuits subsequent ticks once a bundle for this epoch is on disk.
@@ -107,8 +105,17 @@ defmodule FabricGen do
   defp maybe_produce_state_bundle(state), do: state
 
   defp start_bundle_worker(state) do
-    {worker, ref} = spawn_monitor(fn -> FabricSnapshot.try_build_bundle(:tick) end)
-    %{state | bundle_worker: {worker, ref}, bundle_last_attempt: :os.system_time(1000)}
+    case FabricSnapshot.start_bundle_worker() do
+      {:ok, worker} ->
+        %{state | bundle_worker: worker, bundle_last_attempt: :os.system_time(1000)}
+
+      :skipped ->
+        # Wait for the next rooted-alignment event; no periodic bundle polling.
+        state
+
+      _ ->
+        %{state | bundle_last_attempt: :os.system_time(1000)}
+    end
   end
 
   defp already_have_bundle_for_epoch?(rooted) do
@@ -173,21 +180,19 @@ defmodule FabricGen do
     |> Enum.sort_by(fn {entry, mut_hash, score} -> {-score, entry.header.slot, !entry[:mask], entry.hash} end)
   end
 
-  def proc_consensus() do
+  def proc_consensus(), do: proc_consensus(fn -> nil end)
+
+  defp proc_consensus(on_aligned) do
     entry_root = DB.Chain.rooted_tip_entry()
     entry_temp = DB.Chain.tip_entry()
     height_root = entry_root.header.height
     height_temp = entry_temp.header.height
     if height_root < height_temp do
-      proc_consensus_1(height_root+1)
-      if DB.Chain.rooted_tip() != entry_root.hash do
-        #  event_consensus
-        #  NodeGen.broadcast_tip()
-      end
+      proc_consensus_1(height_root+1, on_aligned)
     end
   end
 
-  defp proc_consensus_1(next_height) do
+  defp proc_consensus_1(next_height, on_aligned) do
     next_entries = best_entry_for_height(next_height)
     #IO.inspect {next_entries, next_height}
     case List.first(next_entries) do
@@ -202,7 +207,7 @@ defmodule FabricGen do
                 rewind_to_hash = DB.Entry.by_height_in_main_chain(best_entry.header.height - 1)
                 IO.puts "softfork: rewind to entry #{Base58.encode(rewind_to_hash)}, height #{best_entry.header.height - 1}"
                 true = DB.Chain.rewind(rewind_to_hash)
-                proc_consensus()
+                proc_consensus(on_aligned)
 
               muts_hash != my_muts_hash ->
                 height = best_entry.header.height
@@ -219,7 +224,11 @@ defmodule FabricGen do
                 %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
                 RocksDB.put("rooted_tip", best_entry.hash, %{db: db, cf: cf.sysconf})
                 ReplicaGen.flush_heartbeat()
-                proc_consensus()
+                if best_entry.hash == DB.Chain.tip() do
+                  on_aligned.()
+                else
+                  proc_consensus(on_aligned)
+                end
             end
         _ -> nil
     end
