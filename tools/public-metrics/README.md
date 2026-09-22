@@ -36,6 +36,18 @@ have been compared. No historical traction figures are manufactured.
 
 ## Node API
 
+Audit stored times after deploying the diagnostic exporter:
+
+```sh
+node tools/public-metrics/audit-seen-times.mjs --rpc https://mainnet-rpc.ama.one --height 0 --height 30842485 --height 41200009 > seen-time-audit.json
+```
+
+This read-only command accepts up to 100 explicit heights. It distinguishes
+undeployed fields, absent stored times, invalid/future times and backwards
+observations. Nonzero exit means diagnostic samples are unavailable or suspect.
+Even a clean sample leaves `historical_utc_verified: false`: original archive
+provenance and sync/rebuild history still need review. It never imports times.
+
 Block exports also include nullable `node_seen_time_ms` (Unix milliseconds)
 and `node_seen_time_basis: "local_database_insertion"`. This exposes the
 existing DB.Entry.seentime value for historical provenance audits. It is local
