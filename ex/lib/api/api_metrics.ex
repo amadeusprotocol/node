@@ -75,7 +75,18 @@ defmodule API.Metrics do
 end
 
 defmodule API.Metrics.Source do
-    def rooted_height(), do: DB.Chain.rooted_height()
+    def rooted_height() do
+        # A new archive may have no root yet. The generic chain getter passes
+        # nil to RocksDB in that case; metrics must report unavailable finality.
+        case DB.Chain.rooted_tip() do
+            nil -> nil
+            hash ->
+                case DB.Entry.by_hash(hash) do
+                    %{header: %{height: height}} -> height
+                    _ -> nil
+                end
+        end
+    end
     def pruned_below_height(), do: DB.Chain.pruned_below_height()
     def canonical_hash(height), do: DB.Entry.by_height_in_main_chain(height)
     def entry(hash), do: DB.Entry.by_hash(hash)

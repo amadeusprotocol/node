@@ -173,3 +173,15 @@ GET-only smoke test. Independently replay at least three real historical days:
 fetch the returned height ranges, join the pinned timestamp archive, recompute
 transaction totals and distinct successful signers. First-time signers require
 preceding history as well. Verify zero and incomplete cases before listing.
+
+After a full native `mix compile`, run the real-storage smoke check from `ex`
+with a **new** disposable directory ending in `/metrics-native-smoke`:
+
+```sh
+OFFLINE=true AUTOUPDATE=false AMA_METRICS_NATIVE_SMOKE=1 WORKFOLDER=/tmp/ama-metrics-check/metrics-native-smoke mix run --no-start test/api_metrics_native_smoke.exs
+```
+
+It refuses an existing database and starts no node services. It checks empty
+root handling, canonical genesis export, finality and pruning against actual
+RocksDB. Its explicit fixture finality marker does not validate live consensus
+or replace the archival-node smoke test.

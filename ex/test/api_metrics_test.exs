@@ -27,6 +27,9 @@ defmodule API.MetricsTest do
   end
 
   test "rejects unrooted, pruned and missing history" do
+    Process.put(:rooted, nil)
+    assert API.Metrics.block(0, Source).error == :not_finalized
+    Process.put(:rooted, 2)
     assert API.Metrics.block(3, Source).error == :not_finalized
     Process.put(:pruned, 2)
     assert API.Metrics.block(1, Source).error == :history_pruned
