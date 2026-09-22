@@ -1,0 +1,128 @@
+diff --git a/helpers/chains.ts b/helpers/chains.ts
+index 59b3a1c..148a6b2 100644
+--- a/helpers/chains.ts
++++ b/helpers/chains.ts
+@@ -1,5 +1,6 @@
+ // Use
+ export enum CHAIN {
++  AMADEUS = "amadeus",
+   CHAIN_GLOBAL = "chain_global", // for some adapters aggregate data across all chains is not the sum of individual chains, so we need a separate identifier for the aggregate data
+   BITCOIN_SV = "bsv",
+   PACASWAP = "pacaswap",
+diff --git a/users/chains.ts b/users/chains.ts
+index abbe458..a9b7a3d 100644
+--- a/users/chains.ts
++++ b/users/chains.ts
+@@ -6,6 +6,7 @@ import { createEvmChainUsersFetcher, EVM_CHAIN_METRIC_CONFIGS } from "../helpers
+ import { blockscoutStatsExports } from "./utils/blockscoutStats";
+ import { routescanStatsExports } from "./utils/routescanStats";
+ import { subscanStatsExports } from "./utils/subscanStats";
++import { amadeusUsersConfig } from "./utils/amadeus";
+
+ async function solanaUsers(start: number, end: number) {
+     const queryId = await queryAllium(`select count(DISTINCT signer) as usercount, count(txn_id) as txcount from solana.raw.transactions where BLOCK_TIMESTAMP > TO_TIMESTAMP_NTZ(${start}) AND BLOCK_TIMESTAMP < TO_TIMESTAMP_NTZ(${end}) and success=true and is_voting=false`)
+@@ -82,6 +83,7 @@ type ChainUserConfig = {
+     protocolType?: ProtocolType,
+     start?: string,
+     deadFrom?: string,
++    methodology?: Record<string, string>,
+     getUsers?: (start: number, end: number) => Promise<any>,
+     getNewUsers?: (start: number, end: number) => Promise<any>,
+ }
+@@ -217,4 +219,4 @@ export default [
+     type: "chain",
+     chain: chain.chain,
+     getUsers: (start: number, end: number) => chain.getUsers(start, end).then(u => typeof u === "object" ? u : ({ all: { users: u } })),
+-} as ChainUserConfig)).concat(alliumExports, blockscoutStatsExports, routescanStatsExports, subscanStatsExports, evmChainMetricExports)
++} as ChainUserConfig)).concat(alliumExports, blockscoutStatsExports, routescanStatsExports, subscanStatsExports, evmChainMetricExports, [amadeusUsersConfig])
+diff --git a/users/list.ts b/users/list.ts
+index 4d9d6ff..94756e1 100644
+--- a/users/list.ts
++++ b/users/list.ts
+@@ -117,6 +117,7 @@ function getChainActiveUsersAdapter(item: typeof chains[0]): Adapter {
+     chains: [item.chain],
+     fetch: fetch as any,
+     protocolType: ProtocolType.CHAIN,
++    methodology: item.methodology,
+     start: (item as any).start,
+     deadFrom: (item as any).deadFrom,
+   }
+@@ -138,6 +139,7 @@ function getChainNewUsersAdapter(item: typeof chains[0]): Adapter {
+     chains: [item.chain],
+     fetch: fetch as any,
+     protocolType: ProtocolType.CHAIN,
++    methodology: item.methodology,
+     start: (item as any).start,
+     deadFrom: (item as any).deadFrom,
+   }
+diff --git a/users/utils/amadeus.ts b/users/utils/amadeus.ts
+new file mode 100644
+index 0000000..ae25f15
+--- /dev/null
++++ b/users/utils/amadeus.ts
+@@ -0,0 +1,65 @@
++import { httpGet } from '../../utils/fetchURL'
++import { CHAIN } from '../../helpers/chains'
++
++// EntryGenesis.get().hash in https://github.com/amadeusprotocol/node/blob/main/ex/lib/consensus/models/entry_genesis.ex
++export const AMADEUS_CHAIN_ID = 'HsFp8cZeFuPxBmJcjvfwYu9MqXZi8fW6XxecLfyHEqEY'
++
++export function parseAmadeusDay(data: any, start: number, end: number) {
++  if (!Number.isSafeInteger(start) || start < 0 || start % 86400 !== 0 || end !== start + 86400)
++    throw new Error('Amadeus requires one complete UTC day')
++  if (data?.schema_version !== 1 || data.chain !== 'amadeus' || data.chain_id !== AMADEUS_CHAIN_ID ||
++    data.methodology_version !== 'amadeus-activity-v1' || data.status !== 'complete' || data.days?.length !== 1)
++    throw new Error('Amadeus daily source is incomplete or has an unsupported methodology')
++  const row = data.days[0]
++  if (row.status !== 'complete' || row.start !== start || row.end !== end ||
++    row.date !== new Date(start * 1000).toISOString().slice(0, 10) ||
++    row.source?.timestamp_basis !== 'external_archive' || !row.source.time_sources?.length)
++    throw new Error('Amadeus daily source does not cover the requested window')
++  for (const key of ['transactions', 'successful_transactions', 'unique_active_addresses']) {
++    if (!Number.isSafeInteger(row[key]) || row[key] < 0) throw new Error(`Invalid Amadeus ${key}`)
++  }
++  if (row.unique_active_addresses > row.successful_transactions || row.successful_transactions > row.transactions)
++    throw new Error('Inconsistent Amadeus transaction counts')
++  return row
++}
++
++async function daily(start: number, end: number) {
++  // The current v1 runner sets startTimestamp = endTimestamp - 86401
++  // (runAdapter.ts:getOptionsObject). Normalize only that exact daily shape;
++  // never round arbitrary windows or include the previous day's last second.
++  if (end % 86400 === 0 && start === end - 86401) start++
++  if (!Number.isSafeInteger(start) || start < 0 || start % 86400 !== 0 || end !== start + 86400)
++    throw new Error('Amadeus requires one complete UTC day')
++  // No endpoint is assumed live. Set this to the reviewed public deployment
++  // once archive provenance and historical sample days are accepted.
++  const base = process.env.AMADEUS_METRICS_URL
++  if (!base) throw new Error('AMADEUS_METRICS_URL must point to the reviewed public metrics service')
++  const url = new URL('/v1/metrics/daily', base)
++  if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Amadeus metrics requires public HTTPS')
++  url.searchParams.set('start', new Date(start * 1000).toISOString().slice(0, 10))
++  url.searchParams.set('end', new Date(end * 1000).toISOString().slice(0, 10))
++  return parseAmadeusDay(await httpGet(url.toString()), start, end)
++}
++
++// Existing chain-user factory exposes both active-users and new-users. No
++// second standalone adapter is needed. Block-time provenance is external,
++// not consensus-authenticated; maintainer acceptance is required before listing.
++export const amadeusUsersConfig = {
++  name: 'amadeus', id: 'amadeus', chain: CHAIN.AMADEUS,
++  methodology: {
++    ActiveUsers: 'Unique signers of successful transactions in canonical rooted blocks; includes automated activity and does not measure people. UTC dates come from the published external block-time archive, not consensus timestamps.',
++    TransactionsCount: 'All transactions in canonical rooted blocks during the UTC day, including failed executions.',
++    NewUsers: 'Signers making their first successful transaction during the UTC day, available only with contiguous history from genesis.',
++  },
++  async getUsers(start: number, end: number) {
++    const row = await daily(start, end)
++    return [{ usercount: row.unique_active_addresses, txcount: row.transactions }]
++  },
++  async getNewUsers(start: number, end: number) {
++    const row = await daily(start, end)
++    if (row.new_addresses_status !== 'complete' || !Number.isSafeInteger(row.new_addresses) ||
++      row.new_addresses < 0 || row.new_addresses > row.unique_active_addresses)
++      throw new Error('Amadeus first-signer history is incomplete')
++    return [{ usercount: row.new_addresses }]
++  },
++}

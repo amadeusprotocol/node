@@ -1,0 +1,4 @@
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.jsonl

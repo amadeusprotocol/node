@@ -289,6 +289,14 @@ defmodule Ama.MultiServer do
                 removed_trainers = API.Peer.removed_trainers()
                 quick_reply(state, %{error: :ok, removed_trainers: removed_trainers})
 
+            r.method == "GET" and r.path == "/api/chain/metrics/status" ->
+                quick_reply(state, API.Metrics.status())
+            r.method == "GET" and String.starts_with?(r.path, "/api/chain/metrics/block/") ->
+                value = String.replace_prefix(r.path, "/api/chain/metrics/block/", "")
+                case API.Metrics.parse_height(value) do
+                    {:ok, height} -> quick_reply(state, API.Metrics.block(height))
+                    {:error, reason} -> quick_reply(state, %{error: reason}, 400)
+                end
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/stats") ->
                 stats = API.Chain.stats()
                 quick_reply(state, %{error: :ok, stats: stats})
