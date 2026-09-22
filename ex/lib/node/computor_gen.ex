@@ -2,6 +2,8 @@ defmodule ComputorGen do
   use GenServer
 
   @batch_iterations 20000
+  @warning_backoff_initial_ms 5_000
+  @warning_backoff_max_ms 60_000
 
   def start() do
     send(__MODULE__, :start)
@@ -27,8 +29,7 @@ defmodule ComputorGen do
     {state, next_ms} = cond do
       !state[:enabled] -> {state, 1000}
       !FabricSyncAttestGen.isQuorumIsInEpoch() ->
-        IO.puts "🔴 cannot compute: out_of_sync"
-        {state, 1000}
+        {warn_cannot_compute(state, :out_of_sync, "out_of_sync"), 1000}
       true ->
         tick(state)
     end
@@ -39,7 +40,7 @@ defmodule ComputorGen do
   def handle_info(:start, state) do
     threads = Application.get_env(:ama, :computor_upow_threads, 0)
     IO.puts "🔢 computor enabled (upow_threads=#{if threads == 0, do: "auto", else: threads})"
-    state = Map.put(state, :enabled, true)
+    state = state |> Map.put(:enabled, true) |> Map.delete(:compute_warning)
     {:noreply, state}
   end
 
@@ -57,24 +58,29 @@ defmodule ComputorGen do
     epoch = DB.Chain.epoch()
     removed = DB.Chain.validators_removed(epoch)
     {slashed, keys} = Enum.split_with(keys, & &1.pk in removed)
+    slashed_pks = Enum.map(slashed, & &1.pk) |> Enum.sort()
 
     cond do
       slashed != [] and keys == [] ->
-        Enum.each(slashed, & IO.puts "🔴 cannot compute: key #{Base58.encode(&1.pk)} was slashed/removed from epoch #{epoch}, waiting for next epoch")
-        {state, 60_000}
+        message = "#{removed_keys_message(length(slashed), epoch)}, waiting for next epoch"
+        state = warn_cannot_compute(state, {:keys, epoch, slashed_pks, []}, message)
+        {state, 1000}
 
       true ->
-        state = warn_slashed(state, Enum.map(slashed, & &1.pk) |> Enum.sort(), epoch)
         segment_vr_hash = DB.Chain.segment_vr_hash()
         diff_bits = DB.Chain.diff_bits()
         {pick, underfunded_pks} = next_funded_key(keys, state[:key_idx] || 0)
-        state = warn_underfunded(state, underfunded_pks)
         case pick do
           nil ->
-            IO.puts "🔴 cannot compute: no key has at least 3 AMA for submit_sol"
+            reasons = [underfunded_keys_message(length(underfunded_pks))]
+            reasons = if slashed == [], do: reasons, else: reasons ++ [removed_keys_message(length(slashed), epoch)]
+            state = warn_cannot_compute(state, {:keys, epoch, slashed_pks, underfunded_pks}, Enum.join(reasons, "; "))
             {state, 1000}
 
           {key, idx} ->
+            state = Map.delete(state, :compute_warning)
+            state = warn_slashed(state, slashed_pks, epoch)
+            state = warn_underfunded(state, underfunded_pks)
             sol = UPOW.compute(epoch, key.pk, key.pop, key.pk, segment_vr_hash, diff_bits, @batch_iterations, threads)
             if sol do
               packed_tx = TX.build(key.seed, "Epoch", "submit_sol", [sol])
@@ -104,16 +110,38 @@ defmodule ComputorGen do
   end
 
   defp warn_slashed(state, slashed_pks, epoch) do
-    if slashed_pks != state[:slashed] do
-      Enum.each(slashed_pks, & IO.puts "🔴 key #{Base58.encode(&1)} was slashed/removed from epoch #{epoch}, skipping until next epoch")
+    if slashed_pks != [] and slashed_pks != state[:slashed] do
+      IO.puts "🔴 #{removed_keys_message(length(slashed_pks), epoch)}, skipping until next epoch"
     end
     Map.put(state, :slashed, slashed_pks)
   end
 
   defp warn_underfunded(state, underfunded_pks) do
-    if underfunded_pks != state[:underfunded] do
-      Enum.each(underfunded_pks, & IO.puts "🔴 key #{Base58.encode(&1)} has less than 3 AMA, skipping")
+    if underfunded_pks != [] and underfunded_pks != state[:underfunded] do
+      IO.puts "🔴 #{underfunded_keys_message(length(underfunded_pks))}, skipping"
     end
     Map.put(state, :underfunded, underfunded_pks)
   end
+
+  # Only the log backs off. Eligibility is still checked every second so a
+  # funded key, a new epoch or restored sync can resume computation promptly.
+  defp warn_cannot_compute(state, reason, message) do
+    now = :erlang.monotonic_time(:millisecond)
+    case state[:compute_warning] do
+      %{reason: ^reason, next_at: next_at} when now < next_at -> state
+      previous ->
+        delay = case previous do
+          %{reason: ^reason, delay: delay} -> min(delay * 2, @warning_backoff_max_ms)
+          _ -> @warning_backoff_initial_ms
+        end
+        IO.puts "🔴 cannot compute: #{message}"
+        Map.put(state, :compute_warning, %{reason: reason, delay: delay, next_at: now + delay})
+    end
+  end
+
+  defp underfunded_keys_message(1), do: "1 key has less than 3 AMA for submit_sol"
+  defp underfunded_keys_message(count), do: "#{count} keys have less than 3 AMA for submit_sol"
+
+  defp removed_keys_message(1, epoch), do: "1 key was removed from epoch #{epoch}"
+  defp removed_keys_message(count, epoch), do: "#{count} keys were removed from epoch #{epoch}"
 end
