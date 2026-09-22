@@ -177,18 +177,18 @@ defmodule NodeState do
         if !is_integer(height) or height < 0 do
           {:cont, {tries, bytes}}
         else
-          has_hashes =
-            (opts[:hashes] || [])
-            |> Enum.take(100)
-            |> Enum.filter(&(is_binary(&1) and byte_size(&1) == 32))
-
           trie = %{height: height}
 
           trie =
             if opts[:e] do
-              entries =
-                DB.Entry.by_height(height)
-                |> Enum.reject(&(&1.hash in has_hashes))
+              entries = DB.Entry.by_height(height)
+              hashes = if is_list(opts[:hashes]), do: opts.hashes, else: []
+              # Honor every exclusion, including beyond the first 100 variants.
+              # The set only shrinks from locally stored entries, so arbitrary
+              # peer-supplied hashes cannot grow its memory use.
+              missing = Enum.reduce(hashes, MapSet.new(entries, & &1.hash), &MapSet.delete(&2, &1))
+              entries = entries
+                |> Enum.filter(&MapSet.member?(missing, &1.hash))
                 |> Enum.take(@catchup_entries_per_height)
                 |> Enum.map(&Entry.pack_for_net/1)
 
@@ -384,7 +384,7 @@ defmodule NodeState do
       local_tip = DB.Chain.tip_entry()
       entry =
         if entry.header.height == local_tip.header.height + 1 and
-           Entry.validate_next_tip(local_tip, entry) == %{error: :ok} do
+           Entry.validate_next(local_tip, entry, true) == %{error: :ok} do
           Map.merge(entry, %{sig_error: :ok, known_entry: true,
                              connects_to: local_tip.hash, quorum_entry: !!entry[:mask]})
         else

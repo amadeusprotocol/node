@@ -346,12 +346,13 @@ defmodule Entry do
         end
     end
 
-    def validate_next(cur_entry, next_entry) do
+    def validate_next(cur_entry, next_entry, require_slot_signer \\ false) do
         try do
         # Special-meeting proposals circulate for validator signatures before
         # their quorum mask is attached, so this shared transaction validator
-        # cannot classify an unmasked proposal as an ordinary finalized entry.
-        case validate_next_tip(cur_entry, next_entry, false) do
+        # defaults to not classifying their signer. Received entries that can
+        # inhibit production must require both an eligible signer and valid txs.
+        case validate_next_tip(cur_entry, next_entry, require_slot_signer) do
           %{error: :ok} -> :ok
           error -> throw(error)
         end

@@ -392,17 +392,9 @@ defmodule FabricGen do
 
     rooted_tip = DB.Chain.rooted_tip()
 
-    trainers_next = DB.Chain.validators_for_height(next_height)
-
     slotFilled =
       DB.Entry.by_height(next_height)
-      |> Enum.any?(fn e ->
-        cond do
-          e.header.signer == next_validator -> true
-          !!e[:mask] -> BLS12AggSig.score(trainers_next, e.mask, e.mask_size) >= 0.67
-          true -> false
-        end
-      end)
+      |> Enum.any?(&(Entry.validate_next(entry, &1, true) == %{error: :ok}))
 
     # before considering production: if the unrooted tip is missing our pack
     # signatures (applied inside a replica leadership hole), re-attest it
