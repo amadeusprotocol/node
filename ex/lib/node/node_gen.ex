@@ -50,7 +50,7 @@ defmodule NodeGen do
 
   def broadcast_check_unverified_anr() do
     my_pk = Application.fetch_env!(:ama, :trainer_pk)
-    peers = NodeANR.get_random_unverified(3)
+    peers = NodeANR.get_random_unverified(8)
     |> Enum.filter(& &1.pk != my_pk)
     |> Enum.filter(fn %{ip4: ip4, pk: pk} ->
       case NodeANR.routed_peer?(ip4) do
@@ -61,13 +61,32 @@ defmodule NodeGen do
       end
     end)
 
+    # Mainnet: always probe the trusted bundle-signer RPC (the node we pulled the
+    # state bundle from) until it is handshaked, so a fresh node reliably keeps at
+    # least that one peer to sync from and prefer. Once handshaked this is a
+    # no-op. Testnet runs its own peers, so it is skipped there.
+    peers = prepend_trusted_rpc_probe(peers, my_pk)
+
     #IO.inspect {:handshake_anr, peers}
     send(get_socket_gen(), {:send_to, peers, NodeProto.new_phone_who_dis()})
   end
 
+  defp prepend_trusted_rpc_probe(peers, my_pk) do
+    with false <- !!Application.fetch_env!(:ama, :testnet),
+         rpc_pk when is_binary(rpc_pk) <- FabricSnapshot.trusted_bundle_signer(),
+         true <- rpc_pk != my_pk,
+         false <- NodeANR.handshaked(rpc_pk),
+         %{ip4: ip4} when is_binary(ip4) <- NodeANR.by_pk(rpc_pk),
+         true <- NodeANR.routed_peer?(ip4) do
+      [%{pk: rpc_pk, ip4: ip4} | Enum.reject(peers, &(&1.pk == rpc_pk))]
+    else
+      _ -> peers
+    end
+  end
+
   def broadcast_request_peer_anrs() do
     my_pk = Application.fetch_env!(:ama, :trainer_pk)
-    peers = NodeANR.get_random_verified(3)
+    peers = NodeANR.get_random_verified(8)
     |> Enum.filter(& &1.pk != my_pk)
 
     send(get_socket_gen(), {:send_to, peers, NodeProto.get_peer_anrs()})

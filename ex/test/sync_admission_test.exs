@@ -8,6 +8,9 @@ defmodule SyncAdmissionTest do
     seed = Application.fetch_env!(:ama, :trainer_sk)
     pk = Application.fetch_env!(:ama, :trainer_pk)
     put_state("bic:epoch:validators:height:#{DB.API.pad_integer(height)}", RDB.vecpak_encode([pk]))
+    # Off-the-network receipt validation checks the epoch-BEGINNING set, so seed
+    # it there too (real chains key the epoch's validators at its boundary).
+    put_state("bic:epoch:validators:height:#{DB.API.pad_integer(div(height, 100_000) * 100_000)}", RDB.vecpak_encode([pk]))
     for {key, value} <- [testnet: false, check_routed_peer: false,
                         keys: [%{seed: seed, pk: pk}], keys_all_pks: [pk]] do
       previous = Application.fetch_env!(:ama, key)
@@ -121,6 +124,7 @@ defmodule SyncAdmissionTest do
     end
     validators = Enum.map(keys, & &1.pk)
     put_state("bic:epoch:validators:height:#{DB.API.pad_integer(ctx.height)}", RDB.vecpak_encode(validators))
+    put_state("bic:epoch:validators:height:#{DB.API.pad_integer(div(ctx.height, 100_000) * 100_000)}", RDB.vecpak_encode(validators))
     producer = Enum.at(keys, rem(ctx.height, length(keys)))
     winner = Entry.sign(producer.seed, Entry.build_next(producer.seed, ctx.base, []))
     assert Entry.validate_next(ctx.base, winner, true) == %{error: :ok}

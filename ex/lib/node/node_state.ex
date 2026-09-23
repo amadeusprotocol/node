@@ -40,7 +40,7 @@ defmodule NodeState do
       binary_part(Blake3.hash(pk), 0, 4) not in term.hasPeersb3f4
     end)
     |> Enum.shuffle()
-    |> Enum.take(3)
+    |> Enum.take(8)
     |> Enum.map(& NodeANR.pack(NodeANR.by_pk(&1)))
 
     send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.get_peer_anrs_reply(missing_anrs)})
@@ -388,13 +388,7 @@ defmodule NodeState do
   defp rpc_tip_height(packed, nil) do
     try do
       entry = Entry.unpack_from_net(packed)
-      # The downloaded bundle can predate a validator removal or epoch change.
-      # validate_tip has already checked structure before either of these
-      # errors. Verify the ordinary header signature as well; only the pinned
-      # RPC transport may supply this discovery hint. Full chain validation
-      # remains mandatory when each block is received and applied.
-      if Entry.validate_tip(entry).error in [:signer_not_in_validator_set, :root_validator_invalid] and
-          !entry[:mask] and Entry.validate_signature(entry, Map.has_key?(entry, :hash)).error == :ok do
+      if !entry[:mask] and Entry.validate_signature(entry, Map.has_key?(entry, :hash)).error == :ok do
         entry.header.height
       else
         0
