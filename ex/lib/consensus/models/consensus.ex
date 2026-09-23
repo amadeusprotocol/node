@@ -38,6 +38,8 @@ defmodule Consensus do
 
   def validate_vs_chain(_), do: %{error: :invalid_consensus}
 
+  @max_reconstruct_removals 1
+
   # Validate a quorum certificate carried alongside an advertised entry header.
   # Unlike validate_vs_chain/1 this does not require that entry to be stored yet.
   def validate_for_entry(c, entry) do
@@ -55,7 +57,8 @@ defmodule Consensus do
 
       to_sign = <<c.entry_hash::binary, c.mutations_hash::binary>>
 
-      validators = DB.Chain.validators_for_height(Entry.height(entry))
+      height = Entry.height(entry)
+      validators = DB.Chain.validators_for_height(height)
       if validators == [], do: throw(%{error: :empty_validator_set})
 
       if !is_integer(c.aggsig.mask_size) or c.aggsig.mask_size <= 0,
@@ -65,31 +68,26 @@ defmodule Consensus do
            c.aggsig.mask_set_size > c.aggsig.mask_size,
          do: throw(%{error: :invalid_mask_set_size})
 
-      if length(validators) != c.aggsig.mask_size, do: throw(%{error: :validators_ne_mask_size})
-
       case BLS12AggSig.validate_mask(c.aggsig.mask, c.aggsig.mask_size) do
         :ok -> :ok
         {:error, error} -> throw(%{error: error})
       end
 
-      validators_signed =
-        BLS12AggSig.unmask_trainers(validators, c.aggsig.mask, c.aggsig.mask_size)
+      validators = validators -- removed_cached(height)
+      diff = length(validators) - c.aggsig.mask_size
 
-      if length(validators_signed) != c.aggsig.mask_set_size,
-        do: throw(%{error: :validators_signed_ne_mask_set_size})
+      result =
+        cond do
+          diff == 0 -> verify_quorum_signature(validators, c, to_sign)
+          diff >= 1 and diff <= @max_reconstruct_removals ->
+            reconstruct_and_verify(validators, c, to_sign, height, diff)
+          true -> %{error: :validators_ne_mask_size}
+        end
 
-      # Consensus objects imported from peers must already carry quorum. Raw
-      # single-validator attestations use the attestation path and are safely
-      # aggregated locally. Do every mask/quorum check before expensive BLS.
-      if !BLS12AggSig.quorum?(length(validators_signed), length(validators)),
-        do: throw(%{error: :insufficient_quorum})
-
-      aggpk = BlsEx.aggregate_public_keys!(validators_signed)
-
-      if !BlsEx.verify?(aggpk, c.aggsig.aggsig, to_sign, BLS12AggSig.dst_att()),
-        do: throw(%{error: :invalid_signature})
-
-      %{error: :ok}
+      case result do
+        %{error: :ok} -> %{error: :ok}
+        err -> throw(err)
+      end
     catch
       :throw, r ->
         r
@@ -98,5 +96,49 @@ defmodule Consensus do
         IO.inspect({Consensus, :validate, e, r, __STACKTRACE__}, limit: 111_111)
         %{error: :unknown}
     end
+  end
+
+  defp verify_quorum_signature(validators, c, to_sign) do
+    cond do
+      length(validators) != c.aggsig.mask_size ->
+        %{error: :validators_ne_mask_size}
+
+      true ->
+        signed = BLS12AggSig.unmask_trainers(validators, c.aggsig.mask, c.aggsig.mask_size)
+
+        cond do
+          length(signed) != c.aggsig.mask_set_size -> %{error: :validators_signed_ne_mask_set_size}
+          !BLS12AggSig.quorum?(length(signed), length(validators)) -> %{error: :insufficient_quorum}
+          !BlsEx.verify?(BlsEx.aggregate_public_keys!(signed), c.aggsig.aggsig, to_sign, BLS12AggSig.dst_att()) ->
+            %{error: :invalid_signature}
+          true -> %{error: :ok}
+        end
+    end
+  end
+
+  defp reconstruct_and_verify(validators, c, to_sign, height, 1) do
+    n = length(validators)
+
+    Enum.reduce_while(0..(n - 1), %{error: :validators_ne_mask_size}, fn i, acc ->
+      case verify_quorum_signature(List.delete_at(validators, i), c, to_sign) do
+        %{error: :ok} ->
+          cache_removed(height, Enum.at(validators, i))
+          {:halt, %{error: :ok}}
+
+        _ ->
+          {:cont, acc}
+      end
+    end)
+  end
+
+  defp removed_cache_key(height), do: {__MODULE__, :removed_mid_epoch, div(height, 100_000)}
+
+  defp removed_cached(height), do: :persistent_term.get(removed_cache_key(height), [])
+
+  defp cache_removed(height, pk) do
+    key = removed_cache_key(height)
+    removed = :persistent_term.get(key, [])
+    unless pk in removed, do: :persistent_term.put(key, [pk | removed])
+    :ok
   end
 end

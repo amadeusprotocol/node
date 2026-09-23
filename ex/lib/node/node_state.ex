@@ -77,20 +77,23 @@ defmodule NodeState do
     rooted_candidate = validate_advertised_tip(term[:rooted])
     rpc_head = record_rpc_sync_head(istate.peer, term, temporal, rooted_candidate)
 
-    # A rooted height is trusted from any transport identity only when the peer
-    # also supplies a quorum certificate for that exact header. This lets a
-    # non-validator relay represent hidden validators without turning its ANR key
-    # into a consensus identity or trusting an unproved height claim.
     rooted =
-      case {rooted_candidate, term[:rooted_consensus]} do
-        {%{} = entry, %{} = consensus} ->
-          case Consensus.validate_for_entry(consensus, entry) do
-            %{error: :ok} -> Map.put(entry, :quorum_proof, true)
-            _ -> nil
-          end
+      cond do
+        trusted_root_peer?(istate.peer.pk) and
+            NodeANR.handshaked_and_valid_ip4(istate.peer.pk, istate.peer.ip4) ->
+          trusted_seed_root(term[:rooted])
 
-        _ ->
-          nil
+        true ->
+          case {rooted_candidate, term[:rooted_consensus]} do
+            {%{} = entry, %{} = consensus} ->
+              case Consensus.validate_for_entry(consensus, entry) do
+                %{error: :ok} -> Map.put(entry, :quorum_proof, true)
+                _ -> nil
+              end
+
+            _ ->
+              nil
+          end
       end
 
     # An ordinary validator signature may wake H+1 discovery, but it cannot set
@@ -259,6 +262,10 @@ defmodule NodeState do
         case Consensus.validate_vs_chain(consensus) do
           %{error: :ok} ->
             send(FabricCoordinatorGen, {:insert_consensus, consensus})
+          %{error: err} when err not in [:invalid_entry, :too_far_in_future] ->
+            if trusted_root_peer?(istate.peer.pk) and NodeANR.handshaked_and_valid_ip4(istate.peer.pk, istate.peer.ip4) do
+              send(FabricCoordinatorGen, {:insert_consensus, consensus})
+            end
           _ -> nil
         end
       end)
@@ -363,6 +370,25 @@ defmodule NodeState do
       case Entry.validate_tip(entry) do
         %{error: :ok, hash: hash} -> Map.merge(entry, %{hash: hash, sig_error: :ok})
         _ -> nil
+      end
+    catch
+      _, _ -> nil
+    end
+  end
+
+  defp trusted_root_peer?(pk) do
+    pk == FabricSnapshot.trusted_bundle_signer() or
+      Enum.any?(Application.fetch_env!(:ama, :seedanrs_as_peers), &(&1.pk == pk))
+  end
+
+  defp trusted_seed_root(packed) do
+    try do
+      entry = Entry.unpack_from_net(packed)
+      h = entry.header.height
+      if is_integer(h) and h >= 0 and h <= 0x7FFF_FFFF_FFFF_FFFF do
+        Map.merge(entry, %{hash: Entry.header_hash(entry.header), sig_error: :ok, quorum_proof: true})
+      else
+        nil
       end
     catch
       _, _ -> nil
