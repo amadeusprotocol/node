@@ -76,9 +76,8 @@ defmodule Ama do
       RocksDB.put("bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}",
         RDB.vecpak_encode([EntryGenesis.signer()]), %{db: db, cf: cf.contractstate})
 
-      #the embedded genesis carries its header still packed
       entry = EntryGenesis.get()
-      entry = Map.put(entry, :header, RDB.vecpak_decode(entry.header))
+      entry = Map.put(entry, :header, :erlang.binary_to_term(entry.header, [:safe]))
       DB.Entry.insert(entry)
       FabricGen.apply_entry(entry)
     end

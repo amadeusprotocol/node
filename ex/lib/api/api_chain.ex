@@ -70,6 +70,7 @@ defmodule API.Chain do
       %{
         height: tip.header.height,
         rooted_height: DB.Chain.rooted_height(),
+        pruned_below_height: DB.Chain.pruned_below_height(),
         tip_hash: tip.hash |> Base58.encode(),
         tip: format_entry_for_client(tip),
         tx_pool_size: TXPool.size(),
@@ -154,6 +155,8 @@ defmodule API.Chain do
     def format_entry_for_client(entry) do
         hash = entry.hash
         entry = Map.put(entry, :tx_count, length(entry.txs))
+        entry = Map.put(entry, :seen_time_ms, DB.Entry.seentime(hash))
+        entry = Map.put(entry, :in_main_chain, DB.Entry.by_height_in_main_chain(entry.header.height) == hash)
         entry = Map.drop(entry, [:signature, :txs])
         {_, entry} = pop_in(entry, [:header, :txs_hash]) #old format; keep for backwards compat
         entry = put_in(entry, [:hash], Base58.encode(entry.hash))

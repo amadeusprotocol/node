@@ -60,6 +60,15 @@ defmodule DB.Chain do
       map && tx_from_map(map, db_opts)
   end
 
+  def tx_receipt(tx_hash, entry_hash, db_opts \\ %{}) do
+    case RocksDB.get(tx_hash, db_handle(db_opts, :tx, %{})) do
+      nil -> nil
+      bin ->
+        map = RDB.vecpak_decode(bin)
+        if map.entry_hash == entry_hash, do: map[:result] || map[:receipt]
+    end
+  end
+
   def pruned_below_height(db_opts \\ %{}) do
     RocksDB.get("pruned_below_height", db_handle(db_opts, :sysconf, %{to_integer: true})) || 0
   end

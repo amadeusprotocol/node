@@ -12,6 +12,8 @@ defmodule API.TX do
             %{hash: entry_hash, header: %{height: height}, txs: txs} ->
                 Enum.map(txs, fn(txu)->
                     txu = TX.unpack(txu)
+                    txu = txu
+                    |> Map.put(:receipt, DB.Chain.tx_receipt(txu.hash, entry_hash))
                     |> Map.put(:metadata, %{entry_hash: entry_hash, entry_height: height})
                     format_tx_for_client(txu)
                 end)
