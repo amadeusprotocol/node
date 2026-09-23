@@ -146,6 +146,7 @@ defmodule DB.Entry do
     delete_UNSAFE(entry, db_opts)
   end
   def delete_UNSAFE(entry, db_opts = %{rtx: _}) when is_map(entry) do
+    entry = unpack_legacy(entry)
     hash = entry.hash
     applied = in_chain(hash, db_opts)
 
@@ -171,24 +172,27 @@ defmodule DB.Entry do
     RocksDB.delete_prefix("consensus:#{hash}:", db_handle(db_opts, :attestation, %{}))
     RocksDB.delete_prefix("attestation:#{height_padded}:#{hash}:", db_handle(db_opts, :attestation, %{}))
 
+    txs = entry.txs
+
     # Fork variants may contain a transaction included in a retained block.
     # Only the owning block may remove its receipt and search indexes.
-    owned_txs = Enum.filter(entry.txs, fn txu ->
+    owned_txs = Enum.filter(txs, fn txu ->
       case RocksDB.get(txu.hash, db_handle(db_opts, :tx, %{})) do
         nil -> false
         packed -> match?(%{entry_hash: ^hash}, RDB.vecpak_decode(packed))
       end
     end)
-    tx_filters = RDB.build_tx_hashfilters(owned_txs)
+    tx_filters = RDB.build_tx_hashfilters(Enum.map(owned_txs, &filter_form/1))
     Enum.each(tx_filters, fn {key, tx_hash} ->
       opts = db_handle(db_opts, :tx_filter, %{})
       if RocksDB.get(key, opts) == tx_hash, do: RocksDB.delete(key, opts)
     end)
 
     # Only applied blocks contributed to this count; stored forks did not.
-    if applied do
+    # Pruned history still happened, so only a rewind takes txs off the count.
+    if applied and !db_opts[:pruning] do
       old_cnt = RocksDB.get("tx_count", db_handle(db_opts, :sysconf, %{})) || "0"
-      new_cnt = :erlang.binary_to_integer(old_cnt) - length(entry.txs)
+      new_cnt = :erlang.binary_to_integer(old_cnt) - length(txs)
       RocksDB.put("tx_count", :erlang.integer_to_binary(new_cnt), db_handle(db_opts, :sysconf, %{}))
     end
 
@@ -203,25 +207,13 @@ defmodule DB.Entry do
     if rem(entry.header.height, 10_000) == 0 do
       IO.inspect {:rebuilt_filter_hashes_up_to, entry.header.height}
     end
-    txs = entry.txs
-    txs = Enum.map(txs, fn(txu)->
+    txs = Enum.map(entry.txs, fn(txu)->
       txu = if !is_binary(txu) do txu else
         txu = VanillaSer.decode!(txu)
         tx = VanillaSer.decode!(txu.tx_encoded)
         Map.put(txu, :tx, tx)
       end
-      action = TX.action(txu)
-      args = case action.args do
-        [n|t] when is_integer(n) -> [:erlang.integer_to_binary(n) | t]
-        args -> args
-      end
-      args = case action.args do
-        [a,b|t] when is_binary(b) and byte_size(b) == 48 -> [b,a] ++ t
-        args -> args
-      end
-
-      txu = put_in(txu, [:tx, :action], action)
-      put_in(txu, [:tx, :action, :args], args)
+      filter_form(txu)
     end)
 
     tx_filters = RDB.build_tx_hashfilters(txs)
@@ -233,5 +225,31 @@ defmodule DB.Entry do
     if n do
       RocksDB.put("filter_hashes_rebuilt_up_to", n, db_handle(%{}, :sysconf, %{}))
     end
+  end
+
+  # the shape filter keys were built from: old txs carry an actions list and
+  # integer args, which build_tx_hashfilters cannot read
+  defp filter_form(txu) do
+    action = TX.action(txu)
+    args = case action.args do
+      [n|t] when is_integer(n) -> [:erlang.integer_to_binary(n) | t]
+      args -> args
+    end
+    args = case action.args do
+      [a,b|t] when is_binary(b) and byte_size(b) == 48 -> [b,a] ++ t
+      args -> args
+    end
+
+    txu = put_in(txu, [:tx, :action], action)
+    put_in(txu, [:tx, :action, :args], args)
+  end
+
+  defp unpack_legacy(entry) do
+    header = case entry.header do
+      packed when is_binary(packed) ->
+        try do :erlang.binary_to_term(packed, [:safe]) catch _,_ -> RDB.vecpak_decode(packed) end
+      header -> header
+    end
+    %{entry | header: header, txs: Enum.map(entry.txs, &TX.unpack/1)}
   end
 end

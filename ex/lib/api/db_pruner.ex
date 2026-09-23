@@ -74,7 +74,7 @@ defmodule DB.Pruner do
       catch
         e, r ->
           RocksDB.transaction_rollback(rtx)
-          IO.inspect({:db_pruner_commit_failed, e, r})
+          IO.inspect({:db_pruner_commit_failed, e, r, __STACKTRACE__})
       end
     end
     :ok
@@ -91,7 +91,13 @@ defmodule DB.Pruner do
     hashes = DB.Entry.by_height_return_hashes(height, db_opts)
     Enum.each(hashes, fn hash ->
       entry = DB.Entry.by_hash(hash, db_opts)
-      if entry, do: DB.Entry.delete_UNSAFE(entry, db_opts)
+      try do
+        if entry, do: DB.Entry.delete_UNSAFE(entry, Map.put(db_opts, :pruning, true))
+      catch
+        e, r ->
+          IO.inspect({:db_pruner_entry_failed, height, Base58.encode(hash), inspect(entry, limit: 40, printable_limit: 400)})
+          :erlang.raise(e, r, __STACKTRACE__)
+      end
     end)
     RocksDB.delete("by_height_in_main_chain:#{pad_integer(height)}", db_handle(db_opts, :entry_meta, %{}))
     length(hashes)

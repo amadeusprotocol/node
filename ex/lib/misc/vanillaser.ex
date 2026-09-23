@@ -120,10 +120,9 @@ defmodule VanillaSer do
         raise ArgumentError, "vanillaser: max recursion depth exceeded"
     end
 
+    #legacy decode only: stored history holds integers wider than 16 bytes, and
+    #len::7 already bounds a varint to 127 bytes
     def decode_varint(<<sign::1, len::7, payload::size(len*8), rest::binary>>) do
-        if len > 16 do
-            raise ArgumentError, "vanillaser: varint length #{len} > 16 bytes"
-        end
         if sign == 0 do
             {payload, rest}
         else
