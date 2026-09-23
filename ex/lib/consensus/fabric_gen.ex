@@ -257,6 +257,9 @@ defmodule FabricGen do
         !in_slot -> false
         slot_delta != 1 -> false
         next_entry.hash in softfork_deny_hash -> false
+        #arrival-time checks used whatever validator set we had then; a slash in
+        #the parent can change it, so re-check against the state we apply on
+        !root_validator_ok?(next_entry) -> false
         Entry.validate_next(cur_entry, next_entry) != %{error: :ok} -> false
         true -> true
       end
@@ -346,6 +349,12 @@ defmodule FabricGen do
     end
   end
 
+  defp root_validator_ok?(entry) do
+    height = Entry.height(entry)
+    entry.header.root_validator ==
+      Entry.root_validator(DB.Chain.validators_for_height(height), DB.Chain.validators_last_change_height(height))
+  end
+
   def proc_if_my_slot() do
     entry = DB.Chain.tip_entry()
     next_slot = entry.header.slot + 1
@@ -360,6 +369,8 @@ defmodule FabricGen do
     slotFilled = DB.Entry.by_height(next_height)
     |> Enum.any?(fn(e)->
       cond do
+        #a stored fork at this height (other parent) must not inhibit production
+        e.header.prev_hash != entry.hash -> false
         e.header.signer == next_validator -> true
         !!e[:mask] -> BLS12AggSig.score(trainers_next, e.mask, e.mask_size) >= 0.67
         true -> false
@@ -395,10 +406,19 @@ defmodule FabricGen do
   end
 
   def produce_insert_and_broadcast_next_entry(seed, cur_entry) do
-    next_entry = produce_entry(seed, cur_entry)
-    #record before anything leaves the box so replicas never re-sign this height
-    ReplicaGen.note_signed_height(next_entry.header.height)
-    ReplicaGen.flush_heartbeat()
+    unsigned = build_next_entry(seed, cur_entry)
+    #snapshot + tx selection + build can outlast a replica leadership handover:
+    #re-check right before signing so two replicas never sign the same height
+    if ReplicaGen.can_produce?(unsigned.header.height) do
+      #record before anything leaves the box so replicas never re-sign this height
+      ReplicaGen.note_signed_height(unsigned.header.height)
+      ReplicaGen.flush_heartbeat()
+      next_entry = Entry.sign(seed, unsigned)
+      insert_and_broadcast_produced(next_entry)
+    end
+  end
+
+  defp insert_and_broadcast_produced(next_entry) do
     DB.Entry.insert(next_entry)
 
     msg = NodeProto.event_entry(Entry.pack_for_net(next_entry))
@@ -414,11 +434,13 @@ defmodule FabricGen do
   end
 
   def produce_entry(seed, cur_entry) do
+    Entry.sign(seed, build_next_entry(seed, cur_entry))
+  end
+
+  defp build_next_entry(seed, cur_entry) do
     next_height = cur_entry.header.height + 1
     txs = TXPool.grab_next_valid(next_height, Entry.entry_max_txs_bytes())
-    next_entry = Entry.build_next(seed, cur_entry, txs)
-    next_entry = Entry.sign(seed, next_entry)
-    next_entry
+    Entry.build_next(seed, cur_entry, txs)
   end
 
   def make_mapenv(next_entry) do

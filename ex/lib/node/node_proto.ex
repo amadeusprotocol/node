@@ -177,7 +177,8 @@ defmodule NodeProto do
       if pk == Application.fetch_env!(:ama, :trainer_pk), do: throw(%{error: :msg_to_self})
 
       version = "#{va}.#{vb}.#{vc}"
-      if version < "1.2.5", do: throw(%{error: :old_version})
+      #tuple compare: a string compare would call 1.10.0 older than 1.2.5
+      if {va, vb, vc} < {1, 2, 5}, do: throw(%{error: :old_version})
 
       if s_total >= 10_000, do: throw(%{error: :too_large_shard})
       if original_size >= 1024_0_000, do: throw(%{error: :too_large_size})

@@ -7,6 +7,13 @@ defmodule FabricSnapshot do
     #   <term_len   :: 32-big>
     #   <vecpak_term:: term_len bytes>     # vecpak %{k, v}
     #
+    # The zstd payload is followed by a fixed 201-byte trailer (not hashed):
+    #
+    #   "AMA_STATE_BUNDLE" | version:u8 | height:u64 | sha256(payload):32 |
+    #   signer_pk:48 | bls_signature:96
+    #
+    # Importers only trust a bundle signed by one of the configured seedanrs.
+    #
     # `cfname` is the destination column-family name for normal records, or
     # the sentinel "__apply__" for the sidecar record (one per bundle, last)
     # whose `v` carries the inputs `apply_into_main_chain` needs to replay
@@ -22,6 +29,10 @@ defmodule FabricSnapshot do
     @bundle_epoch_size 100_000
     @bundle_keep 2                       # number of latest bundles retained on disk
     @bundle_latest_key {__MODULE__, :statepeerdownload_latest}
+    @bundle_version 2
+    @bundle_claim_prefix "AMA_STATE_BUNDLE_V2"
+    @bundle_trailer_magic "AMA_STATE_BUNDLE"
+    @bundle_trailer_size byte_size(@bundle_trailer_magic) + 1 + 8 + 32 + 48 + 96
 
     def bundle_latest_key, do: @bundle_latest_key
     def bundle_path(height), do: @bundle_path_prefix <> Integer.to_string(height) <> @bundle_path_suffix
@@ -47,6 +58,9 @@ defmodule FabricSnapshot do
       if Application.fetch_env!(:ama, :statepeerdownload) do
         Path.wildcard(@bundle_path_prefix <> "*" <> @bundle_path_suffix <> ".tmp")
         |> Enum.each(&File.rm/1)
+        #bundles from before the signed trailer can't be verified by importers: rebuild
+        Path.wildcard(@bundle_path_prefix <> "*" <> @bundle_path_suffix)
+        |> Enum.each(fn path -> if read_bundle_trailer(path) == :error, do: File.rm(path) end)
 
         rooted = DB.Chain.rooted_height() || 0
         cur_epoch = div(rooted, @bundle_epoch_size)
@@ -172,6 +186,7 @@ defmodule FabricSnapshot do
           RDB.transaction_rollback(rtx)
         end
 
+        :ok = append_bundle_trailer(tmp_path, height)
         :ok = :file.rename(tmp_path, out_path)
         :persistent_term.put(@bundle_latest_key, %{height: height, path: out_path})
         cleanup_old_bundles()
@@ -208,7 +223,7 @@ defmodule FabricSnapshot do
       end
 
       bytes = File.stat!(download_path).size
-      IO.puts "FabricSnapshot: downloaded #{bytes} bytes, importing.."
+      IO.puts "FabricSnapshot: downloaded #{bytes} bytes, verifying signature and importing.."
 
       case import_bundle_file(download_path) do
         {:ok, count} ->
@@ -217,6 +232,67 @@ defmodule FabricSnapshot do
           :ok
         {:error, reason} ->
           halt_bundle("import from #{url} failed: #{inspect reason}")
+      end
+    end
+
+    def bundle_claim(height, hash), do: <<@bundle_claim_prefix::binary, height::unsigned-big-64, hash::binary-size(32)>>
+
+    defp append_bundle_trailer(path, height) do
+      hash = file_sha256(path, File.stat!(path).size)
+      pk = Application.fetch_env!(:ama, :trainer_pk)
+      sig = BlsEx.sign!(Application.fetch_env!(:ama, :trainer_sk), bundle_claim(height, hash), BLS12AggSig.dst_bundle())
+      File.write(path, <<@bundle_trailer_magic::binary, @bundle_version::8, height::unsigned-big-64,
+                         hash::binary, pk::binary, sig::binary>>, [:append, :binary])
+    end
+
+    defp read_bundle_trailer(path) do
+      with {:ok, %{size: size}} when size > @bundle_trailer_size <- File.stat(path),
+           payload_bytes = size - @bundle_trailer_size,
+           {:ok, <<@bundle_trailer_magic::binary, @bundle_version::8, height::unsigned-big-64,
+                   hash::binary-size(32), pk::binary-size(48), sig::binary-size(96)>>} <-
+             File.open(path, [:read, :binary, :raw], &:file.pread(&1, payload_bytes, @bundle_trailer_size)) |> elem(1) do
+        {:ok, %{height: height, hash: hash, pk: pk, signature: sig}, payload_bytes}
+      else
+        _ -> :error
+      end
+    end
+
+    #only a bundle signed by a seedanr over sha256(payload) is trusted
+    def verify_bundle_file(path) do
+      seed_pks = Enum.map(Application.fetch_env!(:ama, :seedanrs), & &1.pk)
+      with {:ok, t, payload_bytes} <- read_bundle_trailer(path),
+           true <- t.pk in seed_pks || {:error, :signer_not_a_seedanr},
+           true <- bundle_signature_valid?(t) || {:error, :invalid_signature},
+           true <- file_sha256(path, payload_bytes) == t.hash || {:error, :hash_mismatch} do
+        {:ok, t, payload_bytes}
+      else
+        :error -> {:error, :invalid_trailer}
+        error -> error
+      end
+    end
+
+    defp bundle_signature_valid?(t) do
+      try do
+        BlsEx.verify?(t.pk, t.signature, bundle_claim(t.height, t.hash), BLS12AggSig.dst_bundle())
+      catch
+        _, _ -> false
+      end
+    end
+
+    defp file_sha256(path, bytes) do
+      {:ok, fd} = :file.open(path, [:read, :binary, :raw])
+      try do
+        file_sha256_loop(fd, :crypto.hash_init(:sha256), bytes)
+      after
+        :file.close(fd)
+      end
+    end
+
+    defp file_sha256_loop(_fd, ctx, 0), do: :crypto.hash_final(ctx)
+    defp file_sha256_loop(fd, ctx, bytes) do
+      case :file.read(fd, min(bytes, 1024 * 1024)) do
+        {:ok, chunk} -> file_sha256_loop(fd, :crypto.hash_update(ctx, chunk), bytes - byte_size(chunk))
+        _ -> raise "bundle payload truncated"
       end
     end
 
@@ -298,6 +374,13 @@ defmodule FabricSnapshot do
     end
 
     def import_bundle_file(file_path) do
+      case verify_bundle_file(file_path) do
+        {:ok, trailer, payload_bytes} -> import_bundle_file(file_path, payload_bytes, trailer.height)
+        error -> error
+      end
+    end
+
+    defp import_bundle_file(file_path, payload_bytes, signed_height) do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       cf_by_name = %{
         "contractstate"            => cf.contractstate,
@@ -312,8 +395,8 @@ defmodule FabricSnapshot do
 
       result =
         try do
-          {count, apply_payload} = import_loop(fd, zctx, rtx, cf_by_name, <<>>, 0, nil)
-          finalize_import(rtx, cf, apply_payload)
+          {count, apply_payload} = import_loop(fd, zctx, rtx, cf_by_name, <<>>, 0, nil, payload_bytes)
+          finalize_import(rtx, cf, apply_payload, signed_height)
           :ok = RocksDB.transaction_commit(rtx)
           {:ok, count}
         catch
@@ -327,12 +410,13 @@ defmodule FabricSnapshot do
       result
     end
 
-    defp import_loop(fd, zctx, rtx, cf_by_name, buffer, count, apply_payload) do
+    #reads exactly payload_bytes: the signed trailer after them is not zstd
+    defp import_loop(fd, zctx, rtx, cf_by_name, buffer, count, apply_payload, remaining) do
       # Drain whatever full records we already have buffered.
       {written, buffer, apply_payload} = drain_buffer_to_db(rtx, cf_by_name, buffer, 0, apply_payload)
       count = count + written
 
-      case :file.read(fd, 1024 * 1024) do
+      case (if remaining == 0, do: :eof, else: :file.read(fd, min(remaining, 1024 * 1024))) do
         :eof ->
           {:done, tail} = :zstd.finish(zctx, <<>>)
           buffer = buffer <> IO.iodata_to_binary(tail)
@@ -343,7 +427,7 @@ defmodule FabricSnapshot do
 
         {:ok, chunk} ->
           buffer = buffer <> feed_decompress(zctx, chunk)
-          import_loop(fd, zctx, rtx, cf_by_name, buffer, count, apply_payload)
+          import_loop(fd, zctx, rtx, cf_by_name, buffer, count, apply_payload, remaining - byte_size(chunk))
       end
     end
 
@@ -384,9 +468,9 @@ defmodule FabricSnapshot do
     # (entry blob, by_height*, entry:<hash>:*, tx_filter, cf.tx pointers) is
     # populated identically — no risk of a "weird hole" where one meta field
     # is missing on the synced tip.
-    defp finalize_import(_rtx, _cf, nil),
+    defp finalize_import(_rtx, _cf, nil, _signed_height),
       do: raise "bundle missing __apply__ sidecar"
-    defp finalize_import(rtx, cf, payload) do
+    defp finalize_import(rtx, cf, payload, signed_height) do
       %{
         entry: entry_packed,
         muts_hash: muts_hash,
@@ -398,6 +482,7 @@ defmodule FabricSnapshot do
 
       entry = Entry.unpack_from_db(entry_packed)
       height = entry.header.height
+      if height != signed_height, do: raise "bundle anchor height #{height} != signed height #{signed_height}"
 
       verify_rooted_entry!(entry, rtx)
 
@@ -427,18 +512,19 @@ defmodule FabricSnapshot do
     end
 
     defp stream_cf(rtx, cfname, cf, fd, zctx),
-      do: stream_cf_loop(rtx, cfname, cf, "", "", fd, zctx)
+      do: stream_cf_loop(rtx, cfname, cf, "", "", false, fd, zctx)
 
     defp stream_cf_prefix(rtx, cfname, cf, prefix, fd, zctx),
-      do: stream_cf_loop(rtx, cfname, cf, prefix, prefix, fd, zctx)
+      do: stream_cf_loop(rtx, cfname, cf, prefix, "", false, fd, zctx)
 
-    defp stream_cf_loop(rtx, cfname, cf, prefix, cursor, fd, zctx) do
-      {next_cursor, rows} = RDB.transaction_scan_cf(rtx, cf, prefix, cursor, :forward, true, 0, @scan_batch, 0)
-      Enum.each(rows, fn {k, v} -> write_record(fd, zctx, cfname, k, v) end)
+    #transaction_scan_cf takes a cursor relative to prefix and returns key suffixes
+    defp stream_cf_loop(rtx, cfname, cf, prefix, cursor, skip_cursor, fd, zctx) do
+      {next_cursor, rows} = RDB.transaction_scan_cf(rtx, cf, prefix, cursor, :forward, skip_cursor, 0, @scan_batch, 0)
+      Enum.each(rows, fn {k, v} -> write_record(fd, zctx, cfname, prefix <> k, v) end)
       cond do
         rows == [] -> :ok
         next_cursor == nil -> :ok
-        true -> stream_cf_loop(rtx, cfname, cf, prefix, next_cursor, fd, zctx)
+        true -> stream_cf_loop(rtx, cfname, cf, prefix, next_cursor, true, fd, zctx)
       end
     end
 

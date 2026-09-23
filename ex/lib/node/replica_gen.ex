@@ -4,7 +4,7 @@ defmodule ReplicaGen do
   @heartbeat_ms 500
   @ack_ttl_ms 1_000          #producing needs majority acks fresher than this
   @silence_timeout_ms 2_000  #peer counts as gone after this much silence
-  @ack_cooldown_ms 1_500     #quiet gap between acking two different peers
+  @ack_cooldown_ms 2_500     #quiet gap between acking two different peers
   @slash_ack_timeout_ms 2_500
   @keypack_ms 30_000         #interval between key-pack (pks only) broadcasts
 
@@ -366,6 +366,9 @@ defmodule ReplicaGen do
       #entry/attestation broadcasts keep reaching it
       state = ensure_meshed(state, id, pk)
       NodeANR.set_last_message(pk)
+      #persist a peer's signed height so a restart still never re-signs it;
+      #capped so a buggy peer far ahead cannot block production forever
+      if is_integer(h) and h <= (DB.Chain.height() || 0) + 10, do: note_signed_height(h)
       #adopt a newer slash-entry lock from a peer
       {my_sh, _} = my_slash_lock()
       if sh > my_sh and is_binary(shash) and byte_size(shash) == 32 do

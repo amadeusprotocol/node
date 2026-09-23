@@ -41,6 +41,12 @@ impl AsColumnFamilyRef for CfResource {
 }
 
 type Tx<'a> = Transaction<'a, TransactionDB<MultiThreaded>>;
+type TxView<'t> = rust_rocksdb::SnapshotWithThreadMode<'t, Tx<'static>>;
+
+/// Every read through a TxResource must go through `with_tx_view`, never
+/// `txn.get*` / `txn.raw_iterator*` directly: TransactionOptions::set_snapshot
+/// (transaction_with_snapshot) only pins write-conflict checks, reads must pass
+/// the snapshot explicitly or they see later commits.
 pub struct TxResource {
     tx: Mutex<Option<Tx<'static>>>,
     _db: ResourceArc<DbResource>,
@@ -445,11 +451,20 @@ fn transaction_rollback_to_savepoint(tx: ResourceArc<TxResource>) -> NifResult<A
     txn.rollback_to_savepoint().map(|_| atoms::ok()).map_err(to_nif_rdb_err)
 }
 
-#[rustler::nif]
-fn transaction_get<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -> NifResult<Term<'a>> {
+/// The read view of a transaction: reads go through the transaction (so they see
+/// its own writes) pinned to its snapshot. For ordinary transactions the snapshot
+/// is null, i.e. the latest commits, exactly like a plain `txn.get`.
+fn with_tx_view<R>(tx: &TxResource, f: impl FnOnce(&TxView<'_>) -> NifResult<R>) -> NifResult<R> {
     let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
     let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
-    match txn.get(key.as_slice()) {
+    //a local, not a tail temporary: it must drop before `guard`
+    let view = txn.snapshot();
+    f(&view)
+}
+
+#[rustler::nif]
+fn transaction_get<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -> NifResult<Term<'a>> {
+    with_tx_view(&tx, |view| match view.get(key.as_slice()) {
         Ok(Some(value)) => {
             let mut ob = OwnedBinary::new(value.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
             ob.as_mut_slice().copy_from_slice(&value);
@@ -457,14 +472,12 @@ fn transaction_get<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -
         }
         Ok(None) => Ok((atoms::ok(), atoms::nil()).encode(env)),
         Err(e) => Err(to_nif_rdb_err(e)),
-    }
+    })
 }
 
 #[rustler::nif]
 fn transaction_get_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource>, key: Binary) -> NifResult<Term<'a>> {
-    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
-    let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
-    match txn.get_cf(&*cf, key.as_slice()) {
+    with_tx_view(&tx, |view| match view.get_cf(&*cf, key.as_slice()) {
         Ok(Some(value)) => {
             let mut ob = OwnedBinary::new(value.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
             ob.as_mut_slice().copy_from_slice(&value);
@@ -472,35 +485,29 @@ fn transaction_get_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: Resourc
         }
         Ok(None) => Ok((atoms::ok(), atoms::nil()).encode(env)),
         Err(e) => Err(to_nif_rdb_err(e)),
-    }
+    })
 }
 
 #[rustler::nif]
 fn transaction_exists<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, key: Binary) -> NifResult<Term<'a>> {
-    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
-    let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     let mut ro = ReadOptions::default();
     ro.fill_cache(false);
-    let rustlol = match txn.get_pinned_opt(key.as_slice(), &ro) {
+    with_tx_view(&tx, |view| match view.get_pinned_opt(key.as_slice(), ro) {
         Ok(Some(_)) => Ok((atoms::ok(), true).encode(env)),
         Ok(None) => Ok((atoms::ok(), false).encode(env)),
         Err(e) => Err(to_nif_rdb_err(e)),
-    };
-    rustlol
+    })
 }
 
 #[rustler::nif]
 fn transaction_exists_cf<'a>(env: Env<'a>, tx: ResourceArc<TxResource>, cf: ResourceArc<CfResource>, key: Binary) -> NifResult<Term<'a>> {
-    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
-    let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
     let mut ro = ReadOptions::default();
     ro.fill_cache(false);
-    let rustlol = match txn.get_pinned_cf_opt(&*cf, key.as_slice(), &ro) {
+    with_tx_view(&tx, |view| match view.get_pinned_cf_opt(&*cf, key.as_slice(), ro) {
         Ok(Some(_)) => Ok((atoms::ok(), true).encode(env)),
         Ok(None) => Ok((atoms::ok(), false).encode(env)),
         Err(e) => Err(to_nif_rdb_err(e)),
-    };
-    rustlol
+    })
 }
 
 #[rustler::nif]
@@ -562,84 +569,84 @@ fn transaction_scan_cf<'a>(
     start_key.extend_from_slice(prefix);
     start_key.extend_from_slice(cursor);
 
-    let guard = tx.tx.lock().unwrap_or_else(|p| p.into_inner());
-    let txn = guard.as_ref().ok_or_else(|| to_nif_err(atoms::mutex_closed()))?;
-    let mut it = match cf {
-        Some(cf) => txn.raw_iterator_cf(&*cf),
-        None => txn.raw_iterator(),
-    };
-
-    if reverse {
-        it.seek_for_prev(&start_key);
-    } else {
-        it.seek(&start_key);
-    }
-
-    if skip_cursor && it.valid() {
-        if let Some(k) = it.key() {
-            if k == start_key.as_slice() {
-                if reverse {
-                    it.prev();
-                } else {
-                    it.next();
-                }
-            }
-        }
-    }
-
-    for _ in 0..offset {
-        if !it.valid() {
-            break;
-        }
-        match it.key() {
-            Some(k) if k.starts_with(prefix) => {
-                if reverse {
-                    it.prev();
-                } else {
-                    it.next();
-                }
-            }
-            _ => break,
-        }
-    }
-
-    let mut rows = Vec::new();
-    let mut last_cursor = None;
-    let mut bytes = 0u64;
-
-    while rows.len() < limit as usize && it.valid() {
-        let Some(k) = it.key() else { break };
-        if !k.starts_with(prefix) {
-            break;
-        }
-        let Some(v) = it.value() else { break };
-
-        let suffix = &k[prefix.len()..];
-        let next_bytes = bytes.saturating_add(suffix.len() as u64).saturating_add(v.len() as u64);
-        if max_bytes > 0 && !rows.is_empty() && next_bytes > max_bytes {
-            break;
-        }
-        bytes = next_bytes;
-
-        let mut kb = OwnedBinary::new(suffix.len()).ok_or_else(|| Error::Term(Box::new("alloc key")))?;
-        kb.as_mut_slice().copy_from_slice(suffix);
-        let key_bin = Binary::from_owned(kb, env);
-
-        let mut vb = OwnedBinary::new(v.len()).ok_or_else(|| Error::Term(Box::new("alloc val")))?;
-        vb.as_mut_slice().copy_from_slice(v);
-        let val_bin = Binary::from_owned(vb, env);
-
-        last_cursor = Some(key_bin);
-        rows.push((key_bin, val_bin));
+    with_tx_view(&tx, |view| {
+        let mut it = match &cf {
+            Some(cf) => view.raw_iterator_cf(&**cf),
+            None => view.raw_iterator(),
+        };
 
         if reverse {
-            it.prev();
+            it.seek_for_prev(&start_key);
         } else {
-            it.next();
+            it.seek(&start_key);
         }
-    }
 
-    Ok((last_cursor, rows))
+        if skip_cursor && it.valid() {
+            if let Some(k) = it.key() {
+                if k == start_key.as_slice() {
+                    if reverse {
+                        it.prev();
+                    } else {
+                        it.next();
+                    }
+                }
+            }
+        }
+
+        for _ in 0..offset {
+            if !it.valid() {
+                break;
+            }
+            match it.key() {
+                Some(k) if k.starts_with(prefix) => {
+                    if reverse {
+                        it.prev();
+                    } else {
+                        it.next();
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        let mut rows = Vec::new();
+        let mut last_cursor = None;
+        let mut bytes = 0u64;
+
+        while rows.len() < limit as usize && it.valid() {
+            let Some(k) = it.key() else { break };
+            if !k.starts_with(prefix) {
+                break;
+            }
+            let Some(v) = it.value() else { break };
+
+            let suffix = &k[prefix.len()..];
+            let next_bytes = bytes.saturating_add(suffix.len() as u64).saturating_add(v.len() as u64);
+            if max_bytes > 0 && !rows.is_empty() && next_bytes > max_bytes {
+                break;
+            }
+            bytes = next_bytes;
+
+            let mut kb = OwnedBinary::new(suffix.len()).ok_or_else(|| Error::Term(Box::new("alloc key")))?;
+            kb.as_mut_slice().copy_from_slice(suffix);
+            let key_bin = Binary::from_owned(kb, env);
+
+            let mut vb = OwnedBinary::new(v.len()).ok_or_else(|| Error::Term(Box::new("alloc val")))?;
+            vb.as_mut_slice().copy_from_slice(v);
+            let val_bin = Binary::from_owned(vb, env);
+
+            last_cursor = Some(key_bin);
+            rows.push((key_bin, val_bin));
+
+            if reverse {
+                it.prev();
+            } else {
+                it.next();
+            }
+        }
+
+        Ok((last_cursor, rows))
+    })
 }
 
 //Iterator Generic

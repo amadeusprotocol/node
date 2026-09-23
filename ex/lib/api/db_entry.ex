@@ -142,11 +142,12 @@ defmodule DB.Entry do
   def delete_UNSAFE(_a, _db_opts \\ %{})
   def delete_UNSAFE(nil, _db_opts) do nil end
   def delete_UNSAFE(hash, db_opts) when is_binary(hash) do
-    entry = by_hash(hash)
+    entry = by_hash(hash, db_opts)
     delete_UNSAFE(entry, db_opts)
   end
   def delete_UNSAFE(entry, db_opts = %{rtx: _}) when is_map(entry) do
     hash = entry.hash
+    applied = in_chain(hash, db_opts)
 
     RocksDB.delete(hash, db_handle(db_opts, :entry, %{}))
 
@@ -170,18 +171,28 @@ defmodule DB.Entry do
     RocksDB.delete_prefix("consensus:#{hash}:", db_handle(db_opts, :attestation, %{}))
     RocksDB.delete_prefix("attestation:#{height_padded}:#{hash}:", db_handle(db_opts, :attestation, %{}))
 
-    #Delete hashfilter
-    tx_filters = RDB.build_tx_hashfilters(entry.txs)
-    Enum.each(tx_filters, fn {key, _hash} ->
-      RocksDB.delete(key, db_handle(db_opts, :tx_filter, %{}))
+    # Fork variants may contain a transaction included in a retained block.
+    # Only the owning block may remove its receipt and search indexes.
+    owned_txs = Enum.filter(entry.txs, fn txu ->
+      case RocksDB.get(txu.hash, db_handle(db_opts, :tx, %{})) do
+        nil -> false
+        packed -> match?(%{entry_hash: ^hash}, RDB.vecpak_decode(packed))
+      end
+    end)
+    tx_filters = RDB.build_tx_hashfilters(owned_txs)
+    Enum.each(tx_filters, fn {key, tx_hash} ->
+      opts = db_handle(db_opts, :tx_filter, %{})
+      if RocksDB.get(key, opts) == tx_hash, do: RocksDB.delete(key, opts)
     end)
 
-    #Decrement tx
-    old_cnt = RocksDB.get("tx_count", db_handle(db_opts, :sysconf, %{})) || "0"
-    new_cnt = :erlang.binary_to_integer(old_cnt) - length(entry.txs)
-    RocksDB.put("tx_count", :erlang.integer_to_binary(new_cnt), db_handle(db_opts, :sysconf, %{}))
+    # Only applied blocks contributed to this count; stored forks did not.
+    if applied do
+      old_cnt = RocksDB.get("tx_count", db_handle(db_opts, :sysconf, %{})) || "0"
+      new_cnt = :erlang.binary_to_integer(old_cnt) - length(entry.txs)
+      RocksDB.put("tx_count", :erlang.integer_to_binary(new_cnt), db_handle(db_opts, :sysconf, %{}))
+    end
 
-    Enum.each(entry.txs, fn(txu)->
+    Enum.each(owned_txs, fn(txu)->
         RocksDB.delete(txu.hash, db_handle(db_opts, :tx, %{}))
     end)
   end

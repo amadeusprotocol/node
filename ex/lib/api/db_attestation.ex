@@ -1,5 +1,9 @@
 defmodule DB.Attestation do
   import DB.API
+  #a validator can attest arbitrary mutations_hashes: each may appear in at most
+  #this many variants of one entry, so its junk never crowds out a variant
+  #started by another validator
+  @variants_per_validator 3
 
   def consensuses(hash, db_opts \\ %{}) do
     RocksDB.get_prefix("consensus:#{hash}:", db_handle(db_opts, :attestation, %{}))
@@ -20,10 +24,36 @@ defmodule DB.Attestation do
     old_consensus = consensus(consensus.entry_hash, consensus.mutations_hash, db_opts)
     old_score = if old_consensus do old_consensus.aggsig.mask_set_size / old_consensus.aggsig.mask_size else 0.0 end
 
-    if score > old_score do
-      RocksDB.put("consensus:#{consensus.entry_hash}:#{consensus.mutations_hash}", RDB.vecpak_encode(consensus), db_handle(db_opts, :attestation, %{}))
+    cond do
+      score <= old_score -> :ok
+      #a quorum variant always gets in
+      BLS12AggSig.quorum?(consensus.aggsig.mask_set_size, consensus.aggsig.mask_size) ->
+        put_consensus(consensus, db_opts)
+      signer_variant_limit?(consensus, old_consensus, db_opts) ->
+        {:error, :consensus_variant_limit}
+      true ->
+        put_consensus(consensus, db_opts)
     end
   end
+
+  defp put_consensus(consensus, db_opts) do
+    RocksDB.put("consensus:#{consensus.entry_hash}:#{consensus.mutations_hash}", RDB.vecpak_encode(consensus), db_handle(db_opts, :attestation, %{}))
+  end
+
+  #only signers this write adds are checked, so an existing variant keeps growing;
+  #a variant with no signer in its mask is never stored
+  defp signer_variant_limit?(consensus, old_consensus, db_opts) do
+    added = signed_indexes(consensus.aggsig) -- if(old_consensus, do: signed_indexes(old_consensus.aggsig), else: [])
+    others = consensuses(consensus.entry_hash, db_opts)
+    |> Enum.reject(& &1.mutations_hash == consensus.mutations_hash)
+    |> Enum.map(& signed_indexes(&1.aggsig))
+    added == [] or Enum.any?(added, fn idx -> Enum.count(others, & idx in &1) >= @variants_per_validator end)
+  end
+
+  defp signed_indexes(%{mask: mask, mask_size: size}) when is_integer(size) and size > 0 do
+    BLS12AggSig.unmask_trainers(Enum.to_list(0..(size - 1)), mask, size)
+  end
+  defp signed_indexes(_aggsig), do: []
 
   def consensuses_by_height(height, db_opts \\ %{}) do
     DB.Entry.by_height_return_hashes(height, db_opts)

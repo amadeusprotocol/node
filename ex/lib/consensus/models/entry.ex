@@ -163,7 +163,7 @@ defmodule Entry do
           err
         end)
         err = Enum.find_value(steam, fn {:ok, result} -> result != :ok && result end)
-        if err, do: throw(err)
+        if err, do: throw(%{error: err})
 
         throw(%{error: :ok})
         catch

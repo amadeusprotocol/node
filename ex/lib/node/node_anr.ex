@@ -363,6 +363,7 @@ defmodule NodeANR do
   def get_version(pk) do :ets.lookup_element(NODEANRHOT, pk, 3, "") end
   def get_latency(pk) do :ets.lookup_element(NODEANRHOT, pk, 4, 0) end
   def get_pruned_below_height(pk) do :ets.lookup_element(NODEANRHOT, pk, 7, 0) end
+  def get_temporal_height(pk) do :ets.lookup_element(NODEANRHOT, pk, 6, nil)[:header][:height] || 0 end
   def get_peer_hotdata(pk) do
     case :ets.lookup(NODEANRHOT, pk) do
       [] -> nil

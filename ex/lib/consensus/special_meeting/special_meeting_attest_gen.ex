@@ -282,24 +282,32 @@ defmodule SpecialMeetingAttestGen do
   #signature is released so a crash cannot forget it): never sign a DIFFERENT entry
   #at or below that height; re-signing the exact same hash is always allowed (net
   #retries). node-local guard — the chain never reads it.
+  #maybe_attest runs in parallel tasks: serialize check-and-write so two
+  #different entries at one height can never both take the lock
   def acquire_entry_sign_lock(height, entry_hash) do
-    {last_height, last_hash} = ReplicaGen.my_slash_lock()
-    cond do
-        entry_hash == last_hash -> true
-        height <= last_height -> false
-        true ->
-            ReplicaGen.put_slash_lock(height, entry_hash)
-            true
-    end
+    with_sign_lock(fn ->
+      {last_height, last_hash} = ReplicaGen.my_slash_lock()
+      cond do
+          entry_hash == last_hash -> true
+          height <= last_height -> false
+          true ->
+              ReplicaGen.put_slash_lock(height, entry_hash)
+              true
+      end
+    end)
   end
 
   #adopt a replica peer's slash-entry lock heard via heartbeat; only ever advances
   def adopt_entry_sign_lock(height, entry_hash) do
-    {current, _} = ReplicaGen.my_slash_lock()
-    if height > current do
-        ReplicaGen.put_slash_lock(height, entry_hash)
-    end
+    with_sign_lock(fn ->
+      {current, _} = ReplicaGen.my_slash_lock()
+      if height > current do
+          ReplicaGen.put_slash_lock(height, entry_hash)
+      end
+    end)
   end
+
+  defp with_sign_lock(fun), do: :global.trans({{__MODULE__, :sign_lock}, self()}, fun, [node()])
 
   def entries_last_x(cnt) do
       entry = DB.Chain.tip_entry()

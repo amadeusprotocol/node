@@ -8,7 +8,8 @@ defmodule NodeGenNetguard do
     if :ets.lookup(tbl, peer_ip) == [] and :ets.info(tbl, :size) >= @max_ips_per_shard do
       true
     else
-      :ets.update_counter(tbl, peer_ip, 1, {peer_ip, 0}) < @max_frames_per_6_sec
+      #saturate like op_ok: dropped frames must not build unbounded debt
+      :ets.update_counter(tbl, peer_ip, {2, 1, @max_frames_per_6_sec, @max_frames_per_6_sec}, {peer_ip, 0}) < @max_frames_per_6_sec
     end
   end
 
@@ -19,7 +20,9 @@ defmodule NodeGenNetguard do
       if :ets.lookup(tbl, {peer_ip, op}) == [] and :ets.info(tbl, :size) >= @max_ips_per_shard do
         true
       else
-        :ets.update_counter(tbl, {peer_ip, op}, 1, {{peer_ip, op}, 0}) < quota
+        # Dropped packets must not build unbounded debt. Otherwise a short
+        # catchup burst can keep a now well-behaved peer blocked for minutes.
+        :ets.update_counter(tbl, {peer_ip, op}, {2, 1, quota, quota}, {{peer_ip, op}, 0}) < quota
       end
     end
   end

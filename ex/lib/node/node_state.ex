@@ -1,4 +1,5 @@
 defmodule NodeState do
+  @catchup_reply_msg_bytes 4 * 1024 * 1024
 
   def init() do
     %{
@@ -96,6 +97,12 @@ defmodule NodeState do
     pruned_below = term[:pruned_below_height] || 0
     if rooted || temporal do
       NodeANR.set_tips(istate.peer.pk, rooted, temporal, pruned_below)
+
+      [rooted, temporal]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(& &1.header.height)
+      |> Enum.max()
+      |> FabricSyncGen.higher_tip()
     end
   end
 
@@ -148,8 +155,23 @@ defmodule NodeState do
         true -> {:cont, {[trie | tries], bytes + esz}}
       end
     end)
-    tries = Enum.reverse(tries)
-    send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: istate.peer.ip4, pk: istate.peer.pk}], NodeProto.catchup_reply(tries)})
+    #the requester drops any message over ~4.9MB compressed (:too_large_shard),
+    #so split the reply into several messages of at most ~4MB raw each
+    peer = [%{ip4: istate.peer.ip4, pk: istate.peer.pk}]
+    tries
+    |> Enum.reverse()
+    |> Enum.chunk_while({[], 0}, fn(trie, {chunk, bytes})->
+      size = :erlang.external_size(trie)
+      if chunk != [] and bytes + size > @catchup_reply_msg_bytes do
+        {:cont, Enum.reverse(chunk), {[trie], size}}
+      else
+        {:cont, {[trie | chunk], bytes + size}}
+      end
+    end, fn
+      {[], _} -> {:cont, {[], 0}}
+      {chunk, _} -> {:cont, Enum.reverse(chunk), {[], 0}}
+    end)
+    |> Enum.each(& send(NodeGen.get_socket_gen(), {:send_to, peer, NodeProto.catchup_reply(&1)}))
   end
   def handle(:catchup_reply, istate, term) do
     Enum.take(term.tries, 200)

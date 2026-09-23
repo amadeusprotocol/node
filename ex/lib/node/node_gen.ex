@@ -120,14 +120,14 @@ defmodule NodeGen do
         state
 
       :tick_purge_txpool ->
-        :erlang.spawn(fn()->
-          task = Task.async(fn -> TXPool.purge_stale() end)
-          try do
-            Task.await(task, 600)
-          catch
-            :exit, {:timeout, _} -> Task.shutdown(task, :brutal_kill)
-          end
-        end)
+        #never kill a purge midway, it would leak TXPool byte/reservation accounting;
+        #the registered name keeps a slow purge from overlapping the next tick
+        if !Process.whereis(TXPoolPurge) do
+          :erlang.spawn(fn()->
+            registered = try do Process.register(self(), TXPoolPurge) rescue ArgumentError -> false end
+            if registered, do: TXPool.purge_stale()
+          end)
+        end
         :erlang.send_after(6000, self(), :tick_purge_txpool)
         state
 
