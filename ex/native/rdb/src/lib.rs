@@ -837,7 +837,7 @@ fn contract_validate<'a>(env: Env<'a>, db: ResourceArc<DbResource>, entry_vecpak
     match __res { Ok(inner) => inner, Err(_) => Err(Error::BadArg) }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn vecpak_encode<'a>(env: Env<'a>, map: Term<'a>) -> Result<Term<'a>, Error> {
     let mut buf = Vec::with_capacity(1024);
     vecpak_ex::encode_term(env, &mut buf, map, 0)?;
