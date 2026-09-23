@@ -94,6 +94,9 @@ activity from a pruned archive or the current balance list.
 
 ## Unattended deployment
 
+For the operator-selected Grafana host, follow [DEPLOY-GRAFANA.md](DEPLOY-GRAFANA.md)
+for startup, persistent storage, public proxy setup and the remaining time-evidence checks.
+
 The container runs the public reader and one serial collector. It retries RPC
 outages with capped exponential backoff, resumes the durable checkpoint, aborts
 in-flight requests on shutdown, and exits on quarantined history. Retries never
