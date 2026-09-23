@@ -239,48 +239,29 @@ defmodule FabricGen do
     softfork_deny_hash = :persistent_term.get(SoftforkDenyHash, [])
 
     cur_entry = DB.Chain.tip_entry()
-    cur_slot = cur_entry.header.slot
     height = cur_entry.header.height
     next_height = height + 1
     next_entries = next_height
     |> DB.Entry.by_height()
     |> Enum.filter(fn(next_entry)->
-      #in slot
-      next_slot = next_entry.header.slot
-      validator_for_entry = DB.Chain.validator_for_height(Entry.height(next_entry))
-      in_slot = cond do
-        next_entry.header.signer == validator_for_entry -> true
-        !!next_entry[:mask] ->
-            trainers = DB.Chain.validators_for_height(Entry.height(next_entry))
-            score = BLS12AggSig.score(trainers, next_entry.mask, next_entry.mask_size)
-            next_entry.header.signer in trainers and score >= 0.67
-
-        true -> false
-      end
-
-      #is incremental slot
-      slot_delta = next_slot - cur_slot
-
-      cond do
-        !in_slot -> false
-        slot_delta != 1 -> false
-        next_entry.hash in softfork_deny_hash -> false
-        Entry.validate_next(cur_entry, next_entry) != %{error: :ok} -> false
-        true -> true
-      end
+      next_entry.header.prev_hash == cur_entry.hash and
+        next_entry.hash not in softfork_deny_hash
     end)
     |> Enum.sort_by(& {&1.hash not in softfork_hash, &1.header.slot, !&1[:mask], &1.hash})
 
-    case List.first(next_entries) do
-      nil -> nil
-      entry ->
-        start_ts = :os.system_time(1000)
-        task = Task.async(fn -> FabricGen.apply_entry(entry) end)
-        %{error: :ok, mutations_hash: m_hash, receipts: r, muts: m
-        } = case Task.await(task, :infinity) do
-          result = %{error: :ok} -> result
+    # Admission can precede a validator removal or a rewind. Validate inside
+    # apply against the committed parent, and try other variants on rejection.
+    task = Task.async(fn ->
+      Enum.find_value(next_entries, fn entry ->
+        case apply_entry(entry) do
+          %{error: :ok} = result -> {entry, result}
+          _ -> nil
         end
-
+      end)
+    end)
+    case Task.await(task, :infinity) do
+      nil -> nil
+      {entry, %{mutations_hash: m_hash, receipts: r, muts: m}} ->
         Application.fetch_env!(:ama, :rpc_events) && FabricEventGen.event_applied(entry, m_hash, m, r)
         TXPool.delete_packed(entry.txs)
 
@@ -403,7 +384,8 @@ defmodule FabricGen do
 
     slotFilled =
       DB.Entry.by_height(next_height)
-      |> Enum.any?(&(Entry.validate_next(entry, &1, true) == %{error: :ok}))
+      |> Enum.any?(&(Entry.validate_for_apply(entry, &1).error == :ok and
+        &1.hash not in :persistent_term.get(SoftforkDenyHash, [])))
 
     # before considering production: if the unrooted tip is missing our pack
     # signatures (applied inside a replica leadership hole), re-attest it
@@ -515,15 +497,21 @@ defmodule FabricGen do
   end
 
   def apply_entry(next_entry) do
-      %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-      height = DB.Chain.height()
-      if !height or (height + 1) == Entry.height(next_entry) do
-          apply_entry_1(next_entry)
-      else
-          %{error: :invalid_height}
+      # FabricGen awaits every apply before advancing or rewinding. Never trust
+      # the validator set/signature check from receipt of a future entry: the
+      # preceding block may have changed the set, even within the same epoch.
+      parent = DB.Chain.tip_entry()
+      cond do
+        is_nil(parent) -> %{error: :missing_parent}
+        parent.header.height + 1 != Entry.height(next_entry) -> %{error: :invalid_height}
+        next_entry.hash in :persistent_term.get(SoftforkDenyHash, []) -> %{error: :denied_entry}
+        true ->
+          with %{error: :ok, entry: entry} <- Entry.validate_for_apply(parent, next_entry) do
+            apply_entry_1(entry)
+          end
       end
   end
-  def apply_entry_1(next_entry) do
+  defp apply_entry_1(next_entry) do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
 
       start_contract_exec = :os.system_time(1000)

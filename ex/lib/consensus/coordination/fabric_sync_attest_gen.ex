@@ -149,9 +149,10 @@ defmodule FabricSyncAttestGen do
   end
 
   def handle_info(:tick_synced, state) do
-    if hasQuorum() do
-      tick_synced()
-    end
+    # Discovery must run before quorum too: the missing history may be exactly
+    # what lets us validate the network's current quorum. Signing gates still
+    # require hasQuorum independently of these height observations.
+    tick_synced()
 
     :erlang.send_after(30, self(), :tick_synced)
     {:noreply, state}
@@ -164,34 +165,39 @@ defmodule FabricSyncAttestGen do
     rooted_height = rooted.header.height
 
     {height_rooted_abs, height_abs, bft_rooted, bft_temp} = NodeANR.highest_validator_height()
+    old_highest_bft = highestBFTHeight()
+    new_highest_bft = max(old_highest_bft, bft_rooted)
+    rpc_head = NodeANR.rpc_sync_head()
 
-    #persistent_term maxes are SYNC TARGETS only (FabricSyncGen fetches toward
-    #them). a single inflated peer height here just causes harmless failed fetch
-    #attempts (take(1000)-bounded, no honest peer serves them) — it can NOT halt
-    #us, because the production/epoch decisions below use the corroborated values.
+    # Ordinary peer maxima are fetch targets only, not consensus evidence.
+    # The decision below separately includes rooted proofs and the authenticated
+    # bundle-signing RPC's short-lived checkpoint hint.
     old_highest_abs = FabricSyncAttestGen.highestTemporalHeight()
-    new_highest_abs = max(temporal_height, height_abs)
+    new_highest_abs = Enum.max([temporal_height, height_abs, new_highest_bft, rpc_head])
     if new_highest_abs != old_highest_abs do
       :persistent_term.get({Net, :highestTemporalHeight}) |> :atomics.put(1, new_highest_abs)
     end
 
     old_highest_rooted_abs = FabricSyncAttestGen.highestRootedHeight()
-    new_highest_rooted_abs = max(rooted_height, height_rooted_abs)
+    new_highest_rooted_abs = max(max(rooted_height, height_rooted_abs), new_highest_bft)
     if new_highest_rooted_abs != old_highest_rooted_abs do
       :persistent_term.get({Net, :highestRootedHeight}) |> :atomics.put(1, new_highest_rooted_abs)
     end
 
-    old_highest_bft = highestBFTHeight()
-    new_highest_bft = max(old_highest_bft, bft_rooted)
     if new_highest_bft != old_highest_bft do
       :persistent_term.get({Net, :highestBFTHeight}) |> :atomics.put(1, new_highest_bft)
     end
 
-    #DECISION heights: highest reached by >=67% of validator peers, floored by our
-    #own height. this is both byzantine-robust (a single/<1/3 peer cannot inflate
-    #a 67% figure, so it cannot fake "behind" and stall us) and stuck-minority
-    #robust (own-height floor stops a wedged/forked minority dragging us backward).
-    sync_temporal = max(temporal_height, bft_temp)
+    # Ordinary peer claims cannot inhibit production; bft_temp contains only
+    # corroborated heights or received, connectable entries. The local floor
+    # stops a wedged minority dragging the decision backward.
+    # A verified rooted height is also a lower bound on the network's temporal
+    # head. Keep that evidence when its relay disappears; local rooting alone
+    # cannot turn a node thousands of blocks behind back into a synced node.
+    # The bundle-signing RPC is also a trusted discovery source while our old
+    # snapshot cannot verify its new validator set. Its hint can keep us in
+    # catchup, but cannot grant quorum or promote highestBFTHeight.
+    sync_temporal = Enum.max([temporal_height, bft_temp, new_highest_bft, rpc_head])
 
     isS = isSynced()
     cond do
@@ -205,7 +211,7 @@ defmodule FabricSyncAttestGen do
     #out-of-epoch only when a 67% quorum has ROOTED into a later epoch than our own
     #temporal has even reached. floored by our own temporal so being ahead (or a
     #stuck minority) never flips us out; corroborated so a byzantine peer cannot.
-    epoch_highest = div(max(temporal_height, bft_rooted), 100_000)
+    epoch_highest = div(max(temporal_height, new_highest_bft), 100_000)
     epoch_mine = div(temporal_height, 100_000)
     cond do
       epoch_highest == epoch_mine and !isInEpoch -> :persistent_term.get({Net, :isInEpoch}) |> :atomics.put(1, 1)

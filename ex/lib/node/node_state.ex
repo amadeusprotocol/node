@@ -75,6 +75,7 @@ defmodule NodeState do
   def handle(:event_tip, istate, term) do
     temporal = validate_advertised_tip(term[:temporal])
     rooted_candidate = validate_advertised_tip(term[:rooted])
+    rpc_head = record_rpc_sync_head(istate.peer, term, temporal, rooted_candidate)
 
     # A rooted height is trusted from any transport identity only when the peer
     # also supplies a quorum certificate for that exact header. This lets a
@@ -93,7 +94,8 @@ defmodule NodeState do
       end
 
     # An ordinary validator signature may wake H+1 discovery, but it cannot set
-    # an arbitrary far-future target. Long jumps require the rooted quorum proof.
+    # an arbitrary far-future target. Long jumps here require the rooted quorum
+    # proof; the pinned RPC's separate discovery hint never enters this field.
     local_height = DB.Chain.height() || 0
     max_unproved_height = max(local_height + 1, if(rooted, do: rooted.header.height + 1, else: 0))
 
@@ -117,6 +119,7 @@ defmodule NodeState do
         FabricSyncGen.higher_tip(%{pk: istate.peer.pk, ip4: istate.peer.ip4}, advertised_height)
       end
     end
+    if rpc_head > (DB.Chain.height() || 0), do: FabricSyncGen.higher_tip(istate.peer, rpc_head)
   end
 
   def handle(:event_tx, istate, term) do
@@ -366,6 +369,41 @@ defmodule NodeState do
     end
   end
 
+  defp record_rpc_sync_head(peer, term, temporal, rooted) do
+    if peer.pk == FabricSnapshot.trusted_bundle_signer() and NodeANR.handshaked_and_valid_ip4(peer.pk, peer.ip4) do
+      height = Enum.max([rpc_tip_height(term[:temporal], temporal), rpc_tip_height(term[:rooted], rooted)])
+      if height > 0 do
+        NodeANR.set_rpc_sync_head(peer, height)
+        # Even before we can verify the newer validator set, retain the RPC's
+        # serving floor so bulk catchup does not request its pruned history.
+        NodeANR.set_tips(peer.pk, nil, nil, term[:pruned_below_height])
+      end
+      height
+    else
+      0
+    end
+  end
+
+  defp rpc_tip_height(_packed, %{header: %{height: height}}), do: height
+  defp rpc_tip_height(packed, nil) do
+    try do
+      entry = Entry.unpack_from_net(packed)
+      # The downloaded bundle can predate a validator removal or epoch change.
+      # validate_tip has already checked structure before either of these
+      # errors. Verify the ordinary header signature as well; only the pinned
+      # RPC transport may supply this discovery hint. Full chain validation
+      # remains mandatory when each block is received and applied.
+      if Entry.validate_tip(entry).error in [:signer_not_in_validator_set, :root_validator_invalid] and
+          !entry[:mask] and Entry.validate_signature(entry, Map.has_key?(entry, :hash)).error == :ok do
+        entry.header.height
+      else
+        0
+      end
+    catch
+      _, _ -> 0
+    end
+  end
+
   defp mark_advertised_tip_connectivity(entry) do
     local_tip = DB.Chain.tip_entry()
 
@@ -384,7 +422,7 @@ defmodule NodeState do
       local_tip = DB.Chain.tip_entry()
       entry =
         if entry.header.height == local_tip.header.height + 1 and
-           Entry.validate_next(local_tip, entry, true) == %{error: :ok} do
+           Entry.validate_for_apply(local_tip, entry).error == :ok do
           Map.merge(entry, %{sig_error: :ok, known_entry: true,
                              connects_to: local_tip.hash, quorum_entry: !!entry[:mask]})
         else

@@ -73,6 +73,7 @@ defmodule NodeANR do
   def delete(pk) do
     MnesiaKV.delete(NODEANR, pk)
     :ets.delete(NODEANRHOT, pk)
+    :ets.match_delete(NODEANRHOT, {:rpc_sync_head, pk, :_, :_, :_})
     :ets.delete(SharedSecretCache, pk)
   end
 
@@ -332,6 +333,7 @@ defmodule NodeANR do
   end
 
   # ETS schema: {pk, last_message, version, latency, rooted, temporal, pruned_below_height}
+  # One separately keyed :rpc_sync_head row stores an expiring discovery hint.
   # `pruned_below_height` (slot 7) is the lowest height the peer can still
   # serve — 0 means full history. peers_w_min_height/2 filters by this.
   def set_last_message(pk) do
@@ -412,6 +414,24 @@ defmodule NodeANR do
     (:os.system_time(1000) - get_last_message(pk)) < 30_000
   end
 
+  # A separate, short-lived discovery hint from the same pinned identity we
+  # trust for bundle import. It is never a rooted tip or a quorum certificate.
+  def set_rpc_sync_head(peer, height) do
+    if peer.pk == FabricSnapshot.trusted_bundle_signer() and handshaked_and_valid_ip4(peer.pk, peer.ip4) do
+      :ets.insert(NODEANRHOT, {:rpc_sync_head, peer.pk, peer.ip4, height, :os.system_time(1000)})
+      set_last_message(peer.pk)
+    end
+  end
+
+  def rpc_sync_head(pk \\ nil) do
+    case :ets.lookup(NODEANRHOT, :rpc_sync_head) do
+      [{:rpc_sync_head, peer_pk, ip, height, seen}] ->
+        if (pk == nil or pk == peer_pk) and :os.system_time(1000) - seen < 30_000 and
+            handshaked_and_valid_ip4(peer_pk, ip), do: height, else: 0
+      _ -> 0
+    end
+  end
+
   def reached_by_pct(peers, key, pct \\ 0.67)
   def reached_by_pct([], _key, _pct) do 0 end
   def reached_by_pct(peers, key, pct) do
@@ -447,11 +467,10 @@ defmodule NodeANR do
     local_temp = local_tip.header.height
 
     remote_vals =
-      Enum.map(vals, &tip_observation(&1, local_tip)) |> Enum.filter(&(&1.height_root && &1.height_temp))
+      Enum.map(vals, &tip_observation(&1, local_tip))
 
     remote_all =
       Enum.map(vals ++ peers, &tip_observation(&1, local_tip))
-      |> Enum.filter(&(&1.height_root && &1.height_temp))
 
     local_vals =
       Application.fetch_env!(:ama, :keys_all_pks)
@@ -499,12 +518,16 @@ defmodule NodeANR do
   defp tip_observation(%{ip4: ip4, pk: pk}, local_tip) do
     rooted = :ets.lookup_element(NODEANRHOT, pk, 5, nil)
     temporal = :ets.lookup_element(NODEANRHOT, pk, 6, nil)
+    height_root = get_in(rooted || %{}, [:header, :height]) || 0
+    height_temp = get_in(temporal || %{}, [:header, :height]) || 0
 
     %{
       pk: pk,
       ip4: ip4,
-      height_root: get_in(rooted || %{}, [:header, :height]),
-      height_temp: get_in(temporal || %{}, [:header, :height]),
+      height_root: height_root,
+      # A rooted certificate proves the peer has reached at least this height,
+      # even if its separate temporal advertisement is absent or rejected.
+      height_temp: max(height_root, height_temp),
       height_temp_decision: decision_temporal_height(temporal, local_tip),
       rooted_quorum_proof: !!(is_map(rooted) and rooted[:quorum_proof])
     }
@@ -548,6 +571,7 @@ defmodule NodeANR do
       height_root = :ets.lookup_element(NODEANRHOT, pk, 5, nil)[:header][:height] || 0
       height_temp = :ets.lookup_element(NODEANRHOT, pk, 6, nil)[:header][:height] || 0
       pruned_below = :ets.lookup_element(NODEANRHOT, pk, 7, 0)
+      height_temp = max(max(height_root, height_temp), rpc_sync_head(pk))
       %{pk: pk, ip4: ip4, height_root: height_root, height_temp: height_temp, pruned_below: pruned_below}
     end)
     # Peer must have the requested height in its retained window:

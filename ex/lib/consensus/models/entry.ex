@@ -115,6 +115,16 @@ defmodule Entry do
         end
     end
 
+    # Receipt-time validation is not enough for a buffered block: replay may
+    # have removed validators since then. Use the committed parent and current
+    # state for both signature/set validation and execution prerequisites.
+    def validate_for_apply(parent, candidate) do
+        with %{error: :ok, entry: entry} <- unpack_and_validate_from_net(candidate),
+             %{error: :ok} <- validate_next(parent, entry, true) do
+          %{error: :ok, entry: entry}
+        end
+    end
+
     def validate_entry(e, hash \\ nil) do
         try do
         eh = e.header
@@ -163,7 +173,7 @@ defmodule Entry do
           err
         end)
         err = Enum.find_value(steam, fn {:ok, result} -> result != :ok && result end)
-        if err, do: throw(err)
+        if err, do: throw(%{error: err})
 
         throw(%{error: :ok})
         catch
