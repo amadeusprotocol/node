@@ -18,7 +18,7 @@ defmodule API do
               :persistent_term.put({API.Cache, key}, {:os.system_time(1000), val})
               val
           end
-        end)
+        end, [node()])
     end
   end
 

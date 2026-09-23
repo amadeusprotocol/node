@@ -261,6 +261,31 @@ fn token_soulbound_is_set_on_first_mint_and_is_immutable() {
 }
 
 #[test]
+fn soulbound_tokens_can_be_burned_but_not_transferred() {
+    let chain = Chain::new();
+    let admin = chain.wallet(AMA_1_DOLLAR);
+    let holder = chain.wallet(0);
+    let receiver = chain.wallet(0);
+    let burn = crate::consensus::bic::coin::BURN_ADDRESS;
+
+    create_collection(&chain, &admin, b"BOUNDCOL", b"true").unwrap();
+    mint(&chain, &admin, &holder.pk, b"3", b"BOUNDCOL", b"BADGE", b"false").unwrap();
+    create_collection(&chain, &admin, b"OPENCOL", b"false").unwrap();
+    mint(&chain, &admin, &holder.pk, b"3", b"OPENCOL", b"BADGE", b"true").unwrap();
+
+    for collection in [b"BOUNDCOL".as_slice(), b"OPENCOL".as_slice()] {
+        assert_eq!(
+            chain.call(&holder, b"Nft", b"transfer", &[&receiver.pk, b"1", collection, b"BADGE"]),
+            Err("soulbound".to_string())
+        );
+        chain.call(&holder, b"Nft", b"transfer", &[&burn, b"1", collection, b"BADGE"]).unwrap();
+        assert_eq!(chain.get(&bcat(&[b"nft:", collection, b":BADGE:totalSupply"])), Some(b"2".to_vec()));
+        assert_eq!(chain.get(&nft_key(&holder.pk, collection, b"BADGE")), Some(b"2".to_vec()));
+        assert_eq!(chain.get(&nft_key(&burn, collection, b"BADGE")), Some(b"1".to_vec()));
+    }
+}
+
+#[test]
 fn nonfungible_tokens_are_single_issue_and_can_be_burned() {
     let chain = Chain::new();
     let admin = chain.wallet(AMA_1_DOLLAR);

@@ -86,7 +86,9 @@ pub fn transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, receiver:
         panic_any("insufficient_tokens")
     }
 
-    if collection_soulbound(env, collection) || token_soulbound(env, collection, token) {
+    //soulbound blocks moving a token to another holder; burning it is still allowed
+    let is_burn = receiver == &BURN_ADDRESS;
+    if !is_burn && (collection_soulbound(env, collection) || token_soulbound(env, collection, token)) {
         panic_any("soulbound")
     }
 
@@ -98,7 +100,7 @@ pub fn transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, receiver:
     }
     kv_increment(env, &bcat(&[b"account:", receiver, b":nft:", collection, b":", token]), amount);
 
-    if receiver == &BURN_ADDRESS {
+    if is_burn {
         kv_increment(env, &bcat(&[b"nft:", collection, b":", token, b":totalSupply"]), -amount);
     }
 }

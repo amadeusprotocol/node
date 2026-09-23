@@ -228,7 +228,7 @@ defmodule SpecialMeetingAttestGen do
         own_pack_key?(malicious_pk) -> []
         DB.Chain.epoch() != epoch -> []
         Entry.validate_next(cur_entry, entry) != %{error: :ok} -> []
-        slash_trainer_verify(malicious_pk, epoch, trainers, mask, signature) != nil -> []
+        slash_trainer_verify(malicious_pk, epoch, trainers, mask, mask_size, signature) != nil -> []
         !guilty -> []
         my_keys == [] -> []
         !ReplicaGen.can_sign?() -> []
@@ -263,8 +263,8 @@ defmodule SpecialMeetingAttestGen do
     end
   end
 
-  def slash_trainer_verify(malicious_pk, cur_epoch, trainers, mask, signature) do
-    signers = BLS12AggSig.unmask_trainers(trainers, Util.pad_bitstring_to_bytes(mask), bit_size(mask))
+  def slash_trainer_verify(malicious_pk, cur_epoch, trainers, mask, mask_size, signature) do
+    signers = BLS12AggSig.unmask_trainers(trainers, mask, mask_size)
 
     consensus_pct = length(signers) / length(trainers)
 
