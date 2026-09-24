@@ -176,7 +176,9 @@ defmodule DB.Entry do
 
     # Fork variants may contain a transaction included in a retained block.
     # Only the owning block may remove its receipt and search indexes.
-    owned_txs = Enum.filter(txs, fn txu ->
+    # An applied block always owns its txs (a nonce lands in one canonical
+    # block), so only forks pay for reading and decoding each receipt.
+    owned_txs = if applied, do: txs, else: Enum.filter(txs, fn txu ->
       case RocksDB.get(txu.hash, db_handle(db_opts, :tx, %{})) do
         nil -> false
         packed -> match?(%{entry_hash: ^hash}, RDB.vecpak_decode(packed))

@@ -67,19 +67,25 @@ defmodule FabricCoordinatorGen do
     calc_syncing(true)
 
     aggregate_attestation(attestation)
-
-    cached = :ets.select(AttestationCache, [{{{attestation.entry_hash, :_}, {:"$1", :_}}, [], [:"$1"]}])
-    Enum.each(cached, fn(attestation)->
-      if Attestation.validate(attestation).error == :ok do
-        aggregate_attestation(attestation)
-      end
-    end)
-    if cached != [] do
-      :ets.select_delete(AttestationCache, [{{{attestation.entry_hash, :_}, :_}, [], [true]}])
-    end
+    drain_cached_attestations(attestation.entry_hash)
 
     calc_syncing(false)
     {:noreply, state}
+  end
+
+  #cached attestations already passed signature checks (only :entry_dne /
+  #:ahead_of_localchain get cached). aggregate them once their entry is applied;
+  #until then keep them. delete exactly the rows taken, not ones cached meanwhile
+  defp drain_cached_attestations(entry_hash) do
+    with true <- :ets.select_count(AttestationCache, [{{{entry_hash, :_}, :_}, [], [true]}]) > 0,
+         %{} = entry <- DB.Entry.by_hash(entry_hash),
+         true <- Entry.height(entry) <= DB.Chain.height() do
+      :ets.select(AttestationCache, [{{{entry_hash, :_}, :_}, [], [:"$_"]}])
+      |> Enum.each(fn({_key, {attestation, _ts}} = row)->
+        aggregate_attestation(attestation)
+        :ets.delete_object(AttestationCache, row)
+      end)
+    end
   end
 
   def aggregate_attestation(a) when is_map(a) do

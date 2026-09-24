@@ -18,6 +18,9 @@ defmodule DB.Pruner do
 
   def init(_) do
     if Application.fetch_env!(:ama, :pruner_enabled) do
+      #always from 0: covers leftovers of a crash between an epoch's commit and
+      #its range delete, and the per-key tombstones of older versions
+      range_delete_below(DB.Chain.pruned_below_height())
       send(self(), :tick)
       {:ok, %{}}
     else
@@ -69,6 +72,7 @@ defmodule DB.Pruner do
         old_epoch = div(from, @epoch_size)
         new_epoch = div(new_from, @epoch_size)
         if new_epoch > old_epoch do
+          range_delete_below(new_epoch * @epoch_size)
           IO.puts("DB.Pruner: epoch #{new_epoch - 1} fully pruned (pruned_below_height=#{new_from})")
         end
       catch
@@ -102,4 +106,59 @@ defmodule DB.Pruner do
     RocksDB.delete("by_height_in_main_chain:#{pad_integer(height)}", db_handle(db_opts, :entry_meta, %{}))
     length(hashes)
   end
+
+  #each batch deletes height-ordered keys one by one inside its transaction, so
+  #readers stay consistent; but those tombstones sit contiguously right after the
+  #live keys and every scan past the tip would walk them. one range tombstone per
+  #family over [prefix:0, prefix:height) covers them all (keys sort by padded
+  #height), and RocksDB skips a covered run in one step. so at most one epoch of
+  #uncovered tombstones exists at any time
+  defp range_delete_below(height) when is_integer(height) and height > 0 do
+    %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
+    bound = pad_integer(height)
+    zero = pad_integer(0)
+    for {cf_name, prefix} <- [{:entry_meta, "by_height_in_main_chain:"}, {:entry_meta, "by_height:"}, {:attestation, "attestation:"}] do
+      :ok = RocksDB.delete_range_cf(prefix <> zero, prefix <> bound, false, %{db: db, cf: cf[cf_name]})
+    end
+    :ok
+  end
+  defp range_delete_below(_height), do: :ok
+
+  #deletes only free disk once compaction rewrites the bottom-level files that
+  #still hold the data; RocksDB won't do that on its own for old history. call
+  #manually (heavy I/O while it runs), e.g. after a large prune:
+  #  DB.Pruner.compact_pruned_cfs()   DB.Pruner.compaction_status()
+  @compact_cfs [:attestation, :entry_meta, :tx_filter, :tx, :entry]
+  @compactor DB.Pruner.Compactor
+
+  def compact_pruned_cfs() do
+    pid = spawn(fn -> receive do :go -> compact_cfs(@compact_cfs, []) end end)
+    #registering from here is atomic: a second call fails instead of starting twice
+    try do
+      Process.register(pid, @compactor)
+      send(pid, :go)
+      {:ok, pid}
+    rescue
+      ArgumentError ->
+        Process.exit(pid, :kill)
+        {:error, :already_running}
+    end
+  end
+
+  def compaction_status() do
+    status = :persistent_term.get({__MODULE__, :compaction}, nil)
+    status && Map.put(status, :alive, Process.whereis(@compactor) != nil)
+  end
+
+  defp compact_cfs([], done) do
+    put_compaction_status(%{running: nil, remaining: [], done: Enum.reverse(done), finished_at: :os.system_time(1000)})
+  end
+  defp compact_cfs([name | rest], done) do
+    %{cf: cf} = :persistent_term.get({:rocksdb, Fabric})
+    put_compaction_status(%{running: name, remaining: rest, done: Enum.reverse(done), started_at: :os.system_time(1000)})
+    {us, _} = :timer.tc(fn -> RDB.compact_range_cf_all(cf[name]) end)
+    compact_cfs(rest, [{name, div(us, 1_000_000)} | done])
+  end
+
+  defp put_compaction_status(status), do: :persistent_term.put({__MODULE__, :compaction}, status)
 end

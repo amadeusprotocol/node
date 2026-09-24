@@ -7,15 +7,14 @@ defmodule FabricSyncGen do
   #only after its retry window, and then to peers not yet asked for it, so at
   #most @peer_count requests per height are in flight. 20 heights per request
   #is the most a catchup reply serves when e/a are set
+  #new tips are requested the moment a ping announces them (peer_tip/2); these
+  #loops cover what that misses: gaps, lost replies, and consensus
   @tick_ms 100
   @min_send_ms 200
   @frontier_retry_ms 500
-  @root_retry_ms 1000
+  @root_retry_ms 300
   @peer_count 3
   @max_heights 20
-  #an advertised tip nobody re-announces within this window is ignored, so one
-  #bogus far-future header cannot pin the frontier target forever
-  @tip_ttl_ms 30_000
   #v1.6 peers allow 50 catchups per peer, release 25 every 3s and never cap the
   #overshoot, so one burst above ~8/s blocks us for minutes. stay at 18 per 3s
   #window per peer (6/s); bulk may use only 12 so the frontier always has room
@@ -28,8 +27,8 @@ defmodule FabricSyncGen do
   end
 
   def init(_state) do
-    #slot 1: advertised tip height, slot 2: monotonic ms it was last seen
-    :persistent_term.put({Net, :advertisedTip}, :atomics.new(2, []))
+    #highest tip height already requested by peer_tip/2
+    :persistent_term.put({Net, :requestedTip}, :atomics.new(1, []))
     :erlang.send_after(3000, self(), :tick)
     :erlang.send_after(@tick_ms, self(), :frontier_tick)
     :ets.new(FabricSyncCatchupBudget, [:set, :named_table])
@@ -42,42 +41,32 @@ defmodule FabricSyncGen do
     }}
   end
 
-  # NodeState calls this for every validated peer tip. An atomic, so per-peer
-  # tip gossip never queues behind the bulk tick; the frontier loop reads it
-  # every @tick_ms. Races between two writers only cost one tick of accuracy.
-  def higher_tip(height) when is_integer(height) do
-    case :persistent_term.get({Net, :advertisedTip}, nil) do
-      nil -> :ok
-      atomic ->
-        now = :erlang.monotonic_time(:millisecond)
-        current = :atomics.get(atomic, 1)
-        cond do
-          height > current or now - :atomics.get(atomic, 2) > @tip_ttl_ms ->
-            :atomics.put(atomic, 1, height)
-            :atomics.put(atomic, 2, now)
-          height == current -> :atomics.put(atomic, 2, now)
-          true -> :ok
-        end
-    end
-  end
-  def higher_tip(_height), do: :ok
-
-  def advertised_tip_height() do
-    case :persistent_term.get({Net, :advertisedTip}, nil) do
-      nil -> 0
-      atomic ->
-        fresh = :erlang.monotonic_time(:millisecond) - :atomics.get(atomic, 2) <= @tip_ttl_ms
-        if fresh, do: :atomics.get(atomic, 1), else: 0
+  #a validated event_tip shows peer at temporal height: the first announcer of a
+  #new height is asked for it directly (entries+attestations+consensus), it
+  #surely holds it. runs in the socket process: the CAS lets only the first of
+  #the ~20 peers announcing the same height through to the GenServer
+  def peer_tip(peer, height) when is_integer(height) do
+    with atomic when atomic != nil <- :persistent_term.get({Net, :requestedTip}, nil),
+         last = :atomics.get(atomic, 1),
+         true <- height > last,
+         :ok <- :atomics.compare_exchange(atomic, 1, last, height),
+         pid when is_pid(pid) <- Process.whereis(__MODULE__) do
+      send(pid, {:peer_tip, peer, height})
     end
   end
 
   def handle_info(:frontier_tick, state) do
-    local_height = DB.Chain.height()
-    rooted_height = DB.Chain.rooted_height()
-    state = state
-    |> pursue_frontier(local_height)
-    |> pursue_root(local_height, rooted_height)
     :erlang.send_after(@tick_ms, self(), :frontier_tick)
+    {:noreply, pursue(state)}
+  end
+
+  def handle_info({:peer_tip, peer, height}, state) do
+    local_height = DB.Chain.height()
+    if height > local_height and catchup_ok?(peer.pk, @catchup_per_peer) do
+      requests = (local_height + 1)..min(height, local_height + @max_heights)
+      |> Enum.map(& frontier_request(&1, DB.Entry.by_height_return_hashes(&1)))
+      send(NodeGen.get_socket_gen(), {:send_to, [peer], NodeProto.catchup(requests)})
+    end
     {:noreply, state}
   end
 
@@ -92,12 +81,20 @@ defmodule FabricSyncGen do
     {:noreply, state}
   end
 
+  defp pursue(state) do
+    local_height = DB.Chain.height()
+    rooted_height = DB.Chain.rooted_height()
+    state
+    |> pursue_frontier(local_height)
+    |> pursue_root(local_height, rooted_height)
+  end
+
   # Behind: H+1 (hash-deduped, so a doubleblock sibling we lack can arrive)
   # plus every height we hold no entry for, up to the tip. Caught up: a blind
   # H+1 probe, so lost tip gossip cannot hide a new block. A blind probe must
   # not delay the real fetch, so it is forgotten once a peer advertises H+1.
   defp pursue_frontier(state, local_height) do
-    target = max(advertised_tip_height(), FabricSyncAttestGen.highestTemporalHeight() || 0)
+    target = FabricSyncAttestGen.highestTemporalHeight() || 0
     behind = target > local_height
 
     fr = if behind do
@@ -106,7 +103,7 @@ defmodule FabricSyncGen do
       state.frontier
     end
 
-    %{state | frontier: request_heights(fr, local_height, @frontier_retry_ms, !behind, fn ->
+    %{state | frontier: request_heights(fr, local_height, @frontier_retry_ms, !behind, &NodeANR.get_temporal_height/1, fn ->
       missing = (local_height + 2)..min(target, local_height + @max_heights)//1
       |> Enum.filter(& DB.Entry.by_height_return_hashes(&1) == [])
       [local_height + 1 | missing]
@@ -115,9 +112,10 @@ defmodule FabricSyncGen do
 
   # Consensus (plus raw attestations to aggregate locally, and hash-deduped
   # entries so a winning sibling we lack can arrive) for applied heights with no
-  # rootable consensus yet. Stops once they root.
+  # rootable consensus yet. Stops once they root. Peers that advertise a rooted
+  # height covering the request go first: only they surely hold its consensus.
   defp pursue_root(state, local_height, rooted_height) do
-    %{state | root: request_heights(state.root, rooted_height, @root_retry_ms, false, fn ->
+    %{state | root: request_heights(state.root, rooted_height, @root_retry_ms, false, &NodeANR.get_rooted_height/1, fn ->
       (rooted_height + 1)..min(local_height, rooted_height + @max_heights)//1
       |> Enum.reject(&rootable?/1)
     end)}
@@ -126,7 +124,7 @@ defmodule FabricSyncGen do
   #shared by both loops. requested: height => %{sent, pks, blind}. heights at or
   #below floor are done; a height is re-sent once retry_ms passes, skipping the
   #peers already asked for it. wanted_fun only runs when a send is allowed
-  defp request_heights(loop, floor, retry_ms, blind, wanted_fun) do
+  defp request_heights(loop, floor, retry_ms, blind, peer_height, wanted_fun) do
     now = :erlang.monotonic_time(:millisecond)
     requested = Map.filter(loop.requested, fn {height, r} -> height > floor and now - r.sent < retry_ms * 10 end)
     loop = %{loop | requested: requested}
@@ -142,7 +140,7 @@ defmodule FabricSyncGen do
       [first | _] ->
         skip_pks = heights |> Enum.flat_map(& (requested[&1] || %{pks: []}).pks) |> Enum.uniq()
         requests = Enum.map(heights, & frontier_request(&1, DB.Entry.by_height_return_hashes(&1)))
-        case send_to_peers(first, requests, skip_pks) do
+        case send_to_peers(first, requests, skip_pks, peer_height) do
           [] -> loop
           pks ->
             asked = Map.new(heights, fn h ->
@@ -157,14 +155,15 @@ defmodule FabricSyncGen do
     Enum.any?(DB.Attestation.consensuses_by_height(height), & &1.aggsig.mask_set_size / &1.aggsig.mask_size >= 0.67)
   end
 
-  #one message carrying all heights, to up to @peer_count peers. peers that
-  #showed first_height first, then any online peer (stale tip metadata must not
-  #exclude a source: the missing event_tip is what the probe recovers from).
+  #one message carrying all heights, to up to @peer_count peers. peers whose
+  #peer_height (temporal for the frontier, rooted for the root loop) reaches
+  #first_height first, then any online peer (stale tip metadata must not exclude
+  #a source: the missing event_tip is what the probe recovers from).
   #peers in skip_pks go last. returns the pks used
-  defp send_to_peers(first_height, requests, skip_pks) do
+  defp send_to_peers(first_height, requests, skip_pks, peer_height) do
     {validators, peers} = NodeANR.handshaked_and_online()
     online = Enum.filter(validators ++ peers, & NodeANR.get_pruned_below_height(&1.pk) <= first_height)
-    advertised = Enum.filter(online, & NodeANR.get_temporal_height(&1.pk) >= first_height)
+    advertised = Enum.filter(online, & peer_height.(&1.pk) >= first_height)
     peers = select_frontier_peers(advertised, online, @peer_count, skip_pks)
     |> Enum.filter(& catchup_ok?(&1.pk, @catchup_per_peer))
 

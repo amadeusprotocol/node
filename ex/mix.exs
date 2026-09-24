@@ -17,7 +17,7 @@ defmodule Ama.MixProject do
 
   def application do
     apps = [
-      extra_applications: [:iex, :logger, :crypto, :ssl, :inets]
+      extra_applications: [:iex, :logger, :crypto, :ssl, :inets, :ssh]
     ]
     if Mix.env() == :prod do
       [{:mod, {Ama.Bakeware, []}} | apps]
