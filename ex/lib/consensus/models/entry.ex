@@ -259,7 +259,7 @@ defmodule Entry do
         diff_bits = DB.Chain.diff_bits()
 
         Enum.reduce(next_entry.txs, %{}, fn(txu, batch_state)->
-            case TXPool.validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, diff_bits: diff_bits, batch_state: batch_state}) do
+            case TXPool.validate_tx(txu, %{epoch: chain_epoch, height: chain_height, inclusion_height: chain_height, segment_vr_hash: segment_vr_hash, diff_bits: diff_bits, batch_state: batch_state}) do
               %{error: :ok, batch_state: batch_state} -> batch_state
               %{error: error} when error in [:invalid_tx_nonce, :not_enough_tx_exec_balance] -> throw %{error: error}
               _ -> batch_state

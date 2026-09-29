@@ -738,6 +738,11 @@ fn call_txs_pre_upfront_cost<'a>(env: &mut ApplyEnv, txus: &[crate::model::tx::T
         let balance_key = crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]);
         let (exec_lock, storage_lock) = protocol::tx_locks(env, tx_historical_cost, txu.tx.action.attached_gas);
         if protocol::is_fork(env) {
+            if let Some(gas) = txu.tx.action.attached_gas {
+                if gas <= 0 || gas > i64::MAX as i128 {
+                    panic_any("attached_gas_invalid")
+                }
+            }
             if storage_lock < 0 {
                 panic_any("tx_exceeds_budget")
             }

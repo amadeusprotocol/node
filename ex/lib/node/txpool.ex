@@ -242,6 +242,9 @@ defmodule TXPool do
     def validate_tx(txu, args \\ %{}) do
       chain_epoch = Map.get_lazy(args, :epoch, fn()-> DB.Chain.epoch() end)
       chain_height = Map.get_lazy(args, :height, fn()-> DB.Chain.height() end)
+      #height of the block the tx goes into: the next one for pool admission; block
+      #building and validation pass the block's own height
+      inclusion_height = Map.get(args, :inclusion_height, chain_height + 1)
       batch_state = Map.get_lazy(args, :batch_state, fn()-> %{} end)
 
       try do
@@ -251,16 +254,11 @@ defmodule TXPool do
         batch_state = Map.put(batch_state, {:chain_nonce, txu.tx.signer}, txu.tx.nonce)
 
         balance = Map.get_lazy(batch_state, {:balance, txu.tx.signer}, fn()-> DB.Chain.balance(txu.tx.signer) end)
-        #the tx lands at chain_height + 1: attached_gas only from the fee fork, and it
-        #must be able to lock its whole budget there
-        if !RDBProtocol.fork?(chain_height + 1) and Map.has_key?(txu.tx.action, :attached_gas),
+        #attached_gas only from the fee fork, and the tx must be able to lock its whole budget
+        if !RDBProtocol.fork?(inclusion_height) and Map.has_key?(txu.tx.action, :attached_gas),
           do: throw(%{error: :attached_gas_before_fork, key: {txu.tx.nonce, txu.hash}})
-        if !TX.fits_budget?(chain_height + 1, txu), do: throw(%{error: :tx_exceeds_budget, key: {txu.tx.nonce, txu.hash}})
-        balance = if RDBProtocol.fork?(chain_height + 1) do
-          balance - TX.budget(chain_height + 1, txu)
-        else
-          balance - (RDBProtocol.reserve_ama_per_tx_exec() * 2) - RDBProtocol.reserve_ama_per_tx_storage() - TX.historical_cost(chain_height, txu)
-        end
+        if !TX.fits_budget?(inclusion_height, txu), do: throw(%{error: :tx_exceeds_budget, key: {txu.tx.nonce, txu.hash}})
+        balance = balance - TX.budget(inclusion_height, txu)
         if balance < 0, do: throw(%{error: :not_enough_tx_exec_balance, key: {txu.tx.nonce, txu.hash}})
         batch_state = Map.put(batch_state, {:balance, txu.tx.signer}, balance)
 
@@ -299,7 +297,7 @@ defmodule TXPool do
                         {acc, state_old, total_bytes}
                     end
                 else
-                  case validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, batch_state: state_old}) do
+                  case validate_tx(txu, %{epoch: chain_epoch, height: chain_height, inclusion_height: chain_height, segment_vr_hash: segment_vr_hash, batch_state: state_old}) do
                     %{error: :ok, batch_state: batch_state} ->
                       acc = [txu | acc]
                       if total_bytes + tx_size >= max_bytes do

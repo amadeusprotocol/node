@@ -110,7 +110,7 @@ defmodule TX do
       if !!action[:attached_symbol] and !action[:attached_amount], do: throw %{error: :attached_amount_must_be_included}
       if !!action[:attached_amount] and !action[:attached_symbol], do: throw %{error: :attached_symbol_must_be_included}
 
-      if Map.has_key?(action, :attached_gas) and !(is_integer(action.attached_gas) and action.attached_gas > 0),
+      if Map.has_key?(action, :attached_gas) and !(is_integer(action.attached_gas) and action.attached_gas > 0 and action.attached_gas <= 9_223_372_036_854_775_807),
         do: throw %{error: :attached_gas_invalid}
 
       tx_encoded = RDB.vecpak_encode(txu.tx)
@@ -204,7 +204,7 @@ defmodule TX do
       if RDBProtocol.fork?(height) do
         RDBProtocol.tx_budget_fork() + (txu.tx.action[:attached_gas] || 0)
       else
-        RDBProtocol.reserve_ama_per_tx_exec() + RDBProtocol.reserve_ama_per_tx_storage() + historical_cost(height, txu)
+        RDBProtocol.reserve_ama_per_tx_exec() * 2 + RDBProtocol.reserve_ama_per_tx_storage() + historical_cost(height, txu)
       end
    end
 

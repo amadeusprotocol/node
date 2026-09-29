@@ -139,6 +139,6 @@ pub fn tx_locks(env: &crate::consensus::consensus_apply::ApplyEnv, historical_co
     if !is_fork(env) {
         return (RESERVE_AMA_PER_TX_EXEC, RESERVE_AMA_PER_TX_STORAGE)
     }
-    let budget = TX_BUDGET_FORK + attached_gas.unwrap_or(0);
+    let budget = TX_BUDGET_FORK.saturating_add(attached_gas.unwrap_or(0));
     (TX_EXEC_LOCK_FORK, budget - TX_EXEC_LOCK_FORK - historical_cost)
 }
