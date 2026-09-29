@@ -16,9 +16,9 @@ defmodule NodeState do
     if !is_map(Map.get(term, :anr)) or !is_integer(term.anr[:ts]), do: throw(:bad_anr)
     anr = NodeANR.verify_and_unpack(term.anr)
 
-    #signed within 60 seconds
+    #signed within 10 minutes (peers re-sign their ANR every 3 minutes)
     ts = :os.system_time(1)
-    fresh6s = abs(ts - term.anr.ts) <= 60
+    fresh6s = abs(ts - term.anr.ts) <= 600
 
     if !!anr and istate.peer.ip4 == anr.ip4 and anr.pk == istate.peer.pk and fresh6s do
       send(NodeGen, {:handle_sync, :new_phone_who_dis_reply_ns, istate, %{pk: anr.pk, anr: anr}})

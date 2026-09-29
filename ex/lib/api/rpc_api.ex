@@ -25,11 +25,18 @@ defmodule RPC.API do
   # Raw GET — returns {:ok, response} for any status code, {:error, _} on
   # transport failure. Body is not decoded. Used by the multiserver proxy
   # so it can forward status + body verbatim without a JSON round-trip.
-  def get_raw(path) do
+  #runs in a throwaway task: the TLS connection is owned by it and closes when
+  #it ends or is killed, so a failed or slow upstream never leaves one behind
+  @raw_timeout_ms 10_000
+  def get_raw(path, headers \\ %{}) do
     url = Application.fetch_env!(:ama, :rpc_url)
-    case :comsat_http.get(url <> path, %{}, http_opts(url)) do
-      {:ok, resp} -> {:ok, resp}
-      err -> {:error, err}
+    opts = Map.put(http_opts(url), :timeout, @raw_timeout_ms)
+    task = Task.async(fn -> :comsat_http.get(url <> path, headers, opts) end)
+    case Task.yield(task, @raw_timeout_ms + 1_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, resp}} -> {:ok, resp}
+      {:ok, err} -> {:error, err}
+      {:exit, reason} -> {:error, reason}
+      nil -> {:error, :timeout}
     end
   end
 

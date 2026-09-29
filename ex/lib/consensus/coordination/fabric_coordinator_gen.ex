@@ -7,6 +7,11 @@ defmodule FabricCoordinatorGen do
   # we'll never see) don't accumulate.
   @attestation_cache_ttl_ms 30_000
   @attestation_cache_sweep_ms 30_000
+  # AttestationSeen: {entry_hash, mutations_hash, signer} of attestations already
+  # aggregated, so peers re-sending the same one cost a lookup, not a block
+  # decode + aggregation. only real aggregations are recorded, so one that came
+  # before its entry was applied still goes through later
+  @attestation_seen_ttl_ms 600_000
 
   def isSyncing() do
     case :persistent_term.get(FabricCoordinatorSyncing, nil) do
@@ -21,6 +26,7 @@ defmodule FabricCoordinatorGen do
 
   def init(state) do
     :persistent_term.put(FabricCoordinatorSyncing, :atomics.new(1, []))
+    :ets.new(AttestationSeen, [:set, :named_table, :public])
 
     :erlang.send_after(1000, self(), :tick)
     :erlang.send_after(@attestation_cache_sweep_ms, self(), :sweep_attestation_cache)
@@ -52,6 +58,8 @@ defmodule FabricCoordinatorGen do
       {{{:_, :_}, {:_, :"$1"}}, [{:<, :"$1", cutoff}], [true]}
     ])
     if n > 0, do: IO.puts("AttestationCache sweep: dropped #{n} stale entries")
+    seen_cutoff = :os.system_time(1000) - @attestation_seen_ttl_ms
+    :ets.select_delete(AttestationSeen, [{{:_, :"$1"}, [{:<, :"$1", seen_cutoff}], [true]}])
     :erlang.send_after(@attestation_cache_sweep_ms, self(), :sweep_attestation_cache)
     {:noreply, state}
   end
@@ -66,7 +74,10 @@ defmodule FabricCoordinatorGen do
   def handle_info({:add_attestation, attestation}, state) do
     calc_syncing(true)
 
-    aggregate_attestation(attestation)
+    key = {attestation.entry_hash, attestation.mutations_hash, attestation.signer}
+    if !:ets.member(AttestationSeen, key) and aggregate_attestation(attestation) == :aggregated do
+      :ets.insert(AttestationSeen, {key, :os.system_time(1000)})
+    end
     drain_cached_attestations(attestation.entry_hash)
 
     calc_syncing(false)
@@ -97,7 +108,7 @@ defmodule FabricCoordinatorGen do
 
     entry = DB.Entry.by_hash(entry_hash, %{rtx: rtx})
     trainers = if !entry do nil else DB.Chain.validators_for_height(Entry.height(entry), %{rtx: rtx}) end
-    if !!entry and !!trainers and a.signer in trainers do
+    result = if !!entry and !!trainers and a.signer in trainers do
       if entry.header.height <= DB.Chain.height(%{rtx: rtx}) do
         consensus = DB.Attestation.consensus(entry_hash, mutations_hash, %{rtx: rtx}) || %{mutations_hash: mutations_hash, entry_hash: entry_hash}
         aggsig = cond do
@@ -108,9 +119,13 @@ defmodule FabricCoordinatorGen do
             BLS12AggSig.add_padded(consensus.aggsig, trainers, a.signer, a.signature)
         end
         consensus = Map.put(consensus, :aggsig, aggsig)
-        DB.Attestation.set_consensus(consensus, %{rtx: rtx})
+        case DB.Attestation.set_consensus(consensus, %{rtx: rtx}) do
+          {:error, _} -> nil
+          _ -> :aggregated
+        end
       end
     end
     RocksDB.transaction_commit(rtx)
+    result
   end
 end

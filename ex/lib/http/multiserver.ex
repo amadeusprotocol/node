@@ -1,5 +1,7 @@
 defmodule Ama.MultiServer do
     @max_http_body_size 1024 * 1024
+    #photon's default allow-list plus X-Ama-Proxied (the proxy hop marker)
+    @cors_allow_headers "User-Agent, Cache-Control, Pragma, Origin, Authorization, Content-Type, X-Auth-Token, X-Client-Type, X-Requested-With, Location, Extra, Filename, If-Modified-Since, DNT, Accept, X-Ama-Proxied"
     @max_request_line_bytes 8 * 1024
     @max_header_bytes 32 * 1024
     @http_idle_timeout_ms 60_000
@@ -106,10 +108,21 @@ defmodule Ama.MultiServer do
     defp empty_response?(%{txs: []}), do: true
     defp empty_response?(_), do: false
 
+    #upstream fallback for pruned nodes only. a node that never pruned holds the
+    #full history, so it has nothing to fall back to; and a request that already
+    #came through a proxy must not hop again (rpc_url can point back at this node)
     defp proxy_get(state, r) do
+        if DB.Chain.pruned_below_height() == 0 or !!r.headers["x-ama-proxied"] do
+            quick_reply(state, %{error: :not_found}, 404)
+        else
+            proxy_get_1(state, r)
+        end
+    end
+
+    defp proxy_get_1(state, r) do
         path = r.path <> (if r.query, do: "?" <> r.query, else: "")
         try do
-            case RPC.API.get_raw(path) do
+            case RPC.API.get_raw(path, %{"x-ama-proxied" => "1"}) do
                 {:ok, %{status_code: code, body: body}} ->
                     :ok = :gen_tcp.send(state.socket, Photon.HTTP.Response.build_cors(state.request, code, %{}, body))
                     state
@@ -246,7 +259,7 @@ defmodule Ama.MultiServer do
         testnet = !!Application.fetch_env!(:ama, :testnet)
         cond do
             r.method in ["OPTIONS", "HEAD"] ->
-                :ok = :gen_tcp.send(state.socket, Photon.HTTP.Response.build_cors(state.request, 200, %{}, ""))
+                :ok = :gen_tcp.send(state.socket, Photon.HTTP.Response.build_cors(state.request, 200, %{"Access-Control-Allow-Headers" => @cors_allow_headers}, ""))
                 state
 
             r.method == "GET" and r.path == "/ws/rpc/test" -> quick_reply(state, HTTP.WS.RPC.html_test())
@@ -320,7 +333,9 @@ defmodule Ama.MultiServer do
 
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tx/") ->
                 txid = String.replace(r.path, "/api/chain/tx/", "")
-                result = API.TX.get(txid)
+                #a tx still in our pool is answered as pending; anything else unknown goes
+                #upstream (proxy_get refuses on archival nodes and on proxied requests)
+                result = API.TX.get(txid) || API.TX.get_pending(txid)
                 reply_or_proxy(state, r, result)
 
             r.method == "GET" and String.starts_with?(r.path, "/api/epoch/score") ->

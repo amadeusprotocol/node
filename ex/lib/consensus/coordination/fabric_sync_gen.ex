@@ -15,6 +15,7 @@ defmodule FabricSyncGen do
   @root_retry_ms 300
   @peer_count 3
   @max_heights 20
+  @live_edge 2
   #v1.6 peers allow 50 catchups per peer, release 25 every 3s and never cap the
   #overshoot, so one burst above ~8/s blocks us for minutes. stay at 18 per 3s
   #window per peer (6/s); bulk may use only 12 so the frontier always has room
@@ -64,7 +65,7 @@ defmodule FabricSyncGen do
     local_height = DB.Chain.height()
     if height > local_height and catchup_ok?(peer.pk, @catchup_per_peer) do
       requests = (local_height + 1)..min(height, local_height + @max_heights)
-      |> Enum.map(& frontier_request(&1, DB.Entry.by_height_return_hashes(&1)))
+      |> Enum.map(& frontier_request(&1, DB.Entry.by_height_return_hashes(&1), &1 >= height - @live_edge))
       send(NodeGen.get_socket_gen(), {:send_to, [peer], NodeProto.catchup(requests)})
     end
     {:noreply, state}
@@ -103,19 +104,19 @@ defmodule FabricSyncGen do
       state.frontier
     end
 
-    %{state | frontier: request_heights(fr, local_height, @frontier_retry_ms, !behind, &NodeANR.get_temporal_height/1, fn ->
+    %{state | frontier: request_heights(fr, local_height, @frontier_retry_ms, !behind, &NodeANR.get_temporal_height/1, max(target, local_height) - @live_edge, fn ->
       missing = (local_height + 2)..min(target, local_height + @max_heights)//1
       |> Enum.filter(& DB.Entry.by_height_return_hashes(&1) == [])
       [local_height + 1 | missing]
     end)}
   end
 
-  # Consensus (plus raw attestations to aggregate locally, and hash-deduped
-  # entries so a winning sibling we lack can arrive) for applied heights with no
-  # rootable consensus yet. Stops once they root. Peers that advertise a rooted
+  # Consensus (plus hash-deduped entries so a winning sibling we lack can
+  # arrive, and raw attestations at the live edge only) for applied heights with
+  # no rootable consensus yet. Stops once they root. Peers that advertise a rooted
   # height covering the request go first: only they surely hold its consensus.
   defp pursue_root(state, local_height, rooted_height) do
-    %{state | root: request_heights(state.root, rooted_height, @root_retry_ms, false, &NodeANR.get_rooted_height/1, fn ->
+    %{state | root: request_heights(state.root, rooted_height, @root_retry_ms, false, &NodeANR.get_rooted_height/1, local_height - @live_edge, fn ->
       (rooted_height + 1)..min(local_height, rooted_height + @max_heights)//1
       |> Enum.reject(&rootable?/1)
     end)}
@@ -123,8 +124,9 @@ defmodule FabricSyncGen do
 
   #shared by both loops. requested: height => %{sent, pks, blind}. heights at or
   #below floor are done; a height is re-sent once retry_ms passes, skipping the
-  #peers already asked for it. wanted_fun only runs when a send is allowed
-  defp request_heights(loop, floor, retry_ms, blind, peer_height, wanted_fun) do
+  #peers already asked for it. raw attestations are only asked from attest_from
+  #up. wanted_fun only runs when a send is allowed
+  defp request_heights(loop, floor, retry_ms, blind, peer_height, attest_from, wanted_fun) do
     now = :erlang.monotonic_time(:millisecond)
     requested = Map.filter(loop.requested, fn {height, r} -> height > floor and now - r.sent < retry_ms * 10 end)
     loop = %{loop | requested: requested}
@@ -139,7 +141,7 @@ defmodule FabricSyncGen do
       [] -> loop
       [first | _] ->
         skip_pks = heights |> Enum.flat_map(& (requested[&1] || %{pks: []}).pks) |> Enum.uniq()
-        requests = Enum.map(heights, & frontier_request(&1, DB.Entry.by_height_return_hashes(&1)))
+        requests = Enum.map(heights, & frontier_request(&1, DB.Entry.by_height_return_hashes(&1), &1 >= attest_from))
         case send_to_peers(first, requests, skip_pks, peer_height) do
           [] -> loop
           pks ->
@@ -173,8 +175,11 @@ defmodule FabricSyncGen do
     Enum.map(peers, & &1.pk)
   end
 
-  defp frontier_request(height, hashes) do
-    %{height: height, hashes: hashes, e: true, a: true, c: true}
+  #raw attestations only at the live edge (the last @live_edge heights of the
+  #tip): deeper heights already have a formed consensus, and re-fetching their
+  #attestations floods FabricCoordinatorGen with duplicates
+  defp frontier_request(height, hashes, attest?) do
+    %{height: height, hashes: hashes, e: true, a: attest?, c: true}
   end
 
   #stable sort keeps advertised-first order within each group

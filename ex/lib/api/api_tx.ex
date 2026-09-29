@@ -5,6 +5,16 @@ defmodule API.TX do
         |> format_tx_for_client()
     end
 
+    def get_pending(txid) do
+        txid = API.maybe_b58(32, txid)
+        case :ets.match_object(TXPool, {{:_, txid}, :_, :_, :_}) do
+            [{_, txu, _, _} | _] ->
+                #not executed yet: no receipt or result to report
+                txu |> format_tx_for_client() |> Map.drop([:receipt, :result]) |> Map.put(:metadata, %{status: :pending})
+            [] -> nil
+        end
+    end
+
     def get_by_entry(entry_hash) do
         entry_hash = API.maybe_b58(32, entry_hash)
         case DB.Entry.by_hash(entry_hash) do
