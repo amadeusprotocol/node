@@ -1370,6 +1370,7 @@ impl TestEnv {
             logs: Vec::new(),
             logs_size: 0,
             preverified_sol_hashes: HashSet::new(),
+            tx_locks: Vec::new(),
             testnet: false,
             readonly: false,
             call_depth: 0,

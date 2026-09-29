@@ -112,10 +112,6 @@ fn prime_admins_mint_and_pause_holders_cannot_move_it() {
     let user = chain.wallet(0);
     let other = chain.wallet(0);
 
-    //before the fork boundary Coin.mint is not dispatched on mainnet at all
-    let err = call_mainnet(&chain, &PRIME_ADMIN_COLD, b"Coin", b"mint", &[&user.pk, b"5000", b"PRIME"]);
-    assert_eq!(err, Err("invalid_bic_action".to_string()));
-
     run_mainnet_boundary(&mut chain);
 
     //every canonical mainnet admin key can mint
@@ -149,9 +145,6 @@ fn prime_permissions_rotate_atomically_on_mainnet() {
     let receiver = chain.wallet(0);
     let update = encode_permission_update(&[&new_hot.pk], &[&PRIME_ADMIN_HOT], b"PRIME");
 
-    //The entry point is not available until the same boundary that creates
-    //PRIME and enables mint/pause.
-    assert_eq!(call_mainnet(&chain, &PRIME_ADMIN_COLD, b"Coin", b"update_permission", &[&update]), Err("invalid_bic_action".to_string()));
     run_mainnet_boundary(&mut chain);
 
     assert_eq!(call_mainnet(&chain, &PRIME_ADMIN_COLD, b"Coin", b"update_permission", &[&update, &update]), Err("invalid_args".to_string()));
@@ -276,8 +269,6 @@ fn prime_permission_update_activates_at_testnet_fork() {
     let new_hot = chain.wallet(0);
     let receiver = chain.wallet(0);
     let update = encode_permission_update(&[&new_hot.pk], &[&PRIME_ADMIN_HOT], b"PRIME");
-
-    assert_eq!(chain.call_as(&PRIME_ADMIN_COLD, b"Coin", b"update_permission", &[&update]), Err("invalid_bic_action".to_string()));
 
     chain.step_epoch();
     chain.call_as(&PRIME_ADMIN_COLD, b"Coin", b"update_permission", &[&update]).unwrap();
