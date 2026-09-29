@@ -213,6 +213,18 @@ defmodule EntryGenesis do
           ]
         end)
 
+        #restarting an old testnet: carry its balances (and the coin: definitions
+        #they refer to) into genesis, exported as %{rows: [{k, v}]}. validators stay
+        #this node's keys; migrated rows win over the generated defaults
+        migrate_path = Path.join(Application.fetch_env!(:ama, :work_folder), "testnet_migrate.etf")
+        rows = case File.read(migrate_path) do
+          {:ok, bin} ->
+            %{rows: migrated} = :erlang.binary_to_term(bin)
+            IO.puts "testnet genesis: migrating #{length(migrated)} rows from #{migrate_path}"
+            Map.merge(Map.new(rows), Map.new(migrated)) |> Map.to_list()
+          _ -> rows
+        end
+
         Enum.each(rows, fn({k, v})->
           RocksDB.put(k, v, %{rtx: rtx, cf: cf.contractstate})
         end)

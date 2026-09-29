@@ -14,6 +14,9 @@ defmodule BLS12AggSig do
     @dst_entry "AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_ENTRY_"
     @dst_vrf "AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_VRF_"
     @dst_tx "AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_TX_"
+    #a tx signs only action/signer/nonce (no chain id): a separate testnet domain
+    #keeps testnet txs from replaying on mainnet and back. mainnet is unchanged
+    @dst_tx_testnet "AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_TX_TESTNET_"
     @dst_motion "AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_MOTION_"
     @dst_node "AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NODE_"
     @dst_anr "AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_ANR_"
@@ -25,7 +28,7 @@ defmodule BLS12AggSig do
     def dst_att(), do: @dst_att
     def dst_entry(), do: @dst_entry
     def dst_vrf(), do: @dst_vrf
-    def dst_tx(), do: @dst_tx
+    def dst_tx(), do: if(Application.get_env(:ama, :testnet), do: @dst_tx_testnet, else: @dst_tx)
     def dst_motion(), do: @dst_motion
     def dst_node(), do: @dst_node
     def dst_anr(), do: @dst_anr
