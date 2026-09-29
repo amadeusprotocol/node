@@ -17,6 +17,7 @@ defmodule NodeGen do
     :erlang.send_after(1000, self(), :tick_ping)
     :erlang.send_after(1000, self(), :tick_anr)
     :erlang.send_after(6000, self(), :tick_purge_txpool)
+    :erlang.send_after(6_000, self(), :tick_rebroadcast_txpool)
     {:ok, state}
   end
 
@@ -129,6 +130,11 @@ defmodule NodeGen do
           end)
         end
         :erlang.send_after(6000, self(), :tick_purge_txpool)
+        state
+
+      :tick_rebroadcast_txpool ->
+        :erlang.spawn(fn()-> TXPool.rebroadcast_stuck() end)
+        :erlang.send_after(6_000, self(), :tick_rebroadcast_txpool)
         state
 
       {:handle_sync, op, innerstate, args} ->

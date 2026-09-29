@@ -50,27 +50,52 @@ defmodule TXPool do
         Map.merge(%{height: height, epoch: div(height, 100_000)}, args)
     end
 
-    #an already-pooled tx is re-broadcast too (a lost first broadcast would
-    #strand it, receivers never relay), but at most once per @rebroadcast_ms
-    #since the duplicate path skips the BLS check
-    @rebroadcast_ms 5_000
     def insert_and_broadcast(txu, opts \\ %{}) do
         case insert(txu) do
-            %{error: :ok, txu: txu} = result ->
-                if broadcast_due?({txu.tx.nonce, txu.hash}) do
-                    NodeGen.broadcast(NodeProto.event_tx(txu), opts)
-                end
+            %{error: :ok, inserted: true, txu: txu} = result ->
+                NodeGen.broadcast(NodeProto.event_tx(txu), opts)
                 result
             result -> result
         end
     end
 
-    defp broadcast_due?(key) do
+    #receivers never relay, so a tx whose one broadcast missed the producers would
+    #sit unmined. each signer's lowest pooled nonce that has waited @stuck_ms goes
+    #to the validator producing ~1.5s from now, else a random one. only the lowest:
+    #a later nonce admitted first would invalidate the one still missing
+    @stuck_ms 6_000
+    @lead_blocks 3
+    @rebroadcast_max 200
+    def rebroadcast_stuck() do
         now = :os.system_time(1000)
-        case :ets.lookup(TXPoolBroadcast, key) do
-            [{_, last}] when now - last < @rebroadcast_ms -> false
-            _ -> :ets.insert(TXPoolBroadcast, {key, now})
+        my_pk = Application.fetch_env!(:ama, :trainer_pk)
+        {validators, _peers} = NodeANR.handshaked_and_online()
+        validators = Enum.reject(validators, & &1.pk == my_pk)
+
+        #ordered by {nonce, hash}: the first still-pending row of a signer is its
+        #lowest nonce; rows at or below the chain nonce are already used, skip them
+        {stuck, _chain_nonces} = :ets.foldl(fn({key, txu, _, _}, {acc, chain_nonces})->
+            signer = txu.tx.signer
+            if Map.has_key?(acc, signer) do {acc, chain_nonces} else
+                chain_nonces = Map.put_new_lazy(chain_nonces, signer, fn()-> DB.Chain.nonce(signer) end)
+                chain_nonce = chain_nonces[signer]
+                if chain_nonce && txu.tx.nonce <= chain_nonce do {acc, chain_nonces} else
+                    {Map.put(acc, signer, {key, txu}), chain_nonces}
+                end
+            end
+        end, {%{}, %{}}, TXPool)
+        stuck = stuck
+        |> Map.values()
+        |> Enum.filter(fn {key, _} -> now - :ets.lookup_element(TXPoolSeen, key, 2, 0) >= @stuck_ms end)
+        |> Enum.take(@rebroadcast_max)
+        |> Enum.map(fn {_, txu} -> txu end)
+
+        if stuck != [] and validators != [] do
+            upcoming = DB.Chain.validator_for_height(DB.Chain.height() + @lead_blocks)
+            target = Enum.find(validators, & &1.pk == upcoming) || Enum.random(validators)
+            send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: target.ip4, pk: target.pk}], NodeProto.event_tx(stuck)})
         end
+        :ok
     end
 
     def delete_packed(txu) when is_map(txu) do delete_packed([txu]) end
@@ -118,6 +143,7 @@ defmodule TXPool do
                 release_signer(signer, reserved_ama)
                 pool_full_error()
             :ets.insert_new(TXPool, {key, txu, tx_bytes, reserved_ama}) ->
+                :ets.insert(TXPoolSeen, {key, :os.system_time(1000)})
                 %{error: :ok, txu: txu, inserted: true}
             true ->
                 #lost a race against the same tx
@@ -131,7 +157,7 @@ defmodule TXPool do
     defp delete_key(key) do
         case :ets.take(TXPool, key) do
             [{_, txu, tx_bytes, reserved_ama}] ->
-                :ets.delete(TXPoolBroadcast, key)
+                :ets.delete(TXPoolSeen, key)
                 release_bytes(tx_bytes)
                 release_signer(txu.tx.signer, reserved_ama)
                 true

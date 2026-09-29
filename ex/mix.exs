@@ -42,6 +42,7 @@ defmodule Ama.MixProject do
       {:comsat, git: "https://github.com/vans163/ComSat.git"},
       {:ex_stun, git: "https://github.com/elixir-webrtc/ex_stun.git"},
       {:x509, git: "https://github.com/voltone/x509"},
+      {:ssh_console, git: "https://github.com/vans163/ssh_console.git"},
     ]
   end
 

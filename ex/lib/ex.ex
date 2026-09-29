@@ -21,6 +21,14 @@ defmodule Ama do
     end
 
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: PG, start: {:pg, :start_link, []}})
+    #live query console: ssh -p <port> <os user>@127.0.0.1 '<expr>', key auth via ~/.ssh/authorized_keys.
+    #several nodes on one box need their own SSH_CONSOLE_PORT; a failed start must not stop the node
+    if port = Application.get_env(:ama, :ssh_console_port) do
+      case DynamicSupervisor.start_child(Ama.Supervisor, {SSHConsole, %{ip: "127.0.0.1", port: port}}) do
+        {:ok, _} -> IO.puts "ssh console on 127.0.0.1:#{port}"
+        error -> IO.inspect({:ssh_console_not_started, port, error})
+      end
+    end
 
     if Application.fetch_env!(:ama, :autoupdate) do
       IO.puts "🟢 auto-update enabled"
@@ -32,7 +40,7 @@ defmodule Ama do
 
     :ets.new(TXPool, [:ordered_set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
-    :ets.new(TXPoolBroadcast, [:set, :named_table, :public, {:write_concurrency, true}])
+    :ets.new(TXPoolSeen, [:set, :named_table, :public, {:write_concurrency, true}])
     :ets.new(TXPoolAccount, [:set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
     TXPool.init_byte_counter()

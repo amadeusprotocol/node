@@ -32,6 +32,10 @@ config :ama, :snapshot_height, (System.get_env("SNAPSHOT_HEIGHT") || "77736265")
 #absent in releases, so this cannot misfire there
 in_mix_test = Code.ensure_loaded?(Mix) and function_exported?(Mix, :env, 0) and Mix.env() == :test
 config :ama, :offline, (!!System.get_env("OFFLINE") || in_mix_test || nil)
+config :ama, :ssh_console_port, (case System.get_env("SSH_CONSOLE_PORT") do
+  nil -> nil
+  port -> String.to_integer(port)
+end)
 config :ama, :testnet, (!!System.get_env("TESTNET") || nil)
 testnet_sleep_default = if !!System.get_env("TESTNET") do "350" else "0" end
 config :ama, :testnet_sleep, (System.get_env("TESTNET_SLEEP") || testnet_sleep_default) |> :erlang.binary_to_integer()
