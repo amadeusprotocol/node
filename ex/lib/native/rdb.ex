@@ -116,12 +116,24 @@ defmodule RDBProtocol do
     end
   end
 
-  def forkheight2() do
-    const = :persistent_term.get({ProtocolConstant, :forkheight2}, nil)
-    if const do const else
-      const = RDB.protocol_constants().forkheight2
-      :persistent_term.put({ProtocolConstant, :forkheight2}, const)
-      const
+  def forkheight_testnet(), do: const(:forkheight_testnet)
+  def tx_budget_fork(), do: const(:tx_budget_fork)
+  def tx_exec_lock_fork(), do: const(:tx_exec_lock_fork)
+  def cost_per_byte_historical_fork(), do: const(:cost_per_byte_historical_fork)
+
+  #is the fee fork (protocol.rs FORKHEIGHT) active for a tx included at height
+  def fork?(height) do
+    fork_height = if Application.fetch_env!(:ama, :testnet), do: forkheight_testnet(), else: forkheight()
+    height >= fork_height
+  end
+
+  defp const(key) do
+    case :persistent_term.get({ProtocolConstant, key}, nil) do
+      nil ->
+        value = Map.fetch!(RDB.protocol_constants(), key)
+        :persistent_term.put({ProtocolConstant, key}, value)
+        value
+      value -> value
     end
   end
 end

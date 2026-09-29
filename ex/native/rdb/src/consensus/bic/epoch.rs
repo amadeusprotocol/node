@@ -17,10 +17,9 @@ pub const NETWORK_TAX_BPS: i128 = 2_500; //25%
 
 pub const SOLVER_PARTICIPATION_TARGET: i128 = 100;
 
-//from PARTICIPATION_FLOOR_EPOCH on, participation never drops below this floor, so a
-//low/idle network still pays out at least this percentage
+//participation never drops below this floor, so a low/idle network still pays out
+//at least this percentage
 pub const SOLVER_PARTICIPATION_FLOOR: i128 = 10;
-pub const PARTICIPATION_FLOOR_EPOCH: u64 = 758;
 
 pub const PARTICIPATION_VAULT_EPOCH: u64 = 1150;
 
@@ -299,9 +298,7 @@ pub fn next(env: &mut ApplyEnv) {
     //can't take the lion's share of easy emissions.
     let height_in_epoch = (env.caller_env.entry_height % 100_000) as i128;
     let pflops = net_pflops(env, total_score_all, height_in_epoch);
-    //floor the participation from PARTICIPATION_FLOOR_EPOCH on; before it, no floor
-    let floor = if epoch_cur >= PARTICIPATION_FLOOR_EPOCH { SOLVER_PARTICIPATION_FLOOR } else { 0 };
-    let participation = pflops.clamp(floor, SOLVER_PARTICIPATION_TARGET);
+    let participation = pflops.clamp(SOLVER_PARTICIPATION_FLOOR, SOLVER_PARTICIPATION_TARGET);
 
     //participation curbs the solver half always; it curbs vault APY only from
     //PARTICIPATION_VAULT_EPOCH on. before that, vaults always pay full and only solvers
@@ -443,13 +440,7 @@ fn update_difficulty_and_log_sols(env: &mut ApplyEnv, epoch_cur: u64, epoch_next
     let old_diff_bits = kv_get(env, b"bic:epoch:diff_bits").unwrap();
     let old_diff_bits = std::str::from_utf8(&old_diff_bits).ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| panic_any("invalid_diff_bits"));
 
-    //target keyed on epoch_next: the diff an epoch runs under is computed with the
-    //target active in THAT epoch, so the 180k retarget lands exactly at FORKHEIGHT2
-    let target = if epoch_next.saturating_mul(100_000) >= consensus::bic::protocol::forkheight2(env) {
-        crate::consensus::bic::sol_difficulty::TARGET_SOLS_EPOCH2
-    } else {
-        crate::consensus::bic::sol_difficulty::TARGET_SOLS_EPOCH
-    };
+    let target = crate::consensus::bic::sol_difficulty::TARGET_SOLS_EPOCH;
     let next_diff_bits = crate::consensus::bic::sol_difficulty::next(old_diff_bits, total_sols as u64, target);
     let _ = kv_put(env, b"bic:epoch:diff_bits", next_diff_bits.to_string().as_bytes());
     let _ = kv_put(env, format!("bic:epoch:diff_bits:{}", epoch_next).as_bytes(), next_diff_bits.to_string().as_bytes());

@@ -20,8 +20,10 @@ defmodule TXPool do
         RDBProtocol.reserve_ama_per_tx_exec() * 2 + RDBProtocol.reserve_ama_per_tx_storage()
     end
 
-    def reserve_ama(txu) do
-        tx_reserve_ama() + TX.historical_cost(nil, txu)
+    #what a pooled tx reserves against its signer's balance: its full budget for
+    #inclusion at height (history charge + exec/storage locks), see TX.budget
+    def reserve_ama(txu, height) do
+        TX.budget(height, txu)
     end
 
     def signer_reservation(signer) do
@@ -113,7 +115,7 @@ defmodule TXPool do
              batch_state = Map.put_new(Map.get(args, :batch_state, %{}), {:balance, signer}, balance),
              %{error: :ok} <- validate_tx(txu, Map.put(args, :batch_state, batch_state)),
              tx_bytes = byte_size(TX.pack(txu)),
-             reserved_ama = reserve_ama(txu),
+             reserved_ama = reserve_ama(txu, args.height + 1),
              :ok <- check_capacity(txu, tx_bytes, reserved_ama, balance),
              %{error: :ok} <- TX.validate_signature(txu) do
             reserve_and_insert(key, txu, tx_bytes, reserved_ama, balance)
@@ -249,9 +251,16 @@ defmodule TXPool do
         batch_state = Map.put(batch_state, {:chain_nonce, txu.tx.signer}, txu.tx.nonce)
 
         balance = Map.get_lazy(batch_state, {:balance, txu.tx.signer}, fn()-> DB.Chain.balance(txu.tx.signer) end)
-        balance = balance - (RDBProtocol.reserve_ama_per_tx_exec() * 2)
-        balance = balance - RDBProtocol.reserve_ama_per_tx_storage()
-        balance = balance - TX.historical_cost(chain_height, txu)
+        #the tx lands at chain_height + 1: attached_gas only from the fee fork, and it
+        #must be able to lock its whole budget there
+        if !RDBProtocol.fork?(chain_height + 1) and Map.has_key?(txu.tx.action, :attached_gas),
+          do: throw(%{error: :attached_gas_before_fork, key: {txu.tx.nonce, txu.hash}})
+        if !TX.fits_budget?(chain_height + 1, txu), do: throw(%{error: :tx_exceeds_budget, key: {txu.tx.nonce, txu.hash}})
+        balance = if RDBProtocol.fork?(chain_height + 1) do
+          balance - TX.budget(chain_height + 1, txu)
+        else
+          balance - (RDBProtocol.reserve_ama_per_tx_exec() * 2) - RDBProtocol.reserve_ama_per_tx_storage() - TX.historical_cost(chain_height, txu)
+        end
         if balance < 0, do: throw(%{error: :not_enough_tx_exec_balance, key: {txu.tx.nonce, txu.hash}})
         batch_state = Map.put(batch_state, {:balance, txu.tx.signer}, balance)
 

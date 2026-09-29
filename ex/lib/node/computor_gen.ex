@@ -71,7 +71,7 @@ defmodule ComputorGen do
         state = warn_underfunded(state, underfunded_pks)
         case pick do
           nil ->
-            IO.puts "🔴 cannot compute: no key has at least 3 AMA for submit_sol"
+            IO.puts "🔴 cannot compute: no key has at least #{min_key_balance_flat() / 1_000_000_000} AMA for submit_sol"
             {state, 1000}
 
           {key, idx} ->
@@ -90,8 +90,11 @@ defmodule ComputorGen do
     end
   end
 
-  #3 AMA comfortably covers a submit_sol (1.2 AMA reserves + fee)
-  @min_key_balance_flat 3 * 1_000_000_000
+  #before the fee fork a submit_sol reserves ~1.2 AMA (3 AMA leaves room); from it
+  #a tx reserves and locks exactly its 0.01 AMA budget
+  defp min_key_balance_flat() do
+    if RDBProtocol.fork?(DB.Chain.height() + 1), do: RDBProtocol.tx_budget_fork(), else: 3 * 1_000_000_000
+  end
 
   defp next_funded_key(keys, idx) do
     n = length(keys)
@@ -99,7 +102,7 @@ defmodule ComputorGen do
       i = rem(idx + offset, n)
       {Enum.at(keys, i), i}
     end)
-    |> Enum.split_with(fn({key, _i})-> DB.Chain.balance(key.pk) >= @min_key_balance_flat end)
+    |> then(fn(keys)-> min = min_key_balance_flat(); Enum.split_with(keys, fn({key, _i})-> DB.Chain.balance(key.pk) >= min end) end)
     {List.first(funded), Enum.map(underfunded, fn({key, _i})-> key.pk end) |> Enum.sort()}
   end
 
@@ -112,7 +115,7 @@ defmodule ComputorGen do
 
   defp warn_underfunded(state, underfunded_pks) do
     if underfunded_pks != state[:underfunded] do
-      Enum.each(underfunded_pks, & IO.puts "🔴 key #{Base58.encode(&1)} has less than 3 AMA, skipping")
+      Enum.each(underfunded_pks, & IO.puts "🔴 key #{Base58.encode(&1)} has less than #{min_key_balance_flat() / 1_000_000_000} AMA, skipping")
     end
     Map.put(state, :underfunded, underfunded_pks)
   end

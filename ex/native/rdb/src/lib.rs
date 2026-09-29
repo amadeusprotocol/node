@@ -1112,7 +1112,10 @@ fn protocol_constants<'a>(env: Env<'a>) -> Term<'a> {
     let mut map = Term::map_new(env);
 
     map = map.map_put(atoms::forkheight(), protocol::FORKHEIGHT).ok().unwrap();
-    map = map.map_put(atoms::forkheight2(), protocol::FORKHEIGHT2).ok().unwrap();
+    map = map.map_put(atoms::forkheight_testnet(), protocol::FORKHEIGHT_TESTNET).ok().unwrap();
+    map = map.map_put(atoms::tx_budget_fork(), protocol::TX_BUDGET_FORK).ok().unwrap();
+    map = map.map_put(atoms::tx_exec_lock_fork(), protocol::TX_EXEC_LOCK_FORK).ok().unwrap();
+    map = map.map_put(atoms::cost_per_byte_historical_fork(), protocol::COST_PER_BYTE_HISTORICAL_FORK).ok().unwrap();
 
     map = map.map_put(atoms::ama_1_dollar(), protocol::AMA_1_DOLLAR).ok().unwrap();
     map = map.map_put(atoms::ama_10_cent(), protocol::AMA_10_CENT).ok().unwrap();
@@ -1130,7 +1133,6 @@ fn protocol_constants<'a>(env: Env<'a>) -> Term<'a> {
     map = map.map_put(atoms::cost_per_db_write_base(), protocol::COST_PER_DB_WRITE_BASE).ok().unwrap();
     map = map.map_put(atoms::cost_per_db_write_byte(), protocol::COST_PER_DB_WRITE_BYTE).ok().unwrap();
 
-    map = map.map_put(atoms::cost_per_sol(), protocol::COST_PER_SOL).ok().unwrap();
     map = map.map_put(atoms::cost_per_new_leaf_merkle(), protocol::COST_PER_NEW_LEAF_MERKLE).ok().unwrap();
 
     (map).encode(env)

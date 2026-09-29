@@ -100,6 +100,8 @@ pub struct ApplyEnv<'db> {
     pub logs: Vec<Vec<u8>>,
     pub logs_size: usize,
     pub preverified_sol_hashes: HashSet<[u8; 32]>,
+    //(exec lock, storage lock) per tx of the entry, set by call_txs_pre_upfront_cost
+    pub tx_locks: Vec<(i128, i128)>,
     pub testnet: bool,
     pub readonly: bool,
     pub call_depth: u32,
@@ -155,6 +157,7 @@ pub fn make_apply_env<'db>(
         logs: Vec::new(),
         logs_size: 0,
         preverified_sol_hashes: HashSet::new(),
+        tx_locks: Vec::new(),
         testnet: testnet,
         readonly: false,
         call_depth: 0,
@@ -279,7 +282,8 @@ pub fn apply_entry<'db, 'a>(
 
     let txs_count = entry.txs.len();
     for (i, txu) in entry.txs.into_iter().enumerate() {
-        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(&txu);
+        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(&applyenv, &txu);
+        let (exec_lock, storage_lock) = applyenv.tx_locks[i];
 
         let tx_hash = txu.hash.as_slice().try_into().unwrap_or_else(|_| panic!("tx_hash_len_wrong"));
         let tx_signer = txu.tx.signer.as_slice().try_into().unwrap_or_else(|_| panic!("tx_signer_len_wrong"));
@@ -306,10 +310,10 @@ pub fn apply_entry<'db, 'a>(
         applyenv.muts_rev = Vec::new();
         applyenv.logs = Vec::new();
         applyenv.logs_size = 0;
-        applyenv.exec_left = protocol::AMA_10_CENT;
-        applyenv.exec_max = protocol::AMA_10_CENT;
-        applyenv.storage_left = protocol::AMA_1_DOLLAR;
-        applyenv.storage_max = protocol::AMA_1_DOLLAR;
+        applyenv.exec_left = exec_lock;
+        applyenv.exec_max = exec_lock;
+        applyenv.storage_left = storage_lock;
+        applyenv.storage_max = storage_lock;
         applyenv.call_depth = 0;
 
         std::panic::set_hook(Box::new(|_| {}));
@@ -348,20 +352,6 @@ pub fn apply_entry<'db, 'a>(
                 //logs	🚨 Critical	Contains the actual data of what happened (token transfers, updates).
                 //transactionHash	ℹ️ Medium	Links the receipt back to your original request.
                 //logsBloom
-                /*
-                                let mut m = std::collections::HashMap::new();
-                                if applyenv.caller_env.entry_height >= 416_00000 {
-                                    let vecpak_term = vecpak::Term::PropList(vec![
-                                        (vecpak::Term::Binary(b"error".to_vec()), vecpak::Term::Binary(b"ok".to_vec())),
-                                        (vecpak::Term::Binary(b"exec_used".to_vec()), vecpak::Term::Binary(b"0".to_vec())),
-                                        (vecpak::Term::Binary(b"logs".to_vec()), vecpak::Term::List(Vec::new())),
-                                    ]);
-                                    applyenv.result_log.push(vecpak::encode(vecpak_term))
-                                } else {
-                                    m.insert("error", "ok");
-                                    applyenv.result_log.push(m)
-                                }
-                */
                 let receipt = TXReceipt {
                     txid: tx_hash.into(),
                     success: true,
@@ -717,6 +707,7 @@ fn refund_exec_storage_deposit(applyenv: &mut ApplyEnv) {
 fn call_txs_pre_upfront_cost<'a>(env: &mut ApplyEnv, txus: &[crate::model::tx::TXU]) {
     env.muts = Vec::new();
     env.muts_rev = Vec::new();
+    env.tx_locks = Vec::with_capacity(txus.len());
     for txu in txus {
         let tx_hash = txu.hash.as_slice().try_into().unwrap_or_else(|_| panic!("tx_hash_len_wrong"));
         let tx_signer = txu.tx.signer.as_slice().try_into().unwrap_or_else(|_| panic!("tx_signer_len_wrong"));
@@ -737,13 +728,29 @@ fn call_txs_pre_upfront_cost<'a>(env: &mut ApplyEnv, txus: &[crate::model::tx::T
         consensus_kv::kv_put(env, &nonce_key, &tx_nonce.to_string().into_bytes());
 
         // Deduct tx historical cost
-        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(txu);
+        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(env, txu);
         protocol::pay_cost(env, tx_historical_cost);
 
-        //lock 0.1 AMA during execution
-        consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]), -protocol::AMA_10_CENT);
-        //lock 1.0 storage AMA during execution
-        consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]), -protocol::AMA_1_DOLLAR);
+        //lock the exec and storage budgets during execution (refunded after).
+        //every tx of the entry is locked up front, so in-flight txs of one account
+        //are each covered. from FORKHEIGHT an entry is invalid if a tx does not fit
+        //its budget or its account cannot cover the whole budget
+        let balance_key = crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]);
+        let (exec_lock, storage_lock) = protocol::tx_locks(env, tx_historical_cost, txu.tx.action.attached_gas);
+        if protocol::is_fork(env) {
+            if storage_lock < 0 {
+                panic_any("tx_exceeds_budget")
+            }
+            let available = consensus_kv::kv_get(env, &balance_key)
+                .and_then(|v| std::str::from_utf8(&v).ok().and_then(|s| s.parse::<i128>().ok()))
+                .unwrap_or(0);
+            if available < exec_lock + storage_lock {
+                panic_any("tx_budget_exceeds_balance")
+            }
+        }
+        consensus_kv::kv_increment(env, &balance_key, -exec_lock);
+        consensus_kv::kv_increment(env, &balance_key, -storage_lock);
+        env.tx_locks.push((exec_lock, storage_lock));
     }
     env.muts_final.append(&mut env.muts);
     env.muts_final_rev.append(&mut env.muts_rev);
@@ -927,13 +934,7 @@ pub fn call_bic(
         (b"LockupVault", b"set_commission") => consensus::bic::lockup_vault::call_set_commission(env, args),
 
         (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
-        (b"Epoch", b"submit_sol") => {
-            //flat charge kept below FORKHEIGHT2 only so historical replay is unchanged
-            if env.caller_env.entry_height < protocol::forkheight2(env) {
-                consensus_kv::exec_budget_decr(env, protocol::COST_PER_SOL);
-            }
-            consensus::bic::epoch::call_submit_sol(env, args)
-        }
+        (b"Epoch", b"submit_sol") => consensus::bic::epoch::call_submit_sol(env, args),
         (b"Epoch", b"slash_trainer") => {
             consensus_kv::exec_budget_decr(env, protocol::COST_PER_SLASH);
             consensus::bic::epoch::call_slash_trainer(env, args)
@@ -941,11 +942,10 @@ pub fn call_bic(
 
         (b"Coin", b"transfer") => consensus::bic::coin::call_transfer(env, args),
 
-        //FORKHEIGHT3: PRIME exists from here (issued in epoch::next); coin admins
-        //can mint, pause, and atomically rotate permissions for existing symbols
-        (b"Coin", b"mint") if env.caller_env.entry_height >= protocol::forkheight3(env) => consensus::bic::coin::call_mint(env, args),
-        (b"Coin", b"pause") if env.caller_env.entry_height >= protocol::forkheight3(env) => consensus::bic::coin::call_pause(env, args),
-        (b"Coin", b"update_permission") if env.caller_env.entry_height >= protocol::forkheight3(env) => consensus::bic::coin::call_update_permission(env, args),
+        //coin admins can mint, pause, and atomically rotate permissions for existing symbols
+        (b"Coin", b"mint") => consensus::bic::coin::call_mint(env, args),
+        (b"Coin", b"pause") => consensus::bic::coin::call_pause(env, args),
+        (b"Coin", b"update_permission") => consensus::bic::coin::call_update_permission(env, args),
 
         /*
         (b"Coin", b"create_and_mint") => consensus::bic::coin::call_create_and_mint(env, args),

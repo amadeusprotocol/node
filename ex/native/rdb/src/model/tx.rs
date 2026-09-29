@@ -10,6 +10,8 @@ pub struct Action {
     pub args: Vec<Vec<u8>>,
     pub attached_symbol: Option<Vec<u8>>,
     pub attached_amount: Option<Vec<u8>>,
+    //from FORKHEIGHT: extra budget in flat AMA on top of the default, see protocol::tx_locks
+    pub attached_gas: Option<i128>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +47,10 @@ impl EncodeToTerm for Action {
             pairs.push((Term::Binary(b"attached_amount".to_vec()), Term::Binary(amt.clone())));
         }
 
+        if let Some(gas) = self.attached_gas {
+            pairs.push((Term::Binary(b"attached_gas".to_vec()), Term::VarInt(gas)));
+        }
+
         Ok(Term::PropList(pairs))
     }
 }
@@ -68,8 +74,9 @@ impl DecodeFromTerm for Action {
 
         let attached_symbol = codec::pl_get_bytes_opt(pairs, b"attached_symbol").map(|b| b.to_vec());
         let attached_amount = codec::pl_get_bytes_opt(pairs, b"attached_amount").map(|b| b.to_vec());
+        let attached_gas = codec::pl_get_varint_opt(pairs, b"attached_gas");
 
-        Action { op, contract, function, args, attached_symbol, attached_amount }
+        Action { op, contract, function, args, attached_symbol, attached_amount, attached_gas }
     }
 }
 

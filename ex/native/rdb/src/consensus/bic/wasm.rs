@@ -149,13 +149,27 @@ fn set_return_value(applyenv: &mut ApplyEnv, return_value: Vec<u8>) {
     applyenv.caller_env.call_return_value = return_value
 }
 
+//the meter counts 1 point per wasm op. from FORKHEIGHT a tx pays floor(points
+//used / 10), so each exec unit buys 10 points (before it: 1)
+fn wasm_points(applyenv: &ApplyEnv) -> u64 {
+    applyenv.exec_left.max(0).saturating_mul(protocol::wasm_points_per_unit(applyenv)) as u64
+}
+
+//exec budget left once the meter, last set to wasm_points, reports `remaining`
+fn exec_left_after(applyenv: &ApplyEnv, remaining: u64) -> i128 {
+    let per_unit = protocol::wasm_points_per_unit(applyenv);
+    let used = (applyenv.exec_left.max(0).saturating_mul(per_unit) - remaining as i128).max(0);
+    applyenv.exec_left - used / per_unit
+}
+
 fn budget_sync_in(store: &mut impl AsStoreMut, instance: &Instance, applyenv: &mut ApplyEnv) {
-    let wasm_remaining: i128 = match get_remaining_points(store, instance) {
-        MeteringPoints::Remaining(v) => v as i128,
+    let wasm_remaining: u64 = match get_remaining_points(store, instance) {
+        MeteringPoints::Remaining(v) => v,
         MeteringPoints::Exhausted => 0,
     };
-    if wasm_remaining < applyenv.exec_left {
-        applyenv.exec_left = wasm_remaining;
+    let exec_left = exec_left_after(applyenv, wasm_remaining);
+    if exec_left < applyenv.exec_left {
+        applyenv.exec_left = exec_left;
     }
 }
 
@@ -173,8 +187,8 @@ fn import_log_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i3
         panic_any("exec_ptr_term_too_long")
     }
 
-    crate::consensus::consensus_kv::storage_budget_decr(applyenv, protocol::cost_per_bytes_historical(len));
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    crate::consensus::consensus_kv::storage_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, len));
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     let view = data.memory.clone().view(&store);
 
@@ -194,8 +208,8 @@ fn import_return_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len:
         panic_any("exec_ptr_term_too_long")
     }
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(len));
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, len));
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     let view = data.memory.clone().view(&store);
 
@@ -268,7 +282,7 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
             panic_any("exec_call_total_args_too_long")
         }
 
-        crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(total_bytes));
+        crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, total_bytes));
 
         // Second pass: now allocate and copy. Total bytes already capped + paid for.
         let mut final_args: Vec<Vec<u8>> = Vec::with_capacity(main_table.len());
@@ -298,8 +312,8 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
         (contract, function, args, attached_symbol, attached_amount)
     };
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_CALL);
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_call(applyenv));
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     if applyenv.call_depth >= protocol::MAX_CALL_DEPTH {
         panic_any("exec_call_depth_exceeded");
@@ -321,7 +335,7 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
         true => crate::consensus::consensus_apply::call_wasmvm(applyenv, contract, function, args, attached_symbol, attached_amount),
     };
 
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     applyenv.caller_env.account_caller = og_account_caller;
     applyenv.caller_env.account_current = og_account_current;
@@ -359,7 +373,7 @@ fn import_storage_kv_put_implementation(mut env: FunctionEnvMut<HostEnv>, key_pt
     view.read(val_ptr as u64, &mut value).unwrap_or_else(|_| panic_any("exec_log_invalid_ptr"));
 
     kv_put(applyenv, &key, &value);
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
     Ok(())
 }
 
@@ -394,7 +408,7 @@ fn import_storage_kv_increment_implementation(
     view.write(10_000, &(new_value.len() as u32).to_le_bytes()).unwrap_or_else(|_| panic_any("exec_memwrite"));
     view.write(10_004, &new_value).unwrap_or_else(|_| panic_any("exec_memwrite"));
 
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
     Ok(10_000)
 }
 
@@ -413,7 +427,7 @@ fn import_storage_kv_delete_implementation(mut env: FunctionEnvMut<HostEnv>, key
 
     kv_delete(applyenv, &key);
 
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
     Ok(())
 }
 
@@ -438,7 +452,7 @@ fn import_storage_kv_get_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i
             view.write(10_004, &value).unwrap_or_else(|_| panic_any("exec_memwrite"));
         }
     }
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
     Ok(10_000)
 }
 
@@ -478,7 +492,7 @@ fn import_storage_kv_get_prev_implementation(
             view.write(10_000 + 4 + prev_key.len() as u64 + 4, &value).unwrap_or_else(|_| panic_any("exec_memwrite"));
         }
     }
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
     Ok(10_000)
 }
 
@@ -518,7 +532,7 @@ fn import_storage_kv_get_next_implementation(
             view.write(10_000 + 4 + next_key.len() as u64 + 4, &value).unwrap_or_else(|_| panic_any("exec_memwrite"));
         }
     }
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
     Ok(10_000)
 }
 
@@ -536,7 +550,7 @@ fn import_storage_kv_exists_implementation(mut env: FunctionEnvMut<HostEnv>, ptr
     let key = build_prefixed_key(applyenv, &view, ptr, len);
 
     let result = kv_exists(applyenv, &key);
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
     match result {
         true => Ok(1),
         false => Ok(0),
@@ -600,14 +614,14 @@ fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filen
     budget_sync_in(&mut store, &instance, applyenv);
     let view = data.memory.clone().view(&store);
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(as_peek_len(&view, msg_ptr)));
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, as_peek_len(&view, msg_ptr)));
     let msg = as_read_string(&view, msg_ptr);
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(as_peek_len(&view, filename_ptr)));
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, as_peek_len(&view, filename_ptr)));
     let filename = as_read_string(&view, filename_ptr);
 
     // Sync the meter only after `view`'s last use (set_remaining_points needs &mut store).
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     let full_error_msg = format!("as_abort: '{}' at {}:{}:{}", msg, filename, line, column);
     log_line(applyenv, full_error_msg.as_bytes().to_vec());
@@ -624,7 +638,7 @@ fn as_seed_implementation(mut env: FunctionEnvMut<HostEnv>) -> Result<f64, Runti
     budget_sync_in(&mut store, &instance, applyenv);
 
     crate::consensus::consensus_kv::exec_budget_decr(applyenv, 100);
-    set_remaining_points(&mut store, &instance, applyenv.exec_left.max(0) as u64);
+    set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     Ok(applyenv.caller_env.seedf64)
 }
@@ -719,7 +733,7 @@ pub fn validate_contract(env: &mut ApplyEnv, wasm_bytes: &[u8]) {
         panic_any(e)
     }
 
-    let engine = make_engine(env.exec_left.max(0) as u64);
+    let engine = make_engine(wasm_points(env));
     let mut store = Store::new(engine);
 
     let module = Module::new(&store, wasm_bytes).unwrap_or_else(|_| panic_any("exec_invalid_module"));
@@ -931,7 +945,7 @@ fn inject_env_data(view: &MemoryView, env: &ApplyEnv) {
 pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: String, function_args: Vec<Vec<u8>>) -> Vec<u8> {
     env.caller_env.call_return_value = Vec::new();
 
-    let engine = make_engine(env.exec_left.max(0) as u64);
+    let engine = make_engine(wasm_points(env));
     let mut store = Store::new(engine);
 
     // Load Module (From Cache or Compile)
@@ -967,7 +981,7 @@ pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: Strin
             panic_any("exec_insufficient_exec_budget")
         }
     };
-    env.exec_left = remaining as i128;
+    env.exec_left = exec_left_after(env, remaining);
 
     match call_result {
         Ok(_) => env.caller_env.call_return_value.clone(),

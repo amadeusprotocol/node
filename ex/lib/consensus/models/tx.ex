@@ -33,7 +33,7 @@ defmodule TX do
 
    @fields [:tx, :hash, :signature]
    @fields_tx [:action, :signer, :nonce]
-   @fields_action [:op, :contract, :function, :args, :attached_symbol, :attached_amount]
+   @fields_action [:op, :contract, :function, :args, :attached_symbol, :attached_amount, :attached_gas]
 
    def pack(txu) do
      txu = Map.take(txu, @fields)
@@ -110,6 +110,9 @@ defmodule TX do
       if !!action[:attached_symbol] and !action[:attached_amount], do: throw %{error: :attached_amount_must_be_included}
       if !!action[:attached_amount] and !action[:attached_symbol], do: throw %{error: :attached_symbol_must_be_included}
 
+      if Map.has_key?(action, :attached_gas) and !(is_integer(action.attached_gas) and action.attached_gas > 0),
+        do: throw %{error: :attached_gas_invalid}
+
       tx_encoded = RDB.vecpak_encode(txu.tx)
       if byte_size(tx_encoded) >= Application.fetch_env!(:ama, :tx_size), do: throw(%{error: :too_large})
       if txu.hash != :crypto.hash(:sha256, tx_encoded), do: throw(%{error: :invalid_hash})
@@ -181,9 +184,28 @@ defmodule TX do
    end
 
    def historical_cost(height, txu) do
-      max(
-        RDBProtocol.ama_1_cent(),
-        RDBProtocol.cost_per_byte_historical() * byte_size(RDB.vecpak_encode(txu.tx)))
+      bytes = byte_size(RDB.vecpak_encode(txu.tx))
+      if RDBProtocol.fork?(height) do
+        RDBProtocol.cost_per_byte_historical_fork() * bytes
+      else
+        max(RDBProtocol.ama_1_cent(), RDBProtocol.cost_per_byte_historical() * bytes)
+      end
+   end
+
+   #from the fee fork a tx must fit its budget: its size charge plus the exec cap.
+   #one that does not (too big for the default, not enough attached_gas) is invalid
+   def fits_budget?(height, txu) do
+      !RDBProtocol.fork?(height) or
+        historical_cost(height, txu) + RDBProtocol.tx_exec_lock_fork() <= budget(height, txu)
+   end
+
+   #mirrors protocol.rs tx_locks: the total AMA a tx locks (history charge included)
+   def budget(height, txu) do
+      if RDBProtocol.fork?(height) do
+        RDBProtocol.tx_budget_fork() + (txu.tx.action[:attached_gas] || 0)
+      else
+        RDBProtocol.reserve_ama_per_tx_exec() + RDBProtocol.reserve_ama_per_tx_storage() + historical_cost(height, txu)
+      end
    end
 
    def action(%{tx: %{actions: [action|_]}}), do: action

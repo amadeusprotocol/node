@@ -73,7 +73,10 @@ rustler::atoms! {
     nonexistance,
 
     forkheight,
-    forkheight2,
+    forkheight_testnet,
+    tx_budget_fork,
+    tx_exec_lock_fork,
+    cost_per_byte_historical_fork,
 
     ama_1_dollar,
     ama_10_cent,
@@ -91,7 +94,6 @@ rustler::atoms! {
     cost_per_db_write_base,
     cost_per_db_write_byte,
 
-    cost_per_sol,
     cost_per_new_leaf_merkle,
 
     txid,

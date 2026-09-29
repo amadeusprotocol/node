@@ -34,7 +34,7 @@ defmodule TXAdmissionSecurityTest do
     sk = :crypto.strong_rand_bytes(64)
     base_nonce = fresh_nonce()
     txus = Enum.map(1..count, &TX.build(sk, "", "", [], base_nonce + &1))
-    assert txus |> Enum.map(&TXPool.reserve_ama(&1)) |> Enum.uniq() |> length() == 1
+    assert txus |> Enum.map(&TXPool.reserve_ama(&1, 0)) |> Enum.uniq() |> length() == 1
     txus
   end
 
@@ -74,14 +74,14 @@ defmodule TXAdmissionSecurityTest do
     txu = TX.build(:crypto.strong_rand_bytes(64), "", "", [], 0)
 
     assert TXPool.tx_reserve_ama() == 1_200_000_000
-    assert TXPool.reserve_ama(txu) == 1_200_000_000 + TX.historical_cost(0, txu)
+    assert TXPool.reserve_ama(txu, 0) == 1_200_000_000 + TX.historical_cost(0, txu)
   end
 
   test "successful insertion stores its size and reservation, deletion releases both" do
     txu = funded_txu(fresh_nonce())
     tx_bytes = byte_size(TX.pack(txu))
     pool_bytes = tx_bytes + TXPool.row_overhead()
-    reserved_ama = TXPool.reserve_ama(txu)
+    reserved_ama = TXPool.reserve_ama(txu, 0)
     key = {txu.tx.nonce, txu.hash}
     initial_bytes = TXPool.bytes()
     initial_reservation = TXPool.signer_reservation(txu.tx.signer)
@@ -133,7 +133,7 @@ defmodule TXAdmissionSecurityTest do
     txu = funded_txu(fresh_nonce())
     tx_bytes = byte_size(TX.pack(txu))
     pool_bytes = tx_bytes + TXPool.row_overhead()
-    reserved_ama = TXPool.reserve_ama(txu)
+    reserved_ama = TXPool.reserve_ama(txu, 0)
     initial_bytes = TXPool.bytes()
     initial_reservation = TXPool.signer_reservation(txu.tx.signer)
 
@@ -166,7 +166,7 @@ defmodule TXAdmissionSecurityTest do
 
   test "a signer cannot reserve more AMA than its chain balance" do
     txus = signed_txus(4)
-    reserved_ama = TXPool.reserve_ama(hd(txus))
+    reserved_ama = TXPool.reserve_ama(hd(txus), 0)
     balance = reserved_ama * 3
     signer = hd(txus).tx.signer
 
@@ -196,7 +196,7 @@ defmodule TXAdmissionSecurityTest do
   #maximum can win; the balance itself is never exceeded
   test "concurrent admission cannot cross a signer's balance" do
     txus = signed_txus(16)
-    reserved_ama = TXPool.reserve_ama(hd(txus))
+    reserved_ama = TXPool.reserve_ama(hd(txus), 0)
     balance = reserved_ama * 4
     signer = hd(txus).tx.signer
 

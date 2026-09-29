@@ -157,6 +157,11 @@ defmodule Entry do
         validators_last_change_height = DB.Chain.validators_last_change_height(eh.height)
         if eh.root_validator != root_validator(validators, validators_last_change_height), do: throw(%{error: :root_validator_invalid})
 
+        if !RDBProtocol.fork?(eh.height) and Enum.any?(e.txs, &(is_map(&1[:tx]) and is_map(&1.tx[:action]) and Map.has_key?(&1.tx.action, :attached_gas))),
+          do: throw(%{error: :attached_gas_before_fork})
+        if Enum.any?(e.txs, &(is_map(&1[:tx]) and is_map(&1.tx[:action]) and !TX.fits_budget?(eh.height, &1))),
+          do: throw(%{error: :tx_exceeds_budget})
+
         is_special_meeting_block = !!e[:mask]
         steam = Task.async_stream(e.txs, fn txu ->
           %{error: err} = TX.validate(txu, is_special_meeting_block)
