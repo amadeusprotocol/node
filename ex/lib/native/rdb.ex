@@ -71,24 +71,6 @@ defmodule RDB do
 end
 
 defmodule RDBProtocol do
-  def reserve_ama_per_tx_exec() do
-    const = :persistent_term.get({ProtocolConstant, :reserve_ama_per_tx_exec}, nil)
-    if const do const else
-      const = RDB.protocol_constants().reserve_ama_per_tx_exec
-      :persistent_term.put({ProtocolConstant, :reserve_ama_per_tx_exec}, const)
-      const
-    end
-  end
-
-  def reserve_ama_per_tx_storage() do
-    const = :persistent_term.get({ProtocolConstant, :reserve_ama_per_tx_storage}, nil)
-    if const do const else
-      const = RDB.protocol_constants().reserve_ama_per_tx_storage
-      :persistent_term.put({ProtocolConstant, :reserve_ama_per_tx_storage}, const)
-      const
-    end
-  end
-
   def cost_per_byte_historical() do
     const = :persistent_term.get({ProtocolConstant, :cost_per_byte_historical}, nil)
     if const do const else
@@ -116,16 +98,8 @@ defmodule RDBProtocol do
     end
   end
 
-  def forkheight_testnet(), do: const(:forkheight_testnet)
-  def tx_budget_fork(), do: const(:tx_budget_fork)
-  def tx_exec_lock_fork(), do: const(:tx_exec_lock_fork)
-  def cost_per_byte_historical_fork(), do: const(:cost_per_byte_historical_fork)
-
-  #is the fee fork (protocol.rs FORKHEIGHT) active for a tx included at height
-  def fork?(height) do
-    fork_height = if Application.fetch_env!(:ama, :testnet), do: forkheight_testnet(), else: forkheight()
-    height >= fork_height
-  end
+  def tx_budget(), do: const(:tx_budget)
+  def tx_exec_lock(), do: const(:tx_exec_lock)
 
   defp const(key) do
     case :persistent_term.get({ProtocolConstant, key}, nil) do

@@ -1112,17 +1112,12 @@ fn protocol_constants<'a>(env: Env<'a>) -> Term<'a> {
     let mut map = Term::map_new(env);
 
     map = map.map_put(atoms::forkheight(), protocol::FORKHEIGHT).ok().unwrap();
-    map = map.map_put(atoms::forkheight_testnet(), protocol::FORKHEIGHT_TESTNET).ok().unwrap();
-    map = map.map_put(atoms::tx_budget_fork(), protocol::TX_BUDGET_FORK).ok().unwrap();
-    map = map.map_put(atoms::tx_exec_lock_fork(), protocol::TX_EXEC_LOCK_FORK).ok().unwrap();
-    map = map.map_put(atoms::cost_per_byte_historical_fork(), protocol::COST_PER_BYTE_HISTORICAL_FORK).ok().unwrap();
+    map = map.map_put(atoms::tx_budget(), protocol::TX_BUDGET).ok().unwrap();
+    map = map.map_put(atoms::tx_exec_lock(), protocol::TX_EXEC_LOCK).ok().unwrap();
 
     map = map.map_put(atoms::ama_1_dollar(), protocol::AMA_1_DOLLAR).ok().unwrap();
     map = map.map_put(atoms::ama_10_cent(), protocol::AMA_10_CENT).ok().unwrap();
     map = map.map_put(atoms::ama_1_cent(), protocol::AMA_1_CENT).ok().unwrap();
-
-    map = map.map_put(atoms::reserve_ama_per_tx_exec(), protocol::RESERVE_AMA_PER_TX_EXEC).ok().unwrap();
-    map = map.map_put(atoms::reserve_ama_per_tx_storage(), protocol::RESERVE_AMA_PER_TX_STORAGE).ok().unwrap();
 
     map = map.map_put(atoms::cost_per_byte_historical(), protocol::COST_PER_BYTE_HISTORICAL).ok().unwrap();
     map = map.map_put(atoms::cost_per_byte_state(), protocol::COST_PER_BYTE_STATE).ok().unwrap();

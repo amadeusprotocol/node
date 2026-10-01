@@ -90,10 +90,9 @@ defmodule ComputorGen do
     end
   end
 
-  #before the fee fork a submit_sol reserves ~1.2 AMA (3 AMA leaves room); from it
   #a tx reserves and locks exactly its 0.01 AMA budget
   defp min_key_balance_flat() do
-    if RDBProtocol.fork?(DB.Chain.height() + 1), do: RDBProtocol.tx_budget_fork(), else: 3 * 1_000_000_000
+    RDBProtocol.tx_budget()
   end
 
   defp next_funded_key(keys, idx) do

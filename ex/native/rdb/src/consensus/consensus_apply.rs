@@ -282,7 +282,7 @@ pub fn apply_entry<'db, 'a>(
 
     let txs_count = entry.txs.len();
     for (i, txu) in entry.txs.into_iter().enumerate() {
-        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(&applyenv, &txu);
+        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(&txu);
         let (exec_lock, storage_lock) = applyenv.tx_locks[i];
 
         let tx_hash = txu.hash.as_slice().try_into().unwrap_or_else(|_| panic!("tx_hash_len_wrong"));
@@ -728,30 +728,28 @@ fn call_txs_pre_upfront_cost<'a>(env: &mut ApplyEnv, txus: &[crate::model::tx::T
         consensus_kv::kv_put(env, &nonce_key, &tx_nonce.to_string().into_bytes());
 
         // Deduct tx historical cost
-        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(env, txu);
+        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(txu);
         protocol::pay_cost(env, tx_historical_cost);
 
         //lock the exec and storage budgets during execution (refunded after).
         //every tx of the entry is locked up front, so in-flight txs of one account
-        //are each covered. from FORKHEIGHT an entry is invalid if a tx does not fit
-        //its budget or its account cannot cover the whole budget
+        //are each covered. an entry is invalid if a tx does not fit its budget or
+        //its account cannot cover the whole budget
         let balance_key = crate::bcat(&[b"account:", &env.caller_env.account_origin, b":balance:AMA"]);
-        let (exec_lock, storage_lock) = protocol::tx_locks(env, tx_historical_cost, txu.tx.action.attached_gas);
-        if protocol::is_fork(env) {
-            if let Some(gas) = txu.tx.action.attached_gas {
-                if gas <= 0 || gas > i64::MAX as i128 {
-                    panic_any("attached_gas_invalid")
-                }
+        let (exec_lock, storage_lock) = protocol::tx_locks(tx_historical_cost, txu.tx.action.attached_gas);
+        if let Some(gas) = txu.tx.action.attached_gas {
+            if gas <= 0 || gas > i64::MAX as i128 {
+                panic_any("attached_gas_invalid")
             }
-            if storage_lock < 0 {
-                panic_any("tx_exceeds_budget")
-            }
-            let available = consensus_kv::kv_get(env, &balance_key)
-                .and_then(|v| std::str::from_utf8(&v).ok().and_then(|s| s.parse::<i128>().ok()))
-                .unwrap_or(0);
-            if available < exec_lock + storage_lock {
-                panic_any("tx_budget_exceeds_balance")
-            }
+        }
+        if storage_lock < 0 {
+            panic_any("tx_exceeds_budget")
+        }
+        let available = consensus_kv::kv_get(env, &balance_key)
+            .and_then(|v| std::str::from_utf8(&v).ok().and_then(|s| s.parse::<i128>().ok()))
+            .unwrap_or(0);
+        if available < exec_lock + storage_lock {
+            panic_any("tx_budget_exceeds_balance")
         }
         consensus_kv::kv_increment(env, &balance_key, -exec_lock);
         consensus_kv::kv_increment(env, &balance_key, -storage_lock);

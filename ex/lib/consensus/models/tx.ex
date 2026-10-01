@@ -183,29 +183,19 @@ defmodule TX do
       BIC.Coin.to_cents( 1 + div(bytes, 1024) * 1 )
    end
 
-   def historical_cost(height, txu) do
-      bytes = byte_size(RDB.vecpak_encode(txu.tx))
-      if RDBProtocol.fork?(height) do
-        RDBProtocol.cost_per_byte_historical_fork() * bytes
-      else
-        max(RDBProtocol.ama_1_cent(), RDBProtocol.cost_per_byte_historical() * bytes)
-      end
+   def historical_cost(txu) do
+      RDBProtocol.cost_per_byte_historical() * byte_size(RDB.vecpak_encode(txu.tx))
    end
 
-   #from the fee fork a tx must fit its budget: its size charge plus the exec cap.
-   #one that does not (too big for the default, not enough attached_gas) is invalid
-   def fits_budget?(height, txu) do
-      !RDBProtocol.fork?(height) or
-        historical_cost(height, txu) + RDBProtocol.tx_exec_lock_fork() <= budget(height, txu)
+   #a tx must fit its budget: its size charge plus the exec cap. one that does
+   #not (too big for the default, not enough attached_gas) is invalid
+   def fits_budget?(txu) do
+      historical_cost(txu) + RDBProtocol.tx_exec_lock() <= budget(txu)
    end
 
    #mirrors protocol.rs tx_locks: the total AMA a tx locks (history charge included)
-   def budget(height, txu) do
-      if RDBProtocol.fork?(height) do
-        RDBProtocol.tx_budget_fork() + (txu.tx.action[:attached_gas] || 0)
-      else
-        RDBProtocol.reserve_ama_per_tx_exec() * 2 + RDBProtocol.reserve_ama_per_tx_storage() + historical_cost(height, txu)
-      end
+   def budget(txu) do
+      RDBProtocol.tx_budget() + (txu.tx.action[:attached_gas] || 0)
    end
 
    def action(%{tx: %{actions: [action|_]}}), do: action

@@ -157,9 +157,7 @@ defmodule Entry do
         validators_last_change_height = DB.Chain.validators_last_change_height(eh.height)
         if eh.root_validator != root_validator(validators, validators_last_change_height), do: throw(%{error: :root_validator_invalid})
 
-        if !RDBProtocol.fork?(eh.height) and Enum.any?(e.txs, &(is_map(&1[:tx]) and is_map(&1.tx[:action]) and Map.has_key?(&1.tx.action, :attached_gas))),
-          do: throw(%{error: :attached_gas_before_fork})
-        if Enum.any?(e.txs, &(is_map(&1[:tx]) and is_map(&1.tx[:action]) and !TX.fits_budget?(eh.height, &1))),
+        if Enum.any?(e.txs, &(is_map(&1[:tx]) and is_map(&1.tx[:action]) and !TX.fits_budget?(&1))),
           do: throw(%{error: :tx_exceeds_budget})
 
         is_special_meeting_block = !!e[:mask]
@@ -259,7 +257,7 @@ defmodule Entry do
         diff_bits = DB.Chain.diff_bits()
 
         Enum.reduce(next_entry.txs, %{}, fn(txu, batch_state)->
-            case TXPool.validate_tx(txu, %{epoch: chain_epoch, height: chain_height, inclusion_height: chain_height, segment_vr_hash: segment_vr_hash, diff_bits: diff_bits, batch_state: batch_state}) do
+            case TXPool.validate_tx(txu, %{epoch: chain_epoch, height: chain_height, segment_vr_hash: segment_vr_hash, diff_bits: diff_bits, batch_state: batch_state}) do
               %{error: :ok, batch_state: batch_state} -> batch_state
               %{error: error} when error in [:invalid_tx_nonce, :not_enough_tx_exec_balance] -> throw %{error: error}
               _ -> batch_state

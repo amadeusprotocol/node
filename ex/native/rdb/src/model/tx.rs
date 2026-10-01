@@ -10,7 +10,7 @@ pub struct Action {
     pub args: Vec<Vec<u8>>,
     pub attached_symbol: Option<Vec<u8>>,
     pub attached_amount: Option<Vec<u8>>,
-    //from FORKHEIGHT: extra budget in flat AMA on top of the default, see protocol::tx_locks
+    //extra budget in flat AMA on top of the default, see protocol::tx_locks
     pub attached_gas: Option<i128>,
 }
 

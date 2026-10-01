@@ -73,17 +73,12 @@ rustler::atoms! {
     nonexistance,
 
     forkheight,
-    forkheight_testnet,
-    tx_budget_fork,
-    tx_exec_lock_fork,
-    cost_per_byte_historical_fork,
+    tx_budget,
+    tx_exec_lock,
 
     ama_1_dollar,
     ama_10_cent,
     ama_1_cent,
-
-    reserve_ama_per_tx_exec,
-    reserve_ama_per_tx_storage,
 
     cost_per_byte_historical,
     cost_per_byte_state,

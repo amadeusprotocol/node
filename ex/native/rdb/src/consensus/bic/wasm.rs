@@ -149,15 +149,15 @@ fn set_return_value(applyenv: &mut ApplyEnv, return_value: Vec<u8>) {
     applyenv.caller_env.call_return_value = return_value
 }
 
-//the meter counts 1 point per wasm op. from FORKHEIGHT a tx pays floor(points
-//used / 10), so each exec unit buys 10 points (before it: 1)
+//the meter counts 1 point per wasm op. a tx pays floor(points used / 10), so
+//each exec unit buys 10 points
 fn wasm_points(applyenv: &ApplyEnv) -> u64 {
-    applyenv.exec_left.max(0).saturating_mul(protocol::wasm_points_per_unit(applyenv)) as u64
+    applyenv.exec_left.max(0).saturating_mul(protocol::WASM_POINTS_PER_UNIT) as u64
 }
 
 //exec budget left once the meter, last set to wasm_points, reports `remaining`
 fn exec_left_after(applyenv: &ApplyEnv, remaining: u64) -> i128 {
-    let per_unit = protocol::wasm_points_per_unit(applyenv);
+    let per_unit = protocol::WASM_POINTS_PER_UNIT;
     let used = (applyenv.exec_left.max(0).saturating_mul(per_unit) - remaining as i128).max(0);
     applyenv.exec_left - used / per_unit
 }
@@ -187,7 +187,7 @@ fn import_log_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len: i3
         panic_any("exec_ptr_term_too_long")
     }
 
-    crate::consensus::consensus_kv::storage_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, len));
+    crate::consensus::consensus_kv::storage_budget_decr(applyenv, protocol::cost_per_bytes_historical(len));
     set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     let view = data.memory.clone().view(&store);
@@ -208,7 +208,7 @@ fn import_return_implementation(mut env: FunctionEnvMut<HostEnv>, ptr: i32, len:
         panic_any("exec_ptr_term_too_long")
     }
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, len));
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(len));
     set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     let view = data.memory.clone().view(&store);
@@ -282,7 +282,7 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
             panic_any("exec_call_total_args_too_long")
         }
 
-        crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, total_bytes));
+        crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(total_bytes));
 
         // Second pass: now allocate and copy. Total bytes already capped + paid for.
         let mut final_args: Vec<Vec<u8>> = Vec::with_capacity(main_table.len());
@@ -312,7 +312,7 @@ fn import_call_implementation(mut env: FunctionEnvMut<HostEnv>, table_ptr: i32, 
         (contract, function, args, attached_symbol, attached_amount)
     };
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_call(applyenv));
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::COST_PER_CALL);
     set_remaining_points(&mut store, &instance, wasm_points(applyenv));
 
     if applyenv.call_depth >= protocol::MAX_CALL_DEPTH {
@@ -614,10 +614,10 @@ fn as_abort_implementation(mut env: FunctionEnvMut<HostEnv>, msg_ptr: i32, filen
     budget_sync_in(&mut store, &instance, applyenv);
     let view = data.memory.clone().view(&store);
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, as_peek_len(&view, msg_ptr)));
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(as_peek_len(&view, msg_ptr)));
     let msg = as_read_string(&view, msg_ptr);
 
-    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(applyenv, as_peek_len(&view, filename_ptr)));
+    crate::consensus::consensus_kv::exec_budget_decr(applyenv, protocol::cost_per_bytes_historical(as_peek_len(&view, filename_ptr)));
     let filename = as_read_string(&view, filename_ptr);
 
     // Sync the meter only after `view`'s last use (set_remaining_points needs &mut store).
