@@ -185,7 +185,11 @@ defmodule DB.Chain.DefillamaMetrics do
     at = int_get(@backfill_at, %{})
     if at > stop do
       finalize_work_day()
-      IO.puts("[defillama] history already complete at #{at}")
+      live_from = int_get(@live_from, %{})
+      catchup_new_signers(live_from, DB.Chain.height())
+      RocksDB.put(@first_seen_complete, "1", opts(%{}))
+      catchup_new_signers(live_from, DB.Chain.height())
+      IO.puts("[defillama] history already complete at #{at}; first-seen caught up")
     else
       Enum.reduce_while(at..stop, nil, fn h, prev_day ->
         hash = DB.Entry.by_height_in_main_chain(h)
