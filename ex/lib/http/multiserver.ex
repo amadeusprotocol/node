@@ -308,6 +308,11 @@ defmodule Ama.MultiServer do
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/kpi") ->
                 kpi = API.Chain.kpi()
                 quick_reply(state, %{error: :ok, kpi: kpi})
+            r.method == "GET" and r.path == "/api/chain/defillama/status" ->
+                quick_reply(state, API.Chain.defillama_status())
+            r.method == "GET" and String.starts_with?(r.path, "/api/chain/defillama/") ->
+                day = String.replace(r.path, "/api/chain/defillama/", "")
+                quick_reply(state, API.Chain.defillama_day(day))
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tip") ->
                 result = API.Chain.entry_tip()
                 quick_reply(state, result)
