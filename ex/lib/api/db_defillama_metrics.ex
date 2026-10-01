@@ -26,6 +26,7 @@ defmodule DB.Chain.DefillamaMetrics do
   @backfill_at "dfm:backfill_at"
   @backfill_end "dfm:backfill_end"
   @backfill_day "dfm:backfill_day"
+  @first_seen_complete "dfm:first_seen_complete"
   @min_history_span_ms 30 * 24 * 60 * 60 * 1000
 
   defp opts(extra \\ %{}) do
@@ -64,7 +65,7 @@ defmodule DB.Chain.DefillamaMetrics do
 
   defp successful(receipt), do: is_map(receipt) and (receipt[:success] == true or receipt["success"] == true)
 
-  defp count_entry(entry, receipts, day, scope, db_opts) do
+  defp count_entry(entry, receipts, day, scope, db_opts, count_new \\ true) do
     receipt_by_id = Map.new(receipts || [], fn r -> {r.txid, r} end)
     txs = Enum.filter(entry.txs || [], fn tx -> successful(receipt_by_id[tx.hash]) end)
 
@@ -79,10 +80,12 @@ defmodule DB.Chain.DefillamaMetrics do
         incr(day_key(day, "active_signers"), 1, db_opts)
       end
 
-      fkey = first_key(signer)
-      if is_nil(RocksDB.get(fkey, opts(db_opts))) do
-        RocksDB.put(fkey, day, opts(db_opts))
-        incr(day_key(day, "new_signers"), 1, db_opts)
+      if count_new do
+        fkey = first_key(signer)
+        if is_nil(RocksDB.get(fkey, opts(db_opts))) do
+          RocksDB.put(fkey, day, opts(db_opts))
+          incr(day_key(day, "new_signers"), 1, db_opts)
+        end
       end
     end)
   end
@@ -97,7 +100,8 @@ defmodule DB.Chain.DefillamaMetrics do
     day = day_from_ms(:os.system_time(1000))
     old_day = RocksDB.get(@live_day, opts(db_opts))
     RocksDB.put(@live_day, day, opts(db_opts))
-    count_entry(entry, receipts, day, "live", db_opts)
+    first_seen_ready = RocksDB.get(@first_seen_complete, opts(db_opts)) == "1"
+    count_entry(entry, receipts, day, "live", db_opts, first_seen_ready)
 
     # The old live signer set is scratch. Counts are already durable. Cleanup
     # runs outside the canonical apply transaction and touches only yesterday's
@@ -123,6 +127,7 @@ defmodule DB.Chain.DefillamaMetrics do
       live_from_height: int_get(@live_from, %{}),
       backfill_at: int_get(@backfill_at, %{}),
       backfill_end: int_get(@backfill_end, %{}),
+      first_seen_complete: RocksDB.get(@first_seen_complete, opts(%{})) == "1",
       running: running?()
     }
   end
@@ -211,10 +216,42 @@ defmodule DB.Chain.DefillamaMetrics do
       end)
       |> then(fn last_day ->
         if last_day, do: cleanup_work_day(last_day)
-        IO.puts("[defillama] history complete through #{stop}")
+        live_from = int_get(@live_from, %{})
+        catchup_new_signers(live_from, DB.Chain.height())
+        RocksDB.put(@first_seen_complete, "1", opts(%{}))
+        # Close the race window after the marker: first-key idempotency means
+        # rows already counted live are skipped here.
+        tip = DB.Chain.height()
+        catchup_new_signers(live_from, tip)
+        IO.puts("[defillama] history complete through #{stop}; first-seen caught up through #{tip}")
       end)
     end
   end
+
+  defp catchup_new_signers(from_h, to_h) when is_integer(from_h) and is_integer(to_h) and from_h <= to_h do
+    Enum.each(from_h..to_h, fn h ->
+      hash = DB.Entry.by_height_in_main_chain(h)
+      if hash do
+        entry = DB.Entry.by_hash(hash)
+        ms = DB.Entry.seentime(hash)
+        day = if is_integer(ms), do: day_from_ms(ms), else: nil
+        if day do
+          Enum.each(entry.txs || [], fn tx ->
+            receipt = DB.Chain.tx_receipt(tx.hash, entry.hash)
+            if successful(receipt) do
+              signer = tx.tx.signer
+              fkey = first_key(signer)
+              if is_nil(RocksDB.get(fkey, opts(%{}))) do
+                RocksDB.put(fkey, day, opts(%{}))
+                incr(day_key(day, "new_signers"), 1, %{})
+              end
+            end
+          end)
+        end
+      end
+    end)
+  end
+  defp catchup_new_signers(_, _), do: :ok
 
   defp finalize_work_day() do
     case RocksDB.get(@backfill_day, opts(%{})) do
