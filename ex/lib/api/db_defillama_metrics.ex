@@ -2,9 +2,10 @@ defmodule DB.Chain.DefillamaMetrics do
   @moduledoc """
   Exact daily user-transaction metrics for external analytics.
 
-  Live main-chain application records successful transaction count, distinct
-  transaction signers, and first-ever signers by UTC day. Consensus/validator
-  signatures are not transactions and never enter this ledger.
+  Live main-chain application records canonical transaction count, distinct
+  transaction signers, and first-ever signers by UTC day. A transaction counts
+  when it is included in the canonical chain, matching DB.Chain.tx_count().
+  Consensus/validator signatures are not transactions and never enter this ledger.
 
   Historical backfill is intentionally explicit. It walks the canonical
   main-chain entries only and uses their stored first-seen wallclock. Before it
@@ -64,11 +65,10 @@ defmodule DB.Chain.DefillamaMetrics do
     |> Date.to_iso8601()
   end
 
-  defp successful(receipt), do: is_map(receipt) and (receipt[:success] == true or receipt["success"] == true)
-
-  defp count_entry(entry, receipts, day, scope, db_opts, count_new \\ true) do
-    receipt_by_id = Map.new(receipts || [], fn r -> {r.txid, r} end)
-    txs = Enum.filter(entry.txs || [], fn tx -> successful(receipt_by_id[tx.hash]) end)
+  defp count_entry(entry, _receipts, day, scope, db_opts, count_new \\ true) do
+    # Canonical transaction basis = the same entry.txs population that feeds
+    # DB.Chain.tx_count(), so the daily series sums to the public total_tx KPI.
+    txs = entry.txs || []
 
     incr(day_key(day, "transactions"), length(txs), db_opts)
 
@@ -209,15 +209,10 @@ defmodule DB.Chain.DefillamaMetrics do
         if prev_day && day < prev_day, do: raise("defillama_history_clock_reversed_at_#{h}")
         if prev_day && day != prev_day, do: cleanup_work_day(prev_day)
 
-        receipts = Enum.map(entry.txs || [], fn tx ->
-          r = DB.Chain.tx_receipt(tx.hash, entry.hash)
-          if is_map(r), do: Map.put(r, :txid, tx.hash), else: %{txid: tx.hash, success: false}
-        end)
-
         %{db: db, cf: _} = :persistent_term.get({:rocksdb, Fabric})
         rtx = RocksDB.transaction(db)
         txopts = %{rtx: rtx}
-        count_entry(entry, receipts, day, "work", txopts)
+        count_entry(entry, [], day, "work", txopts)
         int_put(@backfill_at, h + 1, txopts)
         RocksDB.put(@backfill_day, day, opts(txopts))
         RocksDB.transaction_commit(rtx)
@@ -261,14 +256,11 @@ defmodule DB.Chain.DefillamaMetrics do
         day = if is_integer(ms), do: day_from_ms(ms), else: nil
         if day do
           Enum.each(entry.txs || [], fn tx ->
-            receipt = DB.Chain.tx_receipt(tx.hash, entry.hash)
-            if successful(receipt) do
-              signer = tx.tx.signer
-              fkey = first_key(signer)
-              if is_nil(RocksDB.get(fkey, opts(%{}))) do
-                RocksDB.put(fkey, day, opts(%{}))
-                incr(day_key(day, "new_signers"), 1, %{})
-              end
+            signer = tx.tx.signer
+            fkey = first_key(signer)
+            if is_nil(RocksDB.get(fkey, opts(%{}))) do
+              RocksDB.put(fkey, day, opts(%{}))
+              incr(day_key(day, "new_signers"), 1, %{})
             end
           end)
         end
