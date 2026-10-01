@@ -123,6 +123,11 @@ defmodule DB.Entry do
     new_cnt = :erlang.binary_to_integer(old_cnt) + length(entry.txs)
     RocksDB.put("tx_count", :erlang.integer_to_binary(new_cnt), db_handle(db_opts, :sysconf, %{}))
 
+    # External analytics ledger: successful user transactions, daily distinct
+    # signers and first-ever signers. Runs in this SAME canonical transaction so
+    # a failed apply cannot advance the metrics.
+    DB.Chain.DefillamaMetrics.observe_live(entry, receipts, db_opts)
+
     receipts_by_txid = Map.new(receipts, fn r -> {r.txid, Map.drop(r, [:txid])} end)
     Enum.each(entry.txs, fn(txu)->
       receipt = Map.fetch!(receipts_by_txid, txu.hash)
