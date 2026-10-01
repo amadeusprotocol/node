@@ -192,8 +192,6 @@ defmodule DB.Chain.DefillamaMetrics do
     at = int_get(@backfill_at, %{})
     if at > stop do
       finalize_work_day()
-      boundary = RocksDB.get(@boundary_day, opts(%{}))
-      if boundary, do: reconcile_boundary_active(boundary)
       live_from = int_get(@live_from, %{})
       catchup_new_signers(live_from, DB.Chain.height())
       RocksDB.put(@first_seen_complete, "1", opts(%{}))
@@ -282,7 +280,9 @@ defmodule DB.Chain.DefillamaMetrics do
   defp finalize_work_day() do
     case RocksDB.get(@backfill_day, opts(%{})) do
       nil -> :ok
-      day -> cleanup_work_day(day)
+      day ->
+        reconcile_boundary_active(day)
+        cleanup_work_day(day)
     end
   end
 
