@@ -92,6 +92,17 @@ defmodule API.Chain do
       }
     end
 
+    def defillama_day(day) when is_binary(day) do
+      case Date.from_iso8601(day) do
+        {:ok, _} -> %{error: :ok, metrics: DB.Chain.DefillamaMetrics.read_day(day)}
+        _ -> %{error: :bad_date}
+      end
+    end
+
+    def defillama_status() do
+      %{error: :ok, status: DB.Chain.DefillamaMetrics.status()}
+    end
+
     def kpi() do
       {_, uaw} = API.Contract.richlist()
       validator_pks = DB.Chain.validators_for_height(DB.Chain.height() + 1) |> Enum.map(& Base58.encode(&1))
