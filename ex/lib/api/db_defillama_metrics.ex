@@ -23,6 +23,7 @@ defmodule DB.Chain.DefillamaMetrics do
 
   @live_from "dfm:live_from_height"
   @live_day "dfm:live_day"
+  @boundary_day "dfm:boundary_day"
   @backfill_at "dfm:backfill_at"
   @backfill_end "dfm:backfill_end"
   @backfill_day "dfm:backfill_day"
@@ -93,11 +94,11 @@ defmodule DB.Chain.DefillamaMetrics do
   @doc "Called from canonical main-chain apply, inside the same RocksDB transaction."
   def observe_live(entry, receipts, db_opts = %{rtx: _}) do
     h = entry.header.height
+    day = day_from_ms(:os.system_time(1000))
     if is_nil(RocksDB.get(@live_from, opts(db_opts))) do
       int_put(@live_from, h, db_opts)
+      RocksDB.put(@boundary_day, day, opts(db_opts))
     end
-
-    day = day_from_ms(:os.system_time(1000))
     old_day = RocksDB.get(@live_day, opts(db_opts))
     RocksDB.put(@live_day, day, opts(db_opts))
     first_seen_ready = RocksDB.get(@first_seen_complete, opts(db_opts)) == "1"
@@ -107,7 +108,13 @@ defmodule DB.Chain.DefillamaMetrics do
     # runs outside the canonical apply transaction and touches only yesterday's
     # immutable scratch prefix.
     if old_day && old_day != day do
-      spawn(fn -> delete_prefix("dfm:live:" <> old_day <> ":") end)
+      boundary = RocksDB.get(@boundary_day, opts(db_opts))
+      first_seen_ready = RocksDB.get(@first_seen_complete, opts(db_opts)) == "1"
+      # Preserve only the deployment-boundary scratch until the historical side
+      # has been unioned with it. Later live days never overlap historical rows.
+      if old_day != boundary or first_seen_ready do
+        spawn(fn -> delete_prefix("dfm:live:" <> old_day <> ":") end)
+      end
     end
     :ok
   end
@@ -185,6 +192,8 @@ defmodule DB.Chain.DefillamaMetrics do
     at = int_get(@backfill_at, %{})
     if at > stop do
       finalize_work_day()
+      boundary = RocksDB.get(@boundary_day, opts(%{}))
+      if boundary, do: reconcile_boundary_active(boundary)
       live_from = int_get(@live_from, %{})
       catchup_new_signers(live_from, DB.Chain.height())
       RocksDB.put(@first_seen_complete, "1", opts(%{}))
@@ -219,6 +228,7 @@ defmodule DB.Chain.DefillamaMetrics do
         {:cont, day}
       end)
       |> then(fn last_day ->
+        if last_day, do: reconcile_boundary_active(last_day)
         if last_day, do: cleanup_work_day(last_day)
         live_from = int_get(@live_from, %{})
         catchup_new_signers(live_from, DB.Chain.height())
@@ -230,6 +240,18 @@ defmodule DB.Chain.DefillamaMetrics do
         IO.puts("[defillama] history complete through #{stop}; first-seen caught up through #{tip}")
       end)
     end
+  end
+
+  defp reconcile_boundary_active(day) do
+    boundary = RocksDB.get(@boundary_day, opts(%{}))
+    if boundary == day do
+      work = RocksDB.get_prefix("dfm:work:" <> day <> ":", opts(%{})) |> Enum.map(&elem(&1, 0))
+      live = RocksDB.get_prefix("dfm:live:" <> day <> ":", opts(%{})) |> Enum.map(&elem(&1, 0))
+      exact = MapSet.size(MapSet.new(work ++ live))
+      int_put(day_key(day, "active_signers"), exact, %{})
+      delete_prefix("dfm:live:" <> day <> ":")
+    end
+    :ok
   end
 
   defp catchup_new_signers(from_h, to_h) when is_integer(from_h) and is_integer(to_h) and from_h <= to_h do
@@ -268,6 +290,9 @@ defmodule DB.Chain.DefillamaMetrics do
 
   defp delete_prefix(prefix) do
     %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-    RocksDB.delete_range_cf(prefix, prefix <> <<255>>, false, %{db: db, cf: cf.sysconf})
+    # Every scratch prefix ends in ':'. The next ASCII byte ';' is a strict
+    # lexicographic upper bound for every binary signer suffix, including 0xff.
+    upper = binary_part(prefix, 0, byte_size(prefix) - 1) <> ";"
+    RocksDB.delete_range_cf(prefix, upper, false, %{db: db, cf: cf.sysconf})
   end
 end
