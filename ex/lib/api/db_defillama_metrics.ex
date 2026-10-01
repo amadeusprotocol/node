@@ -99,20 +99,13 @@ defmodule DB.Chain.DefillamaMetrics do
     RocksDB.put(@live_day, day, opts(db_opts))
     count_entry(entry, receipts, day, "live", db_opts)
 
-    # The old live signer set is scratch. The closed-day counts above are the
-    # durable result; removal is deferred outside the transaction by cleanup/1.
-    if old_day && old_day != day, do: :persistent_term.put({__MODULE__, :cleanup_day}, old_day)
-    :ok
-  end
-
-  def cleanup_live_scratch() do
-    case :persistent_term.get({__MODULE__, :cleanup_day}, nil) do
-      nil -> :ok
-      day ->
-        delete_prefix("dfm:live:" <> day <> ":")
-        :persistent_term.erase({__MODULE__, :cleanup_day})
-        :ok
+    # The old live signer set is scratch. Counts are already durable. Cleanup
+    # runs outside the canonical apply transaction and touches only yesterday's
+    # immutable scratch prefix.
+    if old_day && old_day != day do
+      spawn(fn -> delete_prefix("dfm:live:" <> old_day <> ":") end)
     end
+    :ok
   end
 
   @doc "Aggregate public row for one UTC day."
