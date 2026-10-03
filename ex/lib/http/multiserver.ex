@@ -39,7 +39,7 @@ defmodule Ama.MultiServer do
                                 if request.headers["connection"] in ["close", "upgrade"] do
                                     :gen_tcp.shutdown(socket, :write)
                                 else
-                                    {_, state} = pop_in(state, [:request, :step])
+                                    state = put_in(state, [:request], %{buf: Photon.HTTP.request_rest(state.request)})
                                     state = %{state | request_started_ms: System.monotonic_time(:millisecond)}
                                     :inet.setopts(socket, [{:active, :once}])
                                     loop_http(state)
@@ -231,12 +231,12 @@ defmodule Ama.MultiServer do
 
         if buffered >= content_length do
             <<body::binary-size(content_length), rest::binary>> = r.buf
-            {%{r | buf: rest}, body}
+            {Map.merge(r, %{buf: rest, body_read: true}), body}
         else
             needed = content_length - buffered
             {chunks, rest} = receive_body(state.socket, needed, state.request_started_ms, [])
             body = IO.iodata_to_binary([r.buf | Enum.reverse(chunks)])
-            {%{r | buf: rest}, body}
+            {Map.merge(r, %{buf: rest, body_read: true}), body}
         end
     end
 
