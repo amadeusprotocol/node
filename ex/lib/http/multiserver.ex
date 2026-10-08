@@ -42,7 +42,7 @@ defmodule Ama.MultiServer do
                                     state = put_in(state, [:request], %{buf: Photon.HTTP.request_rest(state.request)})
                                     state = %{state | request_started_ms: System.monotonic_time(:millisecond)}
                                     :inet.setopts(socket, [{:active, :once}])
-                                    loop_http(state)
+                                    :erlang.hibernate(__MODULE__, :loop_http, [state])
                                 end
 
                             true ->
