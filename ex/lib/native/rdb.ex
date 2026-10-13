@@ -89,17 +89,15 @@ defmodule RDBProtocol do
     end
   end
 
+  #mirrors protocol.rs forkheight: the next hard fork height for this network
   def forkheight() do
-    const = :persistent_term.get({ProtocolConstant, :forkheight}, nil)
-    if const do const else
-      const = RDB.protocol_constants().forkheight
-      :persistent_term.put({ProtocolConstant, :forkheight}, const)
-      const
-    end
+    if Application.fetch_env!(:ama, :testnet) do const(:forkheight_testnet) else const(:forkheight) end
   end
 
   def tx_budget(), do: const(:tx_budget)
   def tx_exec_lock(), do: const(:tx_exec_lock)
+  def cost_per_byte_state(), do: const(:cost_per_byte_state)
+  def cost_per_new_leaf_merkle(), do: const(:cost_per_new_leaf_merkle)
 
   defp const(key) do
     case :persistent_term.get({ProtocolConstant, key}, nil) do

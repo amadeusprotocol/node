@@ -144,13 +144,14 @@ defmodule TX do
     end
    end
 
-   def build(sk, contract, function, args, nonce \\ nil, attached_symbol \\ nil, attached_amount \\ nil) do
+   def build(sk, contract, function, args, nonce \\ nil, attached_symbol \\ nil, attached_amount \\ nil, attached_gas \\ nil) do
      pk = BlsEx.get_public_key!(sk)
      nonce = if !nonce do :os.system_time(:nanosecond) else nonce end
      action = %{op: "call", contract: contract, function: function, args: args}
      action = if is_binary(attached_symbol) and is_binary(attached_amount) do
         Map.merge(action, %{attached_symbol: attached_symbol, attached_amount: attached_amount})
      else action end
+     action = if is_integer(attached_gas) and attached_gas > 0 do Map.put(action, :attached_gas, attached_gas) else action end
      tx = %{
         signer: pk,
         nonce: nonce,

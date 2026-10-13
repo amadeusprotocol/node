@@ -5,6 +5,9 @@ defmodule DB.Pruner do
   rooted tip. Pruned reads transparently fall back to the configured
   `:rpc_url` via the dumb-proxy in multiserver.ex.
 
+  Also drops rewind data (muts_rev) below the previous epoch, since a rewind
+  never goes below the root.
+
   Disabled when `:archival_node` is true or when `:history_keep_epochs <= 0`.
   """
   use GenServer
@@ -41,6 +44,7 @@ defmodule DB.Pruner do
         # from there upward, actually deleting data — no cursor "jump"
         # that would orphan rows.
         prune_up_to(safe_cutoff)
+        prune_muts_rev_up_to(min(muts_rev_cutoff_height(tip.header.height), rooted))
       end
     catch
       e, r -> IO.inspect({:db_pruner_error, e, r})
@@ -53,6 +57,38 @@ defmodule DB.Pruner do
     keep = Application.fetch_env!(:ama, :history_keep_epochs)
     cur_epoch = div(tip_height, @epoch_size)
     (cur_epoch - keep) * @epoch_size
+  end
+
+  defp muts_rev_cutoff_height(tip_height), do: (div(tip_height, @epoch_size) - 1) * @epoch_size
+
+  def muts_rev_pruned_below_height(db_opts \\ %{}) do
+    RocksDB.get("muts_rev_pruned_below_height", db_handle(db_opts, :sysconf, %{to_integer: true})) || 0
+  end
+
+  defp prune_muts_rev_up_to(cutoff) when cutoff <= 0, do: :ok
+  defp prune_muts_rev_up_to(cutoff) do
+    #below pruned_below_height the whole entry, muts_rev included, is already gone
+    from = max(muts_rev_pruned_below_height(), DB.Chain.pruned_below_height())
+    if from < cutoff do
+      to = min(from + @max_entries_per_batch, cutoff)
+      %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+      rtx = RocksDB.transaction(db)
+      try do
+        db_opts = %{rtx: rtx}
+        Enum.each(from..(to - 1), fn height ->
+          Enum.each(DB.Entry.by_height_return_hashes(height, db_opts), fn hash ->
+            RocksDB.delete("entry:#{hash}:muts_rev", db_handle(db_opts, :entry_meta, %{}))
+          end)
+        end)
+        RocksDB.put("muts_rev_pruned_below_height", :erlang.integer_to_binary(to), db_handle(db_opts, :sysconf, %{}))
+        :ok = RocksDB.transaction_commit(rtx)
+      catch
+        e, r ->
+          RocksDB.transaction_rollback(rtx)
+          IO.inspect({:db_pruner_muts_rev_failed, e, r, __STACKTRACE__})
+      end
+    end
+    :ok
   end
 
   defp prune_up_to(cutoff) when cutoff <= 0, do: :ok
@@ -124,9 +160,8 @@ defmodule DB.Pruner do
   end
   defp range_delete_below(_height), do: :ok
 
-  #deletes only free disk once compaction rewrites the bottom-level files that
-  #still hold the data; RocksDB won't do that on its own for old history. call
-  #manually (heavy I/O while it runs), e.g. after a large prune:
+  #reclaims pruned space right away (heavy I/O), e.g. on a node bloated before
+  #the compact-on-deletion trigger existed:
   #  DB.Pruner.compact_pruned_cfs()   DB.Pruner.compaction_status()
   @compact_cfs [:attestation, :entry_meta, :tx_filter, :tx, :entry]
   @compactor DB.Pruner.Compactor

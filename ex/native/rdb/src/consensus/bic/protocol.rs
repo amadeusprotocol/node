@@ -1,7 +1,12 @@
 use crate::consensus::bic::coin;
 use crate::consensus::consensus_kv;
 
-pub const FORKHEIGHT: u64 = 858_00000;
+//next hard fork (epoch 969 mainnet). every change gated on is_fork:
+//  * slash_trainer and contract deploy drop their fixed exec fee: COST_PER_SLASH
+//    and COST_PER_DEPLOY (1 cent each) exceed the whole TX_EXEC_LOCK (0.2 cent)
+//    since epoch 858, so neither could ever succeed. their metered db and storage
+//    costs still apply
+pub const FORKHEIGHT: u64 = 969_00000;
 pub const FORKHEIGHT_TESTNET: u64 = 0;
 
 pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
@@ -10,6 +15,10 @@ pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
     } else {
         FORKHEIGHT
     }
+}
+
+pub fn is_fork(env: &crate::consensus::consensus_apply::ApplyEnv) -> bool {
+    env.caller_env.entry_height >= forkheight(env)
 }
 
 pub const AMA_1_DOLLAR: i128 = 1_000_000_000;

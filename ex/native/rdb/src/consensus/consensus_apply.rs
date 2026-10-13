@@ -915,7 +915,9 @@ pub fn call_bic(
             (b"Lockup", b"lock") => return consensus::bic::lockup::call_lock(env, args),
             (b"Lockup", b"unlock") => return consensus::bic::lockup::call_unlock(env, args),
             (b"Contract", b"deploy") => {
-                consensus_kv::exec_budget_decr(env, protocol::COST_PER_DEPLOY);
+                if !protocol::is_fork(env) {
+                    consensus_kv::exec_budget_decr(env, protocol::COST_PER_DEPLOY);
+                }
                 return consensus::bic::contract::call_deploy(env, args)
             }
             (b"LockupPrime", b"lock") => return consensus::bic::lockup_prime::call_lock(env, args),
@@ -939,7 +941,9 @@ pub fn call_bic(
         (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
         (b"Epoch", b"submit_sol") => consensus::bic::epoch::call_submit_sol(env, args),
         (b"Epoch", b"slash_trainer") => {
-            consensus_kv::exec_budget_decr(env, protocol::COST_PER_SLASH);
+            if !protocol::is_fork(env) {
+                consensus_kv::exec_budget_decr(env, protocol::COST_PER_SLASH);
+            }
             consensus::bic::epoch::call_slash_trainer(env, args)
         }
 

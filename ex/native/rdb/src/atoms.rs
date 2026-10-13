@@ -73,6 +73,7 @@ rustler::atoms! {
     nonexistance,
 
     forkheight,
+    forkheight_testnet,
     tx_budget,
     tx_exec_lock,
 

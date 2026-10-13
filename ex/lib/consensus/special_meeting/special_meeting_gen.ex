@@ -219,7 +219,23 @@ defmodule SpecialMeetingGen do
   end
 
   def build_slash_tx(sk, mpk, epoch, aggsig, mask, mask_size) do
-    TX.build(sk, "Epoch", "slash_trainer", [mpk, "#{epoch}", aggsig, "#{mask_size}", mask])
+    gas = slash_attached_gas(sk, DB.Chain.height() + 1)
+    TX.build(sk, "Epoch", "slash_trainer", [mpk, "#{epoch}", aggsig, "#{mask_size}", mask], nil, nil, nil, gas)
+  end
+
+  #a slash rewrites the whole validator list as a new state key, which outgrows
+  #the default tx storage budget. from the fork, attach gas for 2x the
+  #list size at state prices (unused gas is refunded). the budget is locked from
+  #the carrier's balance before execution and a shortfall invalidates the whole
+  #replacement entry, so attach nothing unless the carrier can cover it
+  def slash_attached_gas(sk, height) do
+    if height < RDBProtocol.forkheight() do nil else
+      validators = DB.Chain.validators_for_height(height)
+      bytes = 2 * byte_size(RDB.vecpak_encode(validators))
+      gas = RDBProtocol.cost_per_new_leaf_merkle() + RDBProtocol.cost_per_byte_state() * bytes
+      pk = BlsEx.get_public_key!(sk)
+      if DB.Chain.balance(pk) >= RDBProtocol.tx_budget() + gas do gas else nil end
+    end
   end
 
   def build_slash_entry(st) do

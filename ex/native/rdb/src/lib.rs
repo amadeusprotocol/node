@@ -191,6 +191,11 @@ fn open_transaction_db<'a>(env: Env<'a>, path: String, cf_names: Vec<String>) ->
     cf_opts.set_level_zero_stop_writes_trigger(36);
     cf_opts.set_max_subcompactions(1);
 
+    //pruning deletes hash-keyed rows spread over every SST file; mark a file for
+    //compaction once deletes dominate it, so the space comes back without
+    //rewriting the whole column family
+    cf_opts.add_compact_on_deletion_collector_factory(128 * 1024, 64 * 1024, 0.5);
+
     //cf_opts.set_level_compaction_dynamic_level_bytes(false);
 
     let cf_descriptors: Vec<_> = cf_names
@@ -1112,6 +1117,7 @@ fn protocol_constants<'a>(env: Env<'a>) -> Term<'a> {
     let mut map = Term::map_new(env);
 
     map = map.map_put(atoms::forkheight(), protocol::FORKHEIGHT).ok().unwrap();
+    map = map.map_put(atoms::forkheight_testnet(), protocol::FORKHEIGHT_TESTNET).ok().unwrap();
     map = map.map_put(atoms::tx_budget(), protocol::TX_BUDGET).ok().unwrap();
     map = map.map_put(atoms::tx_exec_lock(), protocol::TX_EXEC_LOCK).ok().unwrap();
 
