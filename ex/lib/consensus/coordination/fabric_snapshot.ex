@@ -214,7 +214,7 @@ defmodule FabricSnapshot do
       download_path = Path.join(workdir, "bootstrap_bundle.zstd")
       File.rm(download_path)
 
-      IO.puts "FabricSnapshot: downloading state bundle from #{url} ..."
+      IO.puts "state bundle: downloading from #{URI.parse(url).host}.."
       case :httpc.request(:get, {to_charlist(url), []},
                           https_opts(url) ++ [{:timeout, :infinity}],
                           [stream: to_charlist(download_path)]) do
@@ -222,13 +222,11 @@ defmodule FabricSnapshot do
         err -> halt_bundle("download from #{url} failed: #{inspect err}")
       end
 
-      bytes = File.stat!(download_path).size
-      IO.puts "FabricSnapshot: downloaded #{bytes} bytes, verifying signature and importing.."
-
+      mb = div(File.stat!(download_path).size, 1_000_000)
       case import_bundle_file(download_path) do
         {:ok, count} ->
           File.rm!(download_path)
-          IO.puts "FabricSnapshot: imported #{count} records, chain ready"
+          IO.puts "state bundle: imported height #{DB.Chain.rooted_height()} (#{mb}MB, #{count} records)"
           :ok
         {:error, reason} ->
           halt_bundle("import from #{url} failed: #{inspect reason}")

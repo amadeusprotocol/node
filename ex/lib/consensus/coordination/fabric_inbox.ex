@@ -125,10 +125,7 @@ defmodule FabricInbox do
         BLS12AggSig.validate_mask(mask, mask_size) != :ok -> {:error, :invalid_mask}
         true ->
           key = {height, @consensus, entry_hash, mutations_hash, aggsig}
-          result = insert_row(key, consensus, :erlang.external_size(consensus) + @row_overhead, true)
-          #a consensus for a block we hold can root it: do not wait for the tick
-          if result == :ok and height <= (DB.Chain.height() + 1), do: kick_fabric_gen()
-          result
+          insert_row(key, consensus, :erlang.external_size(consensus) + @row_overhead, true)
       end
     catch
       _, _ -> {:error, :malformed}
@@ -145,8 +142,6 @@ defmodule FabricInbox do
     if :ets.select_count(FabricInbox, [{{{next_height, @entry, entry_hash, :_, :_}, :_}, [], [true]}]) > 0,
       do: next_height, else: DB.Entry.by_hash(entry_hash)[:header][:height]
   end
-
-  defp kick_fabric_gen(), do: (pid = Process.whereis(FabricGen)) && send(pid, :kick)
 
   #insert, then evict from the top until under the cap (maybe the row itself).
   #take/1 hands every row to exactly one process, so bytes are released once

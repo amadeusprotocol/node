@@ -126,7 +126,6 @@ defmodule Ama do
           IO.puts "       refusing to import a state bundle over it; wipe the datadir to resync from a bundle."
           :erlang.halt(1)
         end
-        IO.puts "non-archival node — fetching state bundle from RPC (no chain state local)"
         FabricSnapshot.download_and_import_bundle()
       end
     end
