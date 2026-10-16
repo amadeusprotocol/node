@@ -1,13 +1,14 @@
 use crate::consensus::bic::coin;
 use crate::consensus::consensus_kv;
 
-//next hard fork (epoch 969 mainnet). every change gated on is_fork:
-//  * immutable epoch validator slots with a separate active mask
+//next hard fork (epoch 877 mainnet). every change gated on is_fork:
+//  * immutable epoch validator slots with a separate active mask (elixir side:
+//    aggsigs carry mask_active, mask_size/mask_set_size are derived not sent)
 //  * slash_trainer and contract deploy drop their fixed exec fee: COST_PER_SLASH
 //    and COST_PER_DEPLOY (1 cent each) exceed the whole TX_EXEC_LOCK (0.2 cent)
 //    since epoch 858, so neither could ever succeed. their metered db and storage
 //    costs still apply
-pub const FORKHEIGHT: u64 = 969_00000;
+pub const FORKHEIGHT: u64 = 877_00000;
 pub const FORKHEIGHT_TESTNET: u64 = 0;
 
 pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
