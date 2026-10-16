@@ -53,7 +53,7 @@ defmodule Entry do
     h (entry_hash || state_root || receipts_logs_extra_root)
     """
 
-    @fields [:header, :hash, :signature, :txs, :mask, :mask_size, :mask_set_size]
+    @fields [:header, :hash, :signature, :txs, :mask, :mask_active, :mask_size, :mask_set_size]
     @fields_header [:height, :prev_hash, :slot, :prev_slot, :signer, :dr, :vr, :root_tx, :root_validator, :root_chain]
 
     #size = sum of packed tx bytes, the same measure TXPool packs against
@@ -75,7 +75,7 @@ defmodule Entry do
 
     def unpack_from_net(nil), do: nil
     def unpack_from_net(entry) do
-        entry = Map.take(entry, @fields)
+        entry = Map.take(entry, @fields) |> BLS12AggSig.canonical()
         Map.put(entry, :header, Map.take(entry.header, @fields_header))
     end
 
@@ -183,17 +183,12 @@ defmodule Entry do
         mask = e[:mask]
         try do
           if require_hash, do: validate_hash(e, hash)
+          if !mask and Map.has_key?(e, :mask_active), do: throw(%{error: :mask_active_without_mask})
 
           if mask do
-              trainers = DB.Chain.validators_for_height(header.height)
-              if !is_integer(e.mask_size), do: throw(%{error: :mask_size_not_integer})
-              if !is_integer(e.mask_set_size), do: throw(%{error: :mask_set_size_not_integer})
-              if e.mask_size != length(trainers), do: throw(%{error: :mask_size_mismatch})
-              ensure_valid_mask!(e.mask, e.mask_size)
-
-              trainers_signed = BLS12AggSig.unmask_trainers(trainers, e.mask, e.mask_size)
-              if e.mask_set_size != length(trainers_signed), do: throw(%{error: :mask_set_size_mismatch})
-              if !BLS12AggSig.quorum?(length(trainers_signed), length(trainers)),
+              set = DB.Chain.validator_set_for_height(header.height)
+              trainers_signed = BLS12AggSig.validate!(e, set)
+              if !BLS12AggSig.quorum?(length(trainers_signed), ValidatorSet.active_count(set)),
                 do: throw(%{error: :insufficient_mask_quorum})
 
               aggpk = BlsEx.aggregate_public_keys!(trainers_signed)
@@ -218,13 +213,6 @@ defmodule Entry do
             byte_size(entry.hash) != 32 -> throw(%{error: :hash_not_256_bits})
             entry.hash != hash -> throw(%{error: :invalid_hash})
             true -> true
-        end
-    end
-
-    defp ensure_valid_mask!(mask, mask_size) do
-        case BLS12AggSig.validate_mask(mask, mask_size) do
-            :ok -> :ok
-            {:error, error} -> throw(%{error: error})
         end
     end
 

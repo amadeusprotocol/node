@@ -184,7 +184,7 @@ defmodule SpecialMeetingAttestGen do
     guilty = cond do
         byte_size(malicious_pk) != 48 -> false
         own_pack_key?(malicious_pk) -> false
-        DB.Chain.epoch() != epoch -> false
+        div(DB.Chain.height() + 1, 100_000) != epoch -> false
 
         #TODO: check for Slowloris
         #avg_seentimes_last_10_slots(malicious_pk) > 1second -> true
@@ -216,9 +216,8 @@ defmodule SpecialMeetingAttestGen do
     epoch = if is_binary(epoch) do :erlang.binary_to_integer(epoch) else epoch end
     mask_size = if is_binary(mask_size) do :erlang.binary_to_integer(mask_size) else mask_size end
 
-    <<mask::size(mask_size)-bitstring, _::bitstring>> = mask
-
-    trainers = DB.Chain.validators_for_height(entry.header.height)
+    set = DB.Chain.validator_set_for_height(entry.header.height)
+    trainers = ValidatorSet.active(set)
     my_keys = my_keys_in(trainers)
 
     guilty = has_double_entry(malicious_pk)
@@ -227,9 +226,9 @@ defmodule SpecialMeetingAttestGen do
 
     cond do
         own_pack_key?(malicious_pk) -> []
-        DB.Chain.epoch() != epoch -> []
+        div(DB.Chain.height() + 1, 100_000) != epoch -> []
         Entry.validate_next(cur_entry, entry) != %{error: :ok} -> []
-        slash_trainer_verify(malicious_pk, epoch, trainers, mask, mask_size, signature) != nil -> []
+        slash_trainer_verify(malicious_pk, epoch, set, mask, mask_size, signature) != nil -> []
         !guilty -> []
         my_keys == [] -> []
         !ReplicaGen.can_sign?() -> []
@@ -264,19 +263,28 @@ defmodule SpecialMeetingAttestGen do
     end
   end
 
-  def slash_trainer_verify(malicious_pk, cur_epoch, trainers, mask, mask_size, signature) do
-    signers = BLS12AggSig.unmask_trainers(trainers, mask, mask_size)
-
-    consensus_pct = length(signers) / length(trainers)
-
-    apk = BlsEx.aggregate_public_keys!(signers)
-    msg = <<"slash_trainer", cur_epoch::32-little, malicious_pk::binary>>
-    validSignature = BlsEx.verify?(apk, signature, msg, BLS12AggSig.dst_motion())
-    cond do
-        consensus_pct < 0.67 -> :invalid_amount_of_signatures
-        !validSignature -> :invalid_signature
-        true -> nil
+  def slash_trainer_verify(malicious_pk, cur_epoch, set, mask, mask_size, signature) do
+    # Motion TXs carry only the signer mask; eligibility is read from chain state.
+    # Preserve the legacy permissive mask interpretation before the fork.
+    signers = if is_list(set) do
+      BLS12AggSig.unmask_trainers(set, mask, mask_size)
+    else
+      BLS12AggSig.validate!(%{mask: mask, mask_active: set.mask_active}, set)
     end
+
+    cond do
+      #the tx still carries mask_size: it must be the roster size, as the contract checks
+      is_map(set) and mask_size != length(set.validators) -> :invalid_mask_size
+      malicious_pk not in ValidatorSet.active(set) -> :invalid_trainer_pk
+      !BLS12AggSig.quorum?(length(signers), ValidatorSet.active_count(set)) -> :invalid_amount_of_signatures
+      true ->
+        apk = BlsEx.aggregate_public_keys!(signers)
+        msg = <<"slash_trainer", cur_epoch::32-little, malicious_pk::binary>>
+        if BlsEx.verify?(apk, signature, msg, BLS12AggSig.dst_motion()), do: nil, else: :invalid_signature
+    end
+  catch
+    :throw, %{error: error} -> error
+    _, _ -> :invalid_signature
   end
 
   #last slash entry we signed, durable in ReplicaKV (sync, fsync'd before any

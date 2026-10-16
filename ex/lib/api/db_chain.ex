@@ -106,6 +106,10 @@ defmodule DB.Chain do
   end
 
   def validators_for_height(height, db_opts \\ %{}) do
+    validator_set_for_height(height, db_opts) |> ValidatorSet.active()
+  end
+
+  def validator_set_for_height(height, db_opts \\ %{}) do
     opts = db_handle(db_opts, :contractstate, %{})
     cond do
       height in 3195570..3195575 and !Application.fetch_env!(:ama, :testnet) ->
@@ -115,6 +119,7 @@ defmodule DB.Chain do
         {_, value} = RocksDB.get_prev_or_first("bic:epoch:validators:height:", pad_integer(height), opts)
         RDB.vecpak_decode(value)
     end
+    |> ValidatorSet.at_height(height)
   end
 
   def validators_last_change_height(height, db_opts \\ %{}) do

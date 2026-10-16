@@ -10,7 +10,7 @@ pub const DST_ANR: &[u8] = b"AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_ANR_";
 pub const DST_ANR_CHALLENGE: &[u8] = b"AMADEUS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_ANRCHALLENGE_";
 
 #[inline(always)]
-fn get_bit_be(mask: &[u8], i: usize) -> bool {
+pub fn get_bit_be(mask: &[u8], i: usize) -> bool {
     let byte = i >> 3;
     if byte >= mask.len() {
         return false;

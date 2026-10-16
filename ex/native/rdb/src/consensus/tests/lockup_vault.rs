@@ -1441,11 +1441,9 @@ fn testnet_genesis_vault_backs_validator_without_promotion() {
     let set_bytes = chain
         .get(&bcat(&[b"bic:epoch:validators:height:", format!("{:012}", 100_000).as_bytes()]))
         .expect("post-boundary validator set missing");
-    let vecpak::Term::List(items) = vecpak::decode(&set_bytes).expect("set decode") else {
-        panic!("validator set is not a vecpak list")
-    };
+    let set = crate::consensus::validator_set::ValidatorSet::decode(&set_bytes);
     assert!(
-        items.iter().any(|t| matches!(t, vecpak::Term::Binary(b) if b.as_slice() == v.pk.as_slice())),
+        set.active().iter().any(|pk| pk.as_slice() == v.pk.as_slice()),
         "vault-backed key must be in the post-boundary validator set on stake alone"
     );
 }

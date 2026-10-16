@@ -3,8 +3,9 @@ defmodule BLS12AggSig do
     aggsig {
         aggsig: <>,
         mask: <>,
-        mask_size: 0,
-        mask_set_size: 0,
+        mask_active: <>, # from the fork
+        mask_size: 0,     # until the fork; then length(roster)
+        mask_set_size: 0, # until the fork; then popcount(mask)
     }
     """
 
@@ -35,43 +36,72 @@ defmodule BLS12AggSig do
     def dst_anr_challenge(), do: @dst_anr_challenge
     def dst_bundle(), do: @dst_bundle
 
-    def new(trainers, pk, signature) do
-        index_of_trainer = Util.index_of(trainers, pk)
-
-        mask = <<0::size(length(trainers))>>
-        mask = Util.set_bit(mask, index_of_trainer)
-
-        %{mask: mask, aggsig: signature}
+    def new_padded(%{validators: validators, mask_active: mask_active}) do
+        %{mask: Util.pad_bitstring_to_bytes(<<0::size(length(validators))>>), mask_active: mask_active}
     end
-
-    def new_padded(mask_size) do
+    def new_padded(validators) when is_list(validators), do: new_padded(length(validators))
+    def new_padded(mask_size) when is_integer(mask_size) and mask_size >= 0 do
         mask = Util.pad_bitstring_to_bytes(<<0::size(mask_size)>>)
         %{mask: mask, mask_size: mask_size, mask_set_size: 0}
     end
 
-    def add(m = %{mask: mask, aggsig: aggsig}, trainers, pk, signature) do
-        index_of_trainer = Util.index_of(trainers, pk)
-
-        if Util.get_bit(mask, index_of_trainer) do m else
-            mask = Util.set_bit(mask, index_of_trainer)
-            aggsig = BlsEx.aggregate_signatures!([aggsig, signature])
-            %{mask: mask, aggsig: aggsig}
+    def add_padded(m = %{mask: mask}, set, pk, signature) do
+        validate!(m, set)
+        index = Util.index_of(ValidatorSet.roster(set), pk)
+        cond do
+            index == nil -> throw(%{error: :signer_not_in_validator_set})
+            is_map(set) and !Util.get_bit(set.mask_active, index) -> throw(%{error: :inactive_signer})
+            Util.get_bit(mask, index) -> m
+            true ->
+                mask = Util.set_bit(mask, index)
+                signature = if m[:aggsig], do: BlsEx.aggregate_signatures!([m.aggsig, signature]), else: signature
+                m = Map.merge(m, %{mask: mask, aggsig: signature})
+                if Map.has_key?(m, :mask_set_size), do: %{m | mask_set_size: Util.popcnt(mask)}, else: m
         end
     end
 
-    def add_padded(m = %{mask: mask, mask_size: mask_size}, signers, pk, signature) do
-        index_of_signer = Util.index_of(signers, pk)
-
-        if Util.get_bit(mask, index_of_signer) do m else
-            mask = Util.set_bit(mask, index_of_signer)
-            case m[:aggsig] do
-              nil -> %{mask: mask, mask_size: mask_size, mask_set_size: Util.popcnt(mask), aggsig: signature}
-              aggsig ->
-                aggsig = BlsEx.aggregate_signatures!([aggsig, signature])
-                %{mask: mask, mask_size: mask_size, mask_set_size: Util.popcnt(mask), aggsig: aggsig}
-            end
+    # The supplied active mask never defines eligibility: it must exactly match
+    # the historical state for the height being verified.
+    # From the fork mask_size/mask_set_size are derived, a stale copy is ignored.
+    def validate(m, set) do
+        roster = ValidatorSet.roster(set)
+        expected_active = if is_map(set), do: set.mask_active, else: nil
+        size = if expected_active, do: length(roster), else: m[:mask_size]
+        with true <- size == length(roster) || {:error, :mask_size_mismatch},
+             :ok <- validate_mask(m[:mask], size),
+             true <- Map.get(m, :mask_active) == expected_active || {:error, :mask_active_mismatch},
+             true <- (expected_active == nil or subset?(m.mask, expected_active)) || {:error, :inactive_signer},
+             signers = unmask_trainers(roster, m.mask, size),
+             true <- (expected_active != nil or m[:mask_set_size] === length(signers)) || {:error, :mask_set_size_mismatch} do
+            {:ok, signers}
         end
     end
+
+    #the form stored and sent: no derived fields from the fork
+    def canonical(%{mask_active: _} = m), do: Map.drop(m, [:mask_size, :mask_set_size])
+    def canonical(m), do: m
+
+    def validate!(m, set) do
+        case validate(m, set) do
+            {:ok, signers} -> signers
+            {:error, error} -> throw(%{error: error})
+        end
+    end
+
+    defp subset?(signed, active) do
+        Enum.zip(:binary.bin_to_list(signed), :binary.bin_to_list(active))
+        |> Enum.all?(fn {s, a} -> Bitwise.band(s, a) == s end)
+    end
+
+    # Only use the one-argument forms for locally built or validated aggregates.
+    def active_count(%{mask_active: mask}), do: Util.popcnt(mask)
+    def active_count(%{mask_size: size}), do: size
+    def signer_count(%{mask: mask}), do: Util.popcnt(mask)
+    def score(m) do
+        total = active_count(m)
+        if total == 0, do: 0.0, else: signer_count(m) / total
+    end
+    def quorum?(m), do: quorum?(signer_count(m), active_count(m))
 
     def validate_mask(mask, mask_size) do
         cond do
@@ -85,6 +115,12 @@ defmodule BLS12AggSig do
         end
     end
 
+    def quorum?(m, set) when is_map(m) do
+        case validate(m, set) do
+            {:ok, signers} -> quorum?(length(signers), ValidatorSet.active_count(set))
+            _ -> false
+        end
+    end
     def quorum?(mask_set_size, mask_size)
         when is_integer(mask_set_size) and is_integer(mask_size) and
                mask_set_size >= 0 and mask_size > 0 and mask_set_size <= mask_size do
@@ -107,7 +143,7 @@ defmodule BLS12AggSig do
 
     def aggregate(total_signer_list, signer_signature_list) do
       signer_signature_list = List.wrap(signer_signature_list)
-      aggsig = BLS12AggSig.new_padded(length(total_signer_list))
+      aggsig = BLS12AggSig.new_padded(total_signer_list)
       Enum.reduce(signer_signature_list, aggsig, fn(signer_signature, aggsig)->
         BLS12AggSig.add_padded(aggsig, total_signer_list, signer_signature.signer, signer_signature.signature)
       end)

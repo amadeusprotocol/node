@@ -194,8 +194,8 @@ defmodule FabricGen do
     next_entries = best_entry_for_height(next_height)
     #IO.inspect {next_entries, next_height}
     case List.first(next_entries) do
-        #TODO: adjust the maliciousness rate via score
-        {best_entry, muts_hash, score} when score >= 0.67 ->
+        {best_entry, muts_hash, _score} ->
+          if DB.Attestation.quorum?(best_entry.hash, muts_hash) do
             my_muts_hash = DB.Entry.muts_hash(best_entry.hash)
             in_chain = DB.Entry.in_chain(best_entry.hash)
             cond do
@@ -224,6 +224,7 @@ defmodule FabricGen do
                 FabricInbox.drop_rooted(best_entry.header.height)
                 proc_consensus()
             end
+          end
         _ -> nil
     end
   end
@@ -246,9 +247,8 @@ defmodule FabricGen do
       in_slot = cond do
         next_entry.header.signer == validator_for_entry -> true
         !!next_entry[:mask] ->
-            trainers = DB.Chain.validators_for_height(Entry.height(next_entry))
-            score = BLS12AggSig.score(trainers, next_entry.mask, next_entry.mask_size)
-            next_entry.header.signer in trainers and score >= 0.67
+            set = DB.Chain.validator_set_for_height(Entry.height(next_entry))
+            next_entry.header.signer in ValidatorSet.active(set) and BLS12AggSig.quorum?(next_entry, set)
 
         true -> false
       end
@@ -315,7 +315,8 @@ defmodule FabricGen do
       !muts_hash -> nil
       !seen or now - seen < @retro_attest_grace_ms -> nil
       true ->
-        validators = DB.Chain.validators_for_height(height)
+        set = DB.Chain.validator_set_for_height(height)
+        validators = ValidatorSet.active(set)
         root_receipts = DB.Entry.root_receipts(hash)
         root_contractstate = DB.Entry.root_contractstate(hash)
         attestations = Application.fetch_env!(:ama, :keys)
@@ -325,7 +326,7 @@ defmodule FabricGen do
           #already visible in an aggregate (followers never store the leader's
           #raw attestation, only the consensus carries its mask bit)
           !DB.Attestation.by_height_by_signer(height, seed.pk)
-            and !signer_in_consensus?(hash, muts_hash, validators, seed.pk)
+            and !signer_in_consensus?(hash, muts_hash, set, seed.pk)
         end)
         |> Enum.map(fn(seed)->
           attestation = Attestation.sign(seed.seed, hash, height, muts_hash, root_receipts, root_contractstate, :binary.copy(<<0>>, 32))
@@ -343,11 +344,13 @@ defmodule FabricGen do
     end
   end
 
-  defp signer_in_consensus?(entry_hash, muts_hash, validators, pk) do
+  defp signer_in_consensus?(entry_hash, muts_hash, set, pk) do
     case DB.Attestation.consensus(entry_hash, muts_hash) do
-      %{aggsig: %{mask: mask}} ->
-        idx = Util.index_of(validators, pk)
-        idx != nil and Util.get_bit(mask, idx)
+      %{aggsig: aggsig} ->
+        case BLS12AggSig.validate(aggsig, set) do
+          {:ok, signers} -> pk in signers
+          _ -> false
+        end
       _ -> false
     end
   end
@@ -368,14 +371,15 @@ defmodule FabricGen do
 
     rooted_tip = DB.Chain.rooted_tip()
 
-    trainers_next = DB.Chain.validators_for_height(next_height)
+    set_next = DB.Chain.validator_set_for_height(next_height)
     slotFilled = DB.Entry.by_height(next_height)
     |> Enum.any?(fn(e)->
       cond do
         #a stored fork at this height (other parent) must not inhibit production
         e.header.prev_hash != entry.hash -> false
+        !root_validator_ok?(e) -> false
         e.header.signer == next_validator -> true
-        !!e[:mask] -> BLS12AggSig.score(trainers_next, e.mask, e.mask_size) >= 0.67
+        !!e[:mask] -> BLS12AggSig.quorum?(e, set_next)
         true -> false
       end
     end)
@@ -533,7 +537,8 @@ defmodule FabricGen do
           DB.Entry.apply_into_main_chain_muts(next_entry.hash, m, %{rtx: rtx})
       end
 
-      validators = DB.Chain.validators_for_height(Entry.height(next_entry), %{rtx: rtx})
+      set = DB.Chain.validator_set_for_height(Entry.height(next_entry), %{rtx: rtx})
+      validators = ValidatorSet.active(set)
       #replica followers never attest: the leader attests for the shared keys
       my_validators = if !ReplicaGen.can_sign?() do [] else
         Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
@@ -548,7 +553,7 @@ defmodule FabricGen do
         attestation
       end)
       if length(attestations) > 0 do
-        aggsig = BLS12AggSig.aggregate(validators, attestations)
+        aggsig = BLS12AggSig.aggregate(set, attestations)
         consensus = %{
           aggsig: aggsig,
           mutations_hash: mutations_hash,

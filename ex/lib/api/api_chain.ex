@@ -45,16 +45,12 @@ defmodule API.Chain do
     def consensuses_by_height(height) do
         DB.Attestation.consensuses_by_height(height)
         |> Enum.map(fn(c)->
-            aggsig = %{
-              aggsig: Base58.encode(c.aggsig.aggsig),
-              mask: Base58.encode(c.aggsig.mask),
-              mask_size: c.aggsig.mask_size,
-              mask_set_size: c.aggsig.mask_set_size,
-            }
+            aggsig = Map.take(c.aggsig, [:mask_size, :mask_set_size])
+            |> Map.merge(Map.new(Map.take(c.aggsig, [:aggsig, :mask, :mask_active]), fn {k, v} -> {k, Base58.encode(v)} end))
             c = put_in(c, [:mutations_hash], Base58.encode(c.mutations_hash))
             c = put_in(c, [:entry_hash], Base58.encode(c.entry_hash))
+            c = put_in(c, [:score], BLS12AggSig.score(c.aggsig))
             c = put_in(c, [:aggsig], aggsig)
-            c = put_in(c, [:score], length(c.signers) / bit_size(c.mask))
             Map.drop(c, [:mask])
         end)
     end
@@ -160,11 +156,8 @@ defmodule API.Chain do
         entry = Map.drop(entry, [:signature, :txs])
         {_, entry} = pop_in(entry, [:header, :txs_hash]) #old format; keep for backwards compat
         entry = put_in(entry, [:hash], Base58.encode(entry.hash))
-        entry = if !entry[:mask] do entry else
-          entry
-          |> put_in([:mask], Base58.encode(entry.mask))
-          |> put_in([:mask_size], entry.mask_size)
-        end
+        entry = if entry[:mask], do: Map.update!(entry, :mask, &Base58.encode/1), else: entry
+        entry = if entry[:mask_active], do: Map.update!(entry, :mask_active, &Base58.encode/1), else: entry
         entry = put_in(entry, [:header, :dr], Base58.encode(entry.header.dr))
         entry = put_in(entry, [:header, :vr], Base58.encode(entry.header.vr))
         entry = put_in(entry, [:header, :prev_hash], Base58.encode(entry.header.prev_hash))
@@ -178,7 +171,7 @@ defmodule API.Chain do
         if !mut_hash do entry else
             entry = put_in(entry, [:consensus], %{})
             entry = put_in(entry, [:consensus, :score], Float.round(score, 3))
-            entry = put_in(entry, [:consensus, :finality_reached], Float.round(score, 3) >= 0.67)
+            entry = put_in(entry, [:consensus, :finality_reached], DB.Attestation.quorum?(hash, mut_hash))
             entry = put_in(entry, [:consensus, :mut_hash], Base58.encode(mut_hash))
             entry
         end

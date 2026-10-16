@@ -2,6 +2,7 @@ use crate::consensus::bic::coin;
 use crate::consensus::consensus_kv;
 
 //next hard fork (epoch 969 mainnet). every change gated on is_fork:
+//  * immutable epoch validator slots with a separate active mask
 //  * slash_trainer and contract deploy drop their fixed exec fee: COST_PER_SLASH
 //    and COST_PER_DEPLOY (1 cent each) exceed the whole TX_EXEC_LOCK (0.2 cent)
 //    since epoch 858, so neither could ever succeed. their metered db and storage

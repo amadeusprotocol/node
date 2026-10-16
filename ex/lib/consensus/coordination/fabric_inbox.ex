@@ -109,10 +109,10 @@ defmodule FabricInbox do
   #the aggregate signature needs the validator set: checked at drain
   def insert_consensus(consensus, height \\ nil) do
     try do
-      consensus = %{entry_hash: consensus.entry_hash, mutations_hash: consensus.mutations_hash,
-        aggsig: Map.take(consensus.aggsig, [:mask, :aggsig, :mask_size, :mask_set_size])}
-      %{entry_hash: entry_hash, mutations_hash: mutations_hash, aggsig: aggsig} = consensus
-      %{mask: mask, aggsig: signature, mask_size: mask_size, mask_set_size: mask_set_size} = aggsig
+      aggsig = Map.take(consensus.aggsig, [:mask, :mask_active, :aggsig, :mask_size, :mask_set_size]) |> BLS12AggSig.canonical()
+      consensus = %{entry_hash: consensus.entry_hash, mutations_hash: consensus.mutations_hash, aggsig: aggsig}
+      %{entry_hash: entry_hash, mutations_hash: mutations_hash} = consensus
+      %{mask: mask, aggsig: signature} = aggsig
       height = height || entry_height(entry_hash)
       cond do
         !is_integer(height) -> {:error, :entry_unknown}
@@ -120,9 +120,7 @@ defmodule FabricInbox do
         !is_binary(entry_hash) or byte_size(entry_hash) != 32 -> {:error, :entry_hash_not_256_bits}
         !is_binary(mutations_hash) or byte_size(mutations_hash) != 32 -> {:error, :mutations_hash_not_256_bits}
         !is_binary(signature) or byte_size(signature) != 96 -> {:error, :aggsig_not_96_bytes}
-        !is_integer(mask_size) or mask_size <= 0 -> {:error, :mask_size_invalid}
-        !is_integer(mask_set_size) or mask_set_size <= 0 or mask_set_size > mask_size -> {:error, :mask_set_size_invalid}
-        BLS12AggSig.validate_mask(mask, mask_size) != :ok -> {:error, :invalid_mask}
+        !is_binary(mask) or BLS12AggSig.signer_count(aggsig) == 0 -> {:error, :invalid_mask}
         true ->
           key = {height, @consensus, entry_hash, mutations_hash, aggsig}
           insert_row(key, consensus, :erlang.external_size(consensus) + @row_overhead, true)
@@ -234,17 +232,19 @@ defmodule FabricInbox do
 
     %{entry_hash: entry_hash, mutations_hash: mutations_hash, signer: signer, signature: signature} = attestation
     entry = DB.Entry.by_hash(entry_hash, %{rtx: rtx})
-    validators = if !entry do nil else DB.Chain.validators_for_height(Entry.height(entry), %{rtx: rtx}) end
-    result = if !!entry and !!validators and signer in validators do
-      if entry.header.height <= DB.Chain.height(%{rtx: rtx}) do
+    set = if entry, do: DB.Chain.validator_set_for_height(Entry.height(entry), %{rtx: rtx})
+    #add_padded throws on a stored aggsig that no longer matches the set (softfork)
+    result = try do
+      if entry && set && signer in ValidatorSet.active(set) and entry.header.height <= DB.Chain.height(%{rtx: rtx}) do
         consensus = DB.Attestation.consensus(entry_hash, mutations_hash, %{rtx: rtx}) || %{mutations_hash: mutations_hash, entry_hash: entry_hash}
-        aggsig = consensus[:aggsig] || BLS12AggSig.new_padded(length(validators))
-        consensus = Map.put(consensus, :aggsig, BLS12AggSig.add_padded(aggsig, validators, signer, signature))
+        aggsig = consensus[:aggsig] || BLS12AggSig.new_padded(set)
+        consensus = Map.put(consensus, :aggsig, BLS12AggSig.add_padded(aggsig, set, signer, signature))
         case DB.Attestation.set_consensus(consensus, %{rtx: rtx}) do
           {:error, _} -> nil
           _ -> :aggregated
         end
       end
+    catch :throw, _ -> nil
     end
     RocksDB.transaction_commit(rtx)
     result

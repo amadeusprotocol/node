@@ -163,28 +163,18 @@ pub fn call_submit_sol(env: &mut crate::consensus::consensus_apply::ApplyEnv, ar
     kv_increment(env, &bcat(&[b"bic:epoch:solutions_count:", usol.pk.as_slice()]), 1);
 }
 
-pub fn kv_get_trainers(env: &mut crate::consensus::consensus_apply::ApplyEnv, height: u64) -> Vec<Vec<u8>> {
+// Historical records are legacy lists before the fork, roster + active mask after it.
+// A legacy record at the activation boundary seeds an all-active roster.
+pub fn kv_get_validator_set(env: &mut ApplyEnv, height: u64) -> consensus::validator_set::ValidatorSet {
     let height_padded = format!("{:012}", height).into_bytes();
     match kv_get_prev_or_first(env, b"bic:epoch:validators:height:", &height_padded) {
-        None => Vec::new(),
-        Some((_key_suffix, trainer_list)) => {
-            let term = vecpak::decode(trainer_list.as_slice()).unwrap();
-            match term {
-                vecpak::Term::List(term_list) => {
-                    let mut out = Vec::with_capacity(100);
-                    for el in term_list {
-                        if let vecpak::Term::Binary(b) = el {
-                            out.push(b);
-                        } else {
-                            panic_any("invalid_trainer_list_element");
-                        }
-                    }
-                    out
-                }
-                _ => panic_any("invalid_trainer_list_term"),
-            }
-        }
+        None => consensus::validator_set::ValidatorSet::new(Vec::new()),
+        Some((_, value)) => consensus::validator_set::ValidatorSet::decode(&value),
     }
+}
+
+pub fn kv_get_trainers(env: &mut ApplyEnv, height: u64) -> Vec<Vec<u8>> {
+    kv_get_validator_set(env, height).active()
 }
 
 pub fn kv_get_trainers_removed(env: &mut crate::consensus::consensus_apply::ApplyEnv) -> Vec<Vec<u8>> {
@@ -211,12 +201,17 @@ pub fn call_slash_trainer(env: &mut crate::consensus::consensus_apply::ApplyEnv,
         panic_any("invalid_epoch")
     }
 
-    let mut trainers = kv_get_trainers(env, env.caller_env.entry_height);
+    let set = kv_get_validator_set(env, env.caller_env.entry_height);
+    let mut trainers = set.active();
     if !trainers.iter().any(|v| v.as_slice() == malicious_pk) {
         panic_any("invalid_trainer_pk")
     }
 
-    let signers = consensus::aggsig::unmask_trainers(&trainers, &mask, mask_size as usize);
+    let signers = if consensus::bic::protocol::is_fork(env) {
+        set.signers(&mask, mask_size).unwrap_or_else(|error| panic_any(error))
+    } else {
+        consensus::aggsig::unmask_trainers(&trainers, &mask, mask_size as usize)
+    };
     if (signers.len() as u64) * 100 < (trainers.len() as u64) * 67 {
         panic_any("invalid_amount_of_signatures")
     }
@@ -231,10 +226,22 @@ pub fn call_slash_trainer(env: &mut crate::consensus::consensus_apply::ApplyEnv,
         panic_any("invalid_signature")
     }
 
-    trainers.retain(|pk| pk.as_slice() != malicious_pk);
-    let term_trainers = consensus::bic::list_of_binaries_to_vecpak(trainers);
-    let height_next = format!("{:012}", env.caller_env.entry_height.saturating_add(1)).into_bytes();
-    kv_put(env, &bcat(&[b"bic:epoch:validators:height:", &height_next]), term_trainers.as_slice());
+    let height_next = env.caller_env.entry_height.saturating_add(1);
+    let key_next = format!("bic:epoch:validators:height:{:012}", height_next);
+    let encoded = if consensus::bic::protocol::is_fork(env) {
+        // Each motion is authorized by the block's starting set. Accumulate
+        // removals in the next-height state, including multiple TXs in one block.
+        let mut next_set = match kv_get(env, key_next.as_bytes()) {
+            Some(value) => consensus::validator_set::ValidatorSet::decode(&value),
+            None => set,
+        };
+        next_set.remove(malicious_pk).unwrap_or_else(|error| panic_any(error));
+        next_set.encode()
+    } else {
+        trainers.retain(|pk| pk.as_slice() != malicious_pk);
+        consensus::bic::list_of_binaries_to_vecpak(trainers)
+    };
+    kv_put(env, key_next.as_bytes(), &encoded);
 }
 
 //  * queued vault validator changes post once, first thing (the only promotion site)
@@ -344,7 +351,11 @@ pub fn next(env: &mut ApplyEnv) {
 
     //--- validators for next epoch: >=1m vault validators + top 33 solvers ---
     let new_validators = build_and_shuffle_new_validators(env, &leaders, &vault_stakes);
-    let new_validators = consensus::bic::list_of_binaries_to_vecpak(new_validators);
+    let new_validators = if consensus::bic::protocol::is_fork(env) {
+        consensus::validator_set::ValidatorSet::new(new_validators).encode()
+    } else {
+        consensus::bic::list_of_binaries_to_vecpak(new_validators)
+    };
     let height_next = format!("{:012}", env.caller_env.entry_height.saturating_add(1)).into_bytes();
     let _ = kv_put(env, &bcat(&[b"bic:epoch:validators:height:", &height_next]), &new_validators);
 

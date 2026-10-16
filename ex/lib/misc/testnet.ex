@@ -32,22 +32,23 @@ defmodule Testnet do
   end
 
   def slash_trainer(signer_count \\ 1) do
-    epoch = DB.Chain.epoch()
-    validators = DB.Chain.validators_for_height(DB.Chain.height()+1)
+    height = DB.Chain.height() + 1
+    epoch = div(height, 100_000)
+    set = DB.Chain.validator_set_for_height(height)
+    validators = ValidatorSet.active(set)
     malicious_pk = List.last(validators)
-    validators_signing = DB.Chain.validators_for_height_my(DB.Chain.height()+1) |> Enum.take(signer_count)
+    validators_signing = DB.Chain.validators_for_height_my(height) |> Enum.take(signer_count)
 
-    aggsig = BLS12AggSig.new_padded(length(validators))
+    aggsig = BLS12AggSig.new_padded(set)
     aggsig = Enum.reduce(validators_signing, aggsig, fn(signer_pk, aggsig)->
       msg = <<"slash_trainer", epoch::32-little, malicious_pk::binary>>
       seed = Application.fetch_env!(:ama, :keys_by_pk)[signer_pk].seed
       signature = BlsEx.sign!(seed, msg, BLS12AggSig.dst_motion())
-      BLS12AggSig.add_padded(aggsig, validators, signer_pk, signature)
+      BLS12AggSig.add_padded(aggsig, set, signer_pk, signature)
     end)
 
-    args = [malicious_pk, "#{epoch}", aggsig.aggsig, "#{aggsig.mask_size}", aggsig.mask]
-
     signer_sk = Application.fetch_env!(:ama, :trainer_sk)
-    Testnet.call(signer_sk, "Epoch", "slash_trainer", args)
+    txu = SpecialMeetingGen.build_slash_tx(signer_sk, malicious_pk, epoch, aggsig.aggsig, aggsig.mask, length(ValidatorSet.roster(set)))
+    API.TX.submit_and_wait(TX.pack(txu), false, false)
   end
 end

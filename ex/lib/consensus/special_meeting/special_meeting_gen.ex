@@ -49,7 +49,7 @@ defmodule SpecialMeetingGen do
       !ReplicaGen.can_sign?() ->
         IO.puts "🔴 not replica leader, ignoring slash motion"
         {:noreply, state}
-      true -> start_slash_tx_motion(mpk, state)
+      true -> start_slash_motion(mpk, state, :tx)
     end
   end
   def handle_info({:try_slash_trainer_entry, _mpk}, state = %{slash_trainer: _}) do
@@ -61,7 +61,7 @@ defmodule SpecialMeetingGen do
       !ReplicaGen.can_sign?() ->
         IO.puts "🔴 not replica leader, ignoring slash motion"
         {:noreply, state}
-      true -> start_slash_entry_motion(mpk, state)
+      true -> start_slash_motion(mpk, state, :entry)
     end
   end
   def handle_info({:add_slash_trainer_tx_reply, pk, signature, mpk, epoch}, state = %{slash_trainer: _}) do
@@ -69,9 +69,9 @@ defmodule SpecialMeetingGen do
     #a signature from another motion (different mpk/epoch) signs a different
     #message: aggregating it would silently poison the aggsig
     if pk in st.validators and mpk == st.mpk and epoch == st.epoch do
-      aggsig = BLS12AggSig.add_padded(st.tx.aggsig, st.validators, pk, signature)
+      aggsig = BLS12AggSig.add_padded(st.tx.aggsig, st.validator_set, pk, signature)
       state = put_in(state, [:slash_trainer, :tx, :aggsig], aggsig)
-      IO.inspect {:tx, aggsig.mask_set_size / aggsig.mask_size}
+      IO.inspect {:tx, BLS12AggSig.score(aggsig)}
       {:noreply, state}
     else
       {:noreply, state}
@@ -85,9 +85,9 @@ defmodule SpecialMeetingGen do
       st.entry.entry.hash != entry_hash -> {:noreply, state}
       pk not in st.validators -> {:noreply, state}
       true ->
-        aggsig = BLS12AggSig.add_padded(st.entry.aggsig, st.validators, pk, signature)
+        aggsig = BLS12AggSig.add_padded(st.entry.aggsig, st.validator_set, pk, signature)
         state = put_in(state, [:slash_trainer, :entry, :aggsig], aggsig)
-        IO.inspect {:entry, aggsig.mask_set_size / aggsig.mask_size}
+        IO.inspect {:entry, BLS12AggSig.score(aggsig)}
         {:noreply, state}
     end
   end
@@ -97,65 +97,35 @@ defmodule SpecialMeetingGen do
     {:noreply, state}
   end
 
-  defp start_slash_tx_motion(mpk, state) do
-    slash_trainer = %{}
-
+  defp start_slash_motion(mpk, state, type) do
     height = DB.Chain.height()
-    epoch = DB.Chain.epoch()
-    validators = DB.Chain.validators_for_height(height + 1)
+    epoch = div(height + 1, 100_000)
+    set = DB.Chain.validator_set_for_height(height + 1)
+    validators = ValidatorSet.active(set)
     my_validators = Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
 
-    aggsig = BLS12AggSig.new_padded(length(validators))
-    aggsig = Enum.reduce(my_validators, aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
+    aggsig = Enum.reduce(my_validators, BLS12AggSig.new_padded(set), fn %{pk: pk, seed: seed}, agg ->
       signature = BlsEx.sign!(seed, <<"slash_trainer", epoch::32-little, mpk::binary>>, BLS12AggSig.dst_motion())
-      BLS12AggSig.add_padded(aggsig, validators, pk, signature)
+      BLS12AggSig.add_padded(agg, set, pk, signature)
     end)
 
-    state = put_in(state, [:slash_trainer], slash_trainer)
-    state = put_in(state, [:slash_trainer, :type], :tx)
-    state = put_in(state, [:slash_trainer, :tx], %{})
-    state = put_in(state, [:slash_trainer, :tx, :tx], nil)
-    state = put_in(state, [:slash_trainer, :tx, :aggsig], aggsig)
-    state = put_in(state, [:slash_trainer, :mpk], mpk)
-    state = put_in(state, [:slash_trainer, :state], :gather_tx_sigs)
-    state = put_in(state, [:slash_trainer, :attempts], 0)
-    state = put_in(state, [:slash_trainer, :height], height)
-    state = put_in(state, [:slash_trainer, :epoch], epoch)
-    state = put_in(state, [:slash_trainer, :validators], validators)
-    state = put_in(state, [:slash_trainer, :my_validators], my_validators)
-    {:noreply, state}
+    motion = %{
+      type: type, mpk: mpk, epoch: epoch, height: height, parent_hash: DB.Chain.tip(),
+      validator_set: set, validators: validators, my_validators: my_validators,
+      state: :gather_tx_sigs, attempts: 0,
+      tx: %{tx: nil, aggsig: aggsig},
+      entry: %{entry: nil, aggsig: BLS12AggSig.new_padded(set)}
+    }
+    {:noreply, Map.put(state, :slash_trainer, motion)}
   end
 
-  defp start_slash_entry_motion(mpk, state) do
-    slash_trainer = %{}
-
-    height = DB.Chain.height()
-    epoch = DB.Chain.epoch()
-    validators = DB.Chain.validators_for_height(height + 1)
-    my_validators = Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
-
-    aggsig = BLS12AggSig.new_padded(length(validators))
-    aggsig = Enum.reduce(my_validators, aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
-      signature = BlsEx.sign!(seed, <<"slash_trainer", epoch::32-little, mpk::binary>>, BLS12AggSig.dst_motion())
-      BLS12AggSig.add_padded(aggsig, validators, pk, signature)
-    end)
-
-    state = put_in(state, [:slash_trainer], slash_trainer)
-    state = put_in(state, [:slash_trainer, :type], :entry)
-    state = put_in(state, [:slash_trainer, :tx], %{})
-    state = put_in(state, [:slash_trainer, :tx, :tx], nil)
-    state = put_in(state, [:slash_trainer, :tx, :aggsig], aggsig)
-    state = put_in(state, [:slash_trainer, :entry], %{})
-    state = put_in(state, [:slash_trainer, :entry, :entry], nil)
-    state = put_in(state, [:slash_trainer, :entry, :aggsig], BLS12AggSig.new_padded(length(validators)))
-    state = put_in(state, [:slash_trainer, :mpk], mpk)
-    state = put_in(state, [:slash_trainer, :state], :gather_tx_sigs)
-    state = put_in(state, [:slash_trainer, :attempts], 0)
-    state = put_in(state, [:slash_trainer, :height], height)
-    state = put_in(state, [:slash_trainer, :epoch], epoch)
-    state = put_in(state, [:slash_trainer, :validators], validators)
-    state = put_in(state, [:slash_trainer, :my_validators], my_validators)
-    {:noreply, state}
+  # Discard a motion if its signer context changes. An entry motion also pins
+  # its parent, so replies cannot be combined across competing/replaced blocks.
+  def motion_current?(st) do
+    height = DB.Chain.height() + 1
+    div(height, 100_000) == st.epoch and
+      DB.Chain.validator_set_for_height(height) == st.validator_set and
+      (st.type == :tx or DB.Chain.tip() == st.parent_hash)
   end
 
   def tick(state) do
@@ -164,18 +134,19 @@ defmodule SpecialMeetingGen do
     cond do
       !state[:slash_trainer] -> maybe_start_motion(state)
       st.attempts > 3 -> Map.delete(state, :slash_trainer)
+      !motion_current?(st) -> Map.delete(state, :slash_trainer)
 
       #the slash already landed via another initiator: stand down
       st.mpk not in DB.Chain.validators_for_height(DB.Chain.height() + 1) ->
         Map.delete(state, :slash_trainer)
 
-      st.type == :tx and (st.tx.aggsig.mask_set_size / st.tx.aggsig.mask_size) >= 0.67 ->
-        txu = build_slash_tx(carrier_sk(st), st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)
+      st.type == :tx and BLS12AggSig.quorum?(st.tx.aggsig) ->
+        txu = build_slash_tx(carrier_sk(st), st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, length(ValidatorSet.roster(st.validator_set)))
         IO.inspect txu
         TXPool.insert_and_broadcast(txu, %{peers: 0})
         Map.delete(state, :slash_trainer)
 
-      st.type == :entry and st.state == :gather_tx_sigs and (st.tx.aggsig.mask_set_size / st.tx.aggsig.mask_size) >= 0.67 ->
+      st.type == :entry and st.state == :gather_tx_sigs and BLS12AggSig.quorum?(st.tx.aggsig) ->
         case build_slash_entry(st) do
           nil ->
             IO.puts "🔴 already signed a different slash entry at this height, dropping motion"
@@ -191,10 +162,11 @@ defmodule SpecialMeetingGen do
         NodeGen.broadcast(NodeProto.special_business(business), %{peers: 0})
         put_in(state, [:slash_trainer, :attempts], st.attempts + 1)
 
-      st.type == :entry and (st.entry.aggsig.mask_set_size / st.entry.aggsig.mask_size) >= 0.67 ->
-        IO.inspect {:entry_with_score, st.entry.aggsig.mask_set_size / st.entry.aggsig.mask_size}
-        entry = Map.merge(st.entry.entry, %{signature: st.entry.aggsig.aggsig,
-          mask: st.entry.aggsig.mask, mask_size: st.entry.aggsig.mask_size, mask_set_size: st.entry.aggsig.mask_set_size})
+      st.type == :entry and BLS12AggSig.quorum?(st.entry.aggsig) ->
+        IO.inspect {:entry_with_score, BLS12AggSig.score(st.entry.aggsig)}
+        entry = st.entry.entry
+          |> Map.merge(Map.take(st.entry.aggsig, [:mask, :mask_active, :mask_size, :mask_set_size]))
+          |> Map.put(:signature, st.entry.aggsig.aggsig)
         IO.inspect entry, limit: 1111111111, printable_limit: 1111111111
         DB.Entry.insert(entry)
         Map.delete(state, :slash_trainer)
@@ -223,15 +195,15 @@ defmodule SpecialMeetingGen do
     TX.build(sk, "Epoch", "slash_trainer", [mpk, "#{epoch}", aggsig, "#{mask_size}", mask], nil, nil, nil, gas)
   end
 
-  #a slash rewrites the whole validator list as a new state key, which outgrows
+  #a slash writes the roster and active mask as a new state key, which outgrows
   #the default tx storage budget. from the fork, attach gas for 2x the
-  #list size at state prices (unused gas is refunded). the budget is locked from
+  #record size at state prices (unused gas is refunded). the budget is locked from
   #the carrier's balance before execution and a shortfall invalidates the whole
   #replacement entry, so attach nothing unless the carrier can cover it
   def slash_attached_gas(sk, height) do
     if height < RDBProtocol.forkheight() do nil else
-      validators = DB.Chain.validators_for_height(height)
-      bytes = 2 * byte_size(RDB.vecpak_encode(validators))
+      set = DB.Chain.validator_set_for_height(height)
+      bytes = 2 * byte_size(RDB.vecpak_encode(set))
       gas = RDBProtocol.cost_per_new_leaf_merkle() + RDBProtocol.cost_per_byte_state() * bytes
       pk = BlsEx.get_public_key!(sk)
       if DB.Chain.balance(pk) >= RDBProtocol.tx_budget() + gas do gas else nil end
@@ -245,7 +217,7 @@ defmodule SpecialMeetingGen do
       true = FabricSyncAttestGen.isQuorumSynced()
       cur_entry = DB.Chain.tip_entry()
 
-      txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, st.tx.aggsig.mask_size)]
+      txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, length(ValidatorSet.roster(st.validator_set)))]
       next_entry = Entry.build_next(sk, cur_entry, txs)
       next_entry = Entry.sign(sk, next_entry)
 
@@ -258,7 +230,7 @@ defmodule SpecialMeetingGen do
         aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
           h = :crypto.hash(:sha256, RDB.vecpak_encode(next_entry.header))
           signature = BlsEx.sign!(seed, h, BLS12AggSig.dst_entry())
-          BLS12AggSig.add_padded(aggsig, st.validators, pk, signature)
+          BLS12AggSig.add_padded(aggsig, st.validator_set, pk, signature)
         end)
 
         {next_entry, aggsig}

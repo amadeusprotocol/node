@@ -23,6 +23,7 @@ pub struct Entry {
     pub header: Header,
     pub txs: Vec<TXU>,
     pub mask: Option<Vec<u8>>,
+    pub mask_active: Option<Vec<u8>>,
     pub mask_size: Option<i128>,
     pub mask_set_size: Option<i128>,
 }
@@ -78,6 +79,9 @@ impl EncodeToTerm for Entry {
         if let Some(ref m) = self.mask {
             pairs.push((Term::Binary(b"mask".to_vec()), Term::Binary(m.clone())));
         }
+        if let Some(ref m) = self.mask_active {
+            pairs.push((Term::Binary(b"mask_active".to_vec()), Term::Binary(m.clone())));
+        }
         if let Some(ms) = self.mask_size {
             pairs.push((Term::Binary(b"mask_size".to_vec()), Term::VarInt(ms)));
         }
@@ -104,10 +108,12 @@ impl DecodeFromTerm for Entry {
 
         let mask = codec::pl_get_bytes_opt(pairs, b"mask").map(|b| b.to_vec());
 
+        let mask_active = codec::pl_get_bytes_opt(pairs, b"mask_active").map(|b| b.to_vec());
+
         let mask_size = codec::pl_get_varint_opt(pairs, b"mask_size");
         let mask_set_size = codec::pl_get_varint_opt(pairs, b"mask_set_size");
 
-        Entry { hash, signature, header, txs, mask, mask_size, mask_set_size }
+        Entry { hash, signature, header, txs, mask, mask_active, mask_size, mask_set_size }
     }
 }
 

@@ -160,7 +160,7 @@ defmodule FabricSyncGen do
   end
 
   defp rootable?(height) do
-    Enum.any?(DB.Attestation.consensuses_by_height(height), & &1.aggsig.mask_set_size / &1.aggsig.mask_size >= 0.67)
+    Enum.any?(DB.Attestation.consensuses_by_height(height), & BLS12AggSig.quorum?(&1.aggsig))
   end
 
   #one message carrying all heights, to up to @peer_count peers. peers whose

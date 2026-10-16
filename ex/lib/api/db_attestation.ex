@@ -18,16 +18,37 @@ defmodule DB.Attestation do
     end
   end
 
+  def quorum?(hash, muts_hash) do
+    case consensus(hash, muts_hash) do
+      nil -> false
+      c -> BLS12AggSig.quorum?(c.aggsig)
+    end
+  end
+
   def set_consensus(consensus, db_opts \\ %{}) do
-    score = consensus.aggsig.mask_set_size / consensus.aggsig.mask_size
+    entry = DB.Entry.by_hash(consensus.entry_hash, db_opts)
+    if entry do
+      set = DB.Chain.validator_set_for_height(Entry.height(entry), db_opts)
+      case BLS12AggSig.validate(consensus.aggsig, set) do
+        {:ok, _} -> set_validated_consensus(consensus, db_opts)
+        error -> error
+      end
+    else
+      {:error, :invalid_entry}
+    end
+  end
+
+  defp set_validated_consensus(consensus, db_opts) do
+    score = BLS12AggSig.score(consensus.aggsig)
 
     old_consensus = consensus(consensus.entry_hash, consensus.mutations_hash, db_opts)
-    old_score = if old_consensus do old_consensus.aggsig.mask_set_size / old_consensus.aggsig.mask_size else 0.0 end
+    old_score = if old_consensus do BLS12AggSig.score(old_consensus.aggsig) else 0.0 end
 
     cond do
+      BLS12AggSig.signer_count(consensus.aggsig) == 0 -> {:error, :consensus_variant_limit}
       score <= old_score -> :ok
       #a quorum variant always gets in
-      BLS12AggSig.quorum?(consensus.aggsig.mask_set_size, consensus.aggsig.mask_size) ->
+      BLS12AggSig.quorum?(consensus.aggsig) ->
         put_consensus(consensus, db_opts)
       signer_variant_limit?(consensus, old_consensus, db_opts) ->
         {:error, :consensus_variant_limit}
@@ -37,6 +58,7 @@ defmodule DB.Attestation do
   end
 
   defp put_consensus(consensus, db_opts) do
+    consensus = %{consensus | aggsig: BLS12AggSig.canonical(consensus.aggsig)}
     RocksDB.put("consensus:#{consensus.entry_hash}:#{consensus.mutations_hash}", RDB.vecpak_encode(consensus), db_handle(db_opts, :attestation, %{}))
   end
 
@@ -50,10 +72,8 @@ defmodule DB.Attestation do
     added == [] or Enum.any?(added, fn idx -> Enum.count(others, & idx in &1) >= @variants_per_validator end)
   end
 
-  defp signed_indexes(%{mask: mask, mask_size: size}) when is_integer(size) and size > 0 do
-    BLS12AggSig.unmask_trainers(Enum.to_list(0..(size - 1)), mask, size)
-  end
-  defp signed_indexes(_aggsig), do: []
+  #padding bits are zero (validated), so every set bit is a signer
+  defp signed_indexes(%{mask: mask}), do: for({1, i} <- Enum.with_index(for <<b::1 <- mask>>, do: b), do: i)
 
   def consensuses_by_height(height, db_opts \\ %{}) do
     DB.Entry.by_height_return_hashes(height, db_opts)
@@ -69,7 +89,7 @@ defmodule DB.Attestation do
   def best_consensus_by_entryhash(hash) do
     consensuses(hash)
     |> Enum.reduce({nil,nil}, fn(consensus, {best_mutshash, best_score}) ->
-      score = consensus.aggsig.mask_set_size/consensus.aggsig.mask_size
+      score = BLS12AggSig.score(consensus.aggsig)
       cond do
           !best_mutshash -> {consensus.mutations_hash, score}
           score > best_score -> {consensus.mutations_hash, score}

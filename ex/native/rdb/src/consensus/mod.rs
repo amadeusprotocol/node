@@ -1,6 +1,7 @@
 pub mod bic;
 
 pub mod aggsig;
+pub mod validator_set;
 pub mod hbsmt;
 pub mod hbsmt_common;
 pub mod hbsmt_rdb;
