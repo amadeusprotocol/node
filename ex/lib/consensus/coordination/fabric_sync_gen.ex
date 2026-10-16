@@ -65,7 +65,7 @@ defmodule FabricSyncGen do
     local_height = DB.Chain.height()
     if height > local_height and catchup_ok?(peer.pk, @catchup_per_peer) do
       requests = (local_height + 1)..min(height, local_height + @max_heights)
-      |> Enum.map(& frontier_request(&1, DB.Entry.by_height_return_hashes(&1), &1 >= height - @live_edge))
+      |> Enum.map(& frontier_request(&1, &1 >= (height - @live_edge)))
       send(NodeGen.get_socket_gen(), {:send_to, [peer], NodeProto.catchup(requests)})
     end
     {:noreply, state}
@@ -75,7 +75,7 @@ defmodule FabricSyncGen do
   #this work is paused for quorum or an applying/coordinator process.
   def handle_info(:tick, state) do
     {interval, state} = cond do
-      FabricGen.isSyncing() or FabricCoordinatorGen.isSyncing() or !FabricSyncAttestGen.hasQuorum() -> {30, state}
+      FabricGen.isSyncing() or !FabricSyncAttestGen.hasQuorum() -> {30, state}
       true -> tick(state)
     end
     :erlang.send_after(interval, self(), :tick)
@@ -106,7 +106,7 @@ defmodule FabricSyncGen do
 
     %{state | frontier: request_heights(fr, local_height, @frontier_retry_ms, !behind, &NodeANR.get_temporal_height/1, max(target, local_height) - @live_edge, fn ->
       missing = (local_height + 2)..min(target, local_height + @max_heights)//1
-      |> Enum.filter(& DB.Entry.by_height_return_hashes(&1) == [])
+      |> Enum.filter(& !holds_entry?(&1))
       [local_height + 1 | missing]
     end)}
   end
@@ -141,7 +141,7 @@ defmodule FabricSyncGen do
       [] -> loop
       [first | _] ->
         skip_pks = heights |> Enum.flat_map(& (requested[&1] || %{pks: []}).pks) |> Enum.uniq()
-        requests = Enum.map(heights, & frontier_request(&1, DB.Entry.by_height_return_hashes(&1), &1 >= attest_from))
+        requests = Enum.map(heights, & frontier_request(&1, &1 >= attest_from))
         case send_to_peers(first, requests, skip_pks, peer_height) do
           [] -> loop
           pks ->
@@ -151,6 +151,12 @@ defmodule FabricSyncGen do
             %{loop | requested: Map.merge(requested, asked), last_send: now}
         end
     end
+  end
+
+  #entries past tip+1 wait in FabricInbox; only one whose signer we know as a
+  #validator counts, so junk cannot hide a hole
+  defp holds_entry?(height) do
+    DB.Entry.by_height_return_hashes(height) != [] or FabricInbox.entry_hashes(height, true) != []
   end
 
   defp rootable?(height) do
@@ -177,9 +183,13 @@ defmodule FabricSyncGen do
 
   #raw attestations only at the live edge (the last @live_edge heights of the
   #tip): deeper heights already have a formed consensus, and re-fetching their
-  #attestations floods FabricCoordinatorGen with duplicates
-  defp frontier_request(height, hashes, attest?) do
-    %{height: height, hashes: hashes, e: true, a: attest?, c: true}
+  #attestations floods FabricInbox with duplicates
+  defp frontier_request(height, attest?), do: catchup_request(height, %{a: attest?, c: true})
+
+  #entries are not re-asked for a height FabricInbox holds
+  defp catchup_request(height, flags) do
+    if FabricInbox.entry_hashes(height, true) != [], do: Map.put(flags, :height, height),
+      else: Map.merge(flags, %{height: height, hashes: DB.Entry.by_height_return_hashes(height), e: true})
   end
 
   #stable sort keeps advertised-first order within each group
@@ -295,7 +305,7 @@ defmodule FabricSyncGen do
         target = min(height_network_bft, temporal_height + 20_000)
         holes = Stream.iterate(temporal_height + @max_heights + 1, & &1 + 1)
         |> Stream.take_while(& &1 <= target)
-        |> Stream.filter(& DB.Entry.by_height_return_hashes(&1) == [])
+        |> Stream.reject(&holds_entry?/1)
         |> Enum.take(forward_budget)
         IO.puts "Behind BFT: #{behind_bft} behind, #{length(holes)} entry holes"
         case holes do
@@ -322,7 +332,7 @@ defmodule FabricSyncGen do
         |> Enum.uniq()
         {rooted_peers, _temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
         next_heights
-        |> Enum.map(& %{height: &1, hashes: Enum.map(DB.Entry.by_height(&1), fn(%{hash: hash})-> hash end), e: true, c: true})
+        |> Enum.map(& catchup_request(&1, %{c: true}))
         |> Enum.chunk_every(20)
         |> fetch_chunks(rooted_peers)
 
@@ -334,7 +344,7 @@ defmodule FabricSyncGen do
         |> Enum.uniq()
         {_rooted_peers, temporal_peers} = NodeANR.peers_w_min_height(List.last(next_heights), :any)
         next_heights
-        |> Enum.map(& %{height: &1, hashes: Enum.map(DB.Entry.by_height(&1), fn(%{hash: hash})-> hash end), e: true, a: true})
+        |> Enum.map(& catchup_request(&1, %{a: true}))
         |> Enum.chunk_every(10)
         |> fetch_chunks(temporal_peers)
 

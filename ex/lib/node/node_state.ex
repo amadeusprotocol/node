@@ -106,25 +106,11 @@ defmodule NodeState do
   end
 
   def handle(:event_entry, istate, term) do
-    case Entry.unpack_and_validate_from_net(term.entry_packed) do
-      %{error: :ok, entry: entry} ->
-        if Entry.height(entry) >= DB.Chain.rooted_height() do
-          DB.Entry.insert(entry)
-          NodeANR.set_tips(istate.peer.pk, nil, Map.merge(entry, %{sig_error: :ok}))
-        end
-      _ -> :ok
-    end
+    FabricInbox.insert_entry(term.entry_packed, istate.peer.pk)
   end
 
   def handle(:event_attestation, istate, term) do
-    Enum.each(term.attestations, fn(attestation)->
-      case Attestation.validate_vs_chain(attestation) do
-        %{error: :ok} ->
-          send(FabricCoordinatorGen, {:add_attestation, attestation})
-        %{error: error} ->
-          cache_attestation_if_pending(attestation, error)
-      end
-    end)
+    Enum.each(term.attestations, & FabricInbox.insert_attestation/1)
   end
 
   def handle(:catchup, istate, term) do
@@ -171,36 +157,9 @@ defmodule NodeState do
   def handle(:catchup_reply, istate, term) do
     Enum.take(term.tries, 200)
     |> Enum.each(fn(trie)->
-      rooted_tip = DB.Chain.rooted_height()
-
-      Enum.each(Enum.take(trie[:entries]||[], 20), fn(entry_packed)->
-        case Entry.unpack_and_validate_from_net(entry_packed) do
-          %{error: :ok, entry: entry} ->
-            if Entry.height(entry) >= rooted_tip do
-              DB.Entry.insert(entry)
-              NodeANR.set_tips(istate.peer.pk, nil, Map.merge(entry, %{sig_error: :ok}))
-            end
-          _ -> :ok
-        end
-      end)
-
-      Enum.each(Enum.take(trie[:attestations]||[], 100), fn(attestation)->
-        case Attestation.validate_vs_chain(attestation) do
-          %{error: :ok} ->
-            send(FabricCoordinatorGen, {:add_attestation, attestation})
-          %{error: error} ->
-            cache_attestation_if_pending(attestation, error)
-        end
-      end)
-
-      Enum.each(Enum.take(trie[:consensuses]||[], 100), fn(consensus)->
-        case Consensus.validate_vs_chain(consensus) do
-          %{error: :ok} ->
-            send(FabricCoordinatorGen, {:insert_consensus, consensus})
-          _ -> nil
-        end
-      end)
-
+      Enum.each(Enum.take(trie[:entries]||[], 20), & FabricInbox.insert_entry(&1, istate.peer.pk))
+      Enum.each(Enum.take(trie[:attestations]||[], 100), & FabricInbox.insert_attestation(&1, trie[:height]))
+      Enum.each(Enum.take(trie[:consensuses]||[], 100), & FabricInbox.insert_consensus(&1, trie[:height]))
     end)
   end
 
@@ -263,11 +222,5 @@ defmodule NodeState do
 
   def handle(op, _, _) do
     IO.inspect {:ukn_op, op}
-  end
-
-  defp cache_attestation_if_pending(attestation, error) do
-    if error in [:entry_dne, :ahead_of_localchain] and :ets.info(AttestationCache, :size) < 100_000 do
-      :ets.insert(AttestationCache, {{attestation.entry_hash, attestation.signer}, {attestation, :os.system_time(1000)}})
-    end
   end
 end

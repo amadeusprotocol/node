@@ -76,19 +76,7 @@ defmodule Entry do
     def unpack_from_net(nil), do: nil
     def unpack_from_net(entry) do
         entry = Map.take(entry, @fields)
-        entry_header = Map.take(entry.header, @fields_header)
-        entry = Map.put(entry, :header, entry_header)
-        if !entry[:mask] do entry else
-          trainers = DB.Chain.validators_for_height(entry_header.height)
-          true = is_integer(entry.mask_size)
-          true = is_integer(entry.mask_set_size)
-          true = entry.mask_size == length(trainers)
-          ensure_valid_mask!(entry.mask, entry.mask_size)
-
-          trainers_signed = BLS12AggSig.unmask_trainers(trainers, entry.mask, entry.mask_size)
-          true = entry.mask_set_size == length(trainers_signed)
-          entry
-        end
+        Map.put(entry, :header, Map.take(entry.header, @fields_header))
     end
 
     def pack_for_net(entry) do
@@ -100,18 +88,36 @@ defmodule Entry do
     def unpack_and_validate_from_net(entry) do
         try do
         entry = unpack_from_net(entry)
+        hash = header_hash(entry.header)
+        validate_hash(entry, hash)
+        if !entry[:mask] and !BlsEx.verify?(entry.header.signer, entry.signature, hash, BLS12AggSig.dst_entry()),
+          do: throw(%{error: :invalid_signature})
 
-        res_sig = validate_signature(entry, true)
-        if res_sig.error != :ok, do: throw res_sig
-
-        entry = Map.put(entry, :hash, res_sig.hash)
-        res_entry = validate_entry(entry, res_sig.hash)
+        res_entry = validate_entry(entry, hash)
         if res_entry.error != :ok, do: throw res_entry
 
         %{error: :ok, entry: entry}
         catch
             :throw,r -> r
             e,r -> IO.inspect {Entry, :unpack_and_validate, e, r, __STACKTRACE__}; %{error: :unknown}
+        end
+    end
+
+    def validate_vs_validators(entry) do
+        try do
+        header = entry.header
+        validators = DB.Chain.validators_for_height(header.height) || []
+        if header.signer not in validators, do: throw(%{error: :signer_not_in_validator_set})
+        validators_last_change_height = DB.Chain.validators_last_change_height(header.height)
+        if header.root_validator != root_validator(validators, validators_last_change_height), do: throw(%{error: :root_validator_invalid})
+        if entry[:mask] do
+          %{error: error} = validate_signature(entry)
+          if error != :ok, do: throw(%{error: error})
+        end
+        %{error: :ok}
+        catch
+            :throw,r -> r
+            e,r -> IO.inspect {Entry, :validate_vs_validators, e, r}; %{error: :unknown}
         end
     end
 
@@ -152,10 +158,6 @@ defmodule Entry do
 
         if !is_binary(eh.root_validator), do: throw(%{error: :root_validator_not_binary})
         if byte_size(eh.root_validator) != 32, do: throw(%{error: :root_validator_not_256_bits})
-        validators = DB.Chain.validators_for_height(eh.height)
-        if eh.signer not in validators, do: throw(%{error: :signer_not_in_validator_set})
-        validators_last_change_height = DB.Chain.validators_last_change_height(eh.height)
-        if eh.root_validator != root_validator(validators, validators_last_change_height), do: throw(%{error: :root_validator_invalid})
 
         if Enum.any?(e.txs, &(is_map(&1[:tx]) and is_map(&1.tx[:action]) and !TX.fits_budget?(&1))),
           do: throw(%{error: :tx_exceeds_budget})
@@ -206,7 +208,7 @@ defmodule Entry do
         end
     end
 
-    defp header_hash(header) do
+    def header_hash(header) do
         :crypto.hash(:sha256, RDB.vecpak_encode(header))
     end
 

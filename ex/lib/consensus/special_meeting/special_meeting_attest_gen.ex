@@ -207,6 +207,7 @@ defmodule SpecialMeetingAttestGen do
     slotStallTrainer = isNextSlotStalled()
     cur_entry = DB.Chain.rooted_tip_entry()
     %{error: :ok, entry: entry} = Entry.unpack_and_validate_from_net(entry_packed)
+    %{error: :ok} = Entry.validate_vs_validators(entry)
 
     1 = length(entry.txs)
     txu = hd(entry.txs)

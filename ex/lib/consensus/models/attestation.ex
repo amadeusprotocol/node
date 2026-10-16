@@ -54,16 +54,4 @@ defmodule Attestation do
           e,r -> IO.inspect {Attestation, :validate, e, r}; %{error: :unknown}
       end
     end
-
-    def validate_vs_chain(a) do
-      entry = DB.Entry.by_hash(a.entry_hash)
-      res = validate(a)
-      cond do
-        res.error != :ok -> res
-        !entry -> %{error: :entry_dne}
-        Entry.height(entry) > DB.Chain.height() -> %{error: :ahead_of_localchain}
-        a.signer not in DB.Chain.validators_for_height(Entry.height(entry)) -> %{error: :not_validator}
-        true -> %{error: :ok}
-      end
-    end
 end

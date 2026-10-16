@@ -44,8 +44,7 @@ defmodule Ama do
     :ets.new(TXPoolAccount, [:set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
     TXPool.init_byte_counter()
-    :ets.new(AttestationCache, [:ordered_set, :named_table, :public,
-      {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
+    FabricInbox.init()
     :ets.new(SharedSecretCache, [:ordered_set, :named_table, :public,
       {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
     :ets.new(CymruRoutingCache, [:ordered_set, :named_table, :public,
@@ -168,7 +167,6 @@ defmodule Ama do
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: DB.Pruner, start: {DB.Pruner, :start_link, []}})
     end
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricGen, start: {FabricGen, :start_link, []}})
-    {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricCoordinatorGen, start: {FabricCoordinatorGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: FabricEventGen, start: {FabricEventGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: SpecialMeetingAttestGen, start: {SpecialMeetingAttestGen, :start_link, []}})
     {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: SpecialMeetingGen, start: {SpecialMeetingGen, :start_link, []}})

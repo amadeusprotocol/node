@@ -22,13 +22,18 @@ defmodule FabricGen do
 
   def init(state) do
     :persistent_term.put(FabricSyncing, :atomics.new(1, []))
-    :erlang.send_after(2000, self(), :tick)
-    {:ok, %{next_restart: :os.system_time(1000) + 3*60*60_000}}
+    tick_timer = :erlang.send_after(2000, self(), :tick)
+    {:ok, %{next_restart: :os.system_time(1000) + 3*60*60_000, tick_timer: tick_timer}}
+  end
+
+  def handle_info(:kick, state) do
+    if :erlang.cancel_timer(state.tick_timer), do: send(self(), :tick)
+    {:noreply, state}
   end
 
   def handle_info(:tick, state) do
     state = if true do tick(state) else state end
-    :erlang.send_after(100, self(), :tick)
+    state = %{state | tick_timer: :erlang.send_after(100, self(), :tick)}
 
     if :os.system_time(1000) > state.next_restart do
       {:stop, :shutdown, state}
@@ -190,6 +195,7 @@ defmodule FabricGen do
   end
 
   defp proc_consensus_1(next_height) do
+    FabricInbox.drain_consensus(next_height, DB.Entry.by_height_in_main_chain(next_height - 1))
     next_entries = best_entry_for_height(next_height)
     #IO.inspect {next_entries, next_height}
     case List.first(next_entries) do
@@ -220,6 +226,7 @@ defmodule FabricGen do
                 Application.fetch_env!(:ama, :rpc_events) && FabricEventGen.event_rooted(best_entry, muts_hash)
                 %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
                 RocksDB.put("rooted_tip", best_entry.hash, %{db: db, cf: cf.sysconf})
+                FabricInbox.drop_rooted(best_entry.header.height)
                 proc_consensus()
             end
         _ -> nil
@@ -234,6 +241,7 @@ defmodule FabricGen do
     cur_slot = cur_entry.header.slot
     height = cur_entry.header.height
     next_height = height + 1
+    FabricInbox.drain_entries(next_height, cur_entry.hash)
     next_entries = next_height
     |> DB.Entry.by_height()
     |> Enum.filter(fn(next_entry)->
@@ -327,7 +335,7 @@ defmodule FabricGen do
         |> Enum.map(fn(seed)->
           attestation = Attestation.sign(seed.seed, hash, height, muts_hash, root_receipts, root_contractstate, :binary.copy(<<0>>, 32))
           DB.Attestation.put(attestation, height)
-          send(FabricCoordinatorGen, {:add_attestation, attestation})
+          FabricInbox.aggregate_attestation(attestation)
           attestation
         end)
         if attestations != [] do
