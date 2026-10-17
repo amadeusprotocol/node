@@ -186,10 +186,11 @@ defmodule FabricSyncGen do
   #attestations floods FabricInbox with duplicates
   defp frontier_request(height, attest?), do: catchup_request(height, %{a: attest?, c: true})
 
-  #entries are not re-asked for a height FabricInbox holds
+  #always ask for entries: a fork sibling we lack may be the one consensus picks.
+  #every hash held (RocksDB or FabricInbox) is sent so peers skip it
   defp catchup_request(height, flags) do
-    if FabricInbox.entry_hashes(height, true) != [], do: Map.put(flags, :height, height),
-      else: Map.merge(flags, %{height: height, hashes: DB.Entry.by_height_return_hashes(height), e: true})
+    hashes = Enum.uniq(DB.Entry.by_height_return_hashes(height) ++ FabricInbox.entry_hashes(height))
+    Map.merge(flags, %{height: height, hashes: hashes, e: true})
   end
 
   #stable sort keeps advertised-first order within each group

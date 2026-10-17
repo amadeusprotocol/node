@@ -164,7 +164,7 @@ defmodule FabricInbox do
   defp release_bytes({_key, row}), do: :atomics.sub(byte_counter(), 1, row.bytes)
 
   #FabricGen pulls only what is next: entries for the block to apply
-  #(drain_entries) and consensuses/attestations for the block to root
+  #(drain_entries) and entries/consensuses/attestations for the block to root
   #(drain_consensus), each checked against the validator set of its height.
   #the rest waits here. a row is redone when the block below it changed
   #(softfork); rows at or below rooted_height go: no softfork can need them
@@ -185,6 +185,9 @@ defmodule FabricInbox do
   #(the rooted tip). verification in parallel, writes in key order: a consensus
   #is stored before the attestations of its height aggregate onto it
   def drain_consensus(height, parent_hash) do
+    #a sibling that arrived after this height was applied: consensus may pick it
+    pending(height, @entry, parent_hash) |> store_entries()
+
     verify_in_parallel(pending(height, @consensus, parent_hash), & Consensus.validate_vs_chain(&1) == %{error: :ok})
     |> Enum.each(fn({key, row, parent_hash, valid})->
       valid && (DB.Attestation.set_consensus(row.value); mark_validated(key, row, parent_hash))
@@ -235,7 +238,7 @@ defmodule FabricInbox do
     set = if entry, do: DB.Chain.validator_set_for_height(Entry.height(entry), %{rtx: rtx})
     #add_padded throws on a stored aggsig that no longer matches the set (softfork)
     result = try do
-      if entry && set && signer in ValidatorSet.active(set) and entry.header.height <= DB.Chain.height(%{rtx: rtx}) do
+      if entry && set && signer in ValidatorSet.active(set) && entry.header.height <= DB.Chain.height(%{rtx: rtx}) do
         consensus = DB.Attestation.consensus(entry_hash, mutations_hash, %{rtx: rtx}) || %{mutations_hash: mutations_hash, entry_hash: entry_hash}
         aggsig = consensus[:aggsig] || BLS12AggSig.new_padded(set)
         consensus = Map.put(consensus, :aggsig, BLS12AggSig.add_padded(aggsig, set, signer, signature))
