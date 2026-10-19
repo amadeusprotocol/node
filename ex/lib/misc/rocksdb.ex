@@ -179,20 +179,31 @@ defmodule RocksDB do
             {key, value}
         end)
     end
+    #paging (all optional): :start_after resumes after that key (prefix stripped,
+    #as returned), :limit caps the rows, :max_bytes stops once key+value bytes pass it
     def get_prefix(prefix, opts) do
         {:ok, it} = iterator(opts)
-        res = RDB.iterator_move(it, {:seek, prefix})
-        result = get_prefix_1(prefix, it, res, opts, [])
+        after_key = opts[:start_after] && prefix <> opts.start_after
+        res = case RDB.iterator_move(it, {:seek, after_key || prefix}) do
+            {:ok, ^after_key, _} -> RDB.iterator_move(it, :next)
+            res -> res
+        end
+        result = get_prefix_1(prefix, it, res, opts, [], opts[:limit], opts[:max_bytes])
         RDB.iterator_close(it)
         result
     end
-    defp get_prefix_1(prefix, it, res, opts, acc) do
+    #nil limit / bytes_left: unbounded. the row crossing max_bytes is kept, so
+    #one oversized value cannot stall paging
+    defp get_prefix_1(_prefix, _it, _res, _opts, acc, limit, bytes_left)
+        when limit == 0 or (is_integer(bytes_left) and bytes_left <= 0), do: Enum.reverse(acc)
+    defp get_prefix_1(prefix, it, res, opts, acc, limit, bytes_left) do
         case res do
             {:ok, <<^prefix::binary, key::binary>>, value} ->
+                bytes_left = bytes_left && bytes_left - byte_size(key) - byte_size(value)
                 value = if opts[:term] do :erlang.binary_to_term(value, [:safe]) else value end
                 value = if opts[:to_integer] do :erlang.binary_to_integer(value) else value end
                 res = RDB.iterator_move(it, :next)
-                get_prefix_1(prefix, it, res, opts, [{key, value} | acc])
+                get_prefix_1(prefix, it, res, opts, [{key, value} | acc], limit && limit - 1, bytes_left)
             {:error, :invalid_iterator} -> Enum.reverse(acc)
             _ -> Enum.reverse(acc)
         end

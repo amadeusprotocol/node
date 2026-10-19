@@ -138,7 +138,7 @@ defmodule FabricInbox do
   defp entry_height(entry_hash) do
     next_height = DB.Chain.height() + 1
     if :ets.select_count(FabricInbox, [{{{next_height, @entry, entry_hash, :_, :_}, :_}, [], [true]}]) > 0,
-      do: next_height, else: DB.Entry.by_hash(entry_hash)[:header][:height]
+      do: next_height, else: DB.Entry.height(entry_hash)
   end
 
   #insert, then evict from the top until under the cap (maybe the row itself).

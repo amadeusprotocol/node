@@ -36,6 +36,13 @@ defmodule Ama do
       {:ok, _} = DynamicSupervisor.start_child(Ama.Supervisor, %{id: AutoUpdateGen, start: {AutoUpdateGen, :start_link, []}})
     end
 
+    :ets.new(APICache, [:set, :named_table, :public, {:read_concurrency, true}])
+    HTTP.Stats.init()
+    for table <- [EntryHeight, HeightTxsCache] do
+      :ets.new(table, [:set, :named_table, :public,
+        {:write_concurrency, true}, {:read_concurrency, true}, {:decentralized_counters, false}])
+      :persistent_term.put(table, :atomics.new(1, []))
+    end
     DB.API.init()
 
     :ets.new(TXPool, [:ordered_set, :named_table, :public,

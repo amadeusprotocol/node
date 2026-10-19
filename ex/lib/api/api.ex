@@ -11,11 +11,11 @@ defmodule API do
         val
       :miss ->
         :global.trans({{API.Cache, key}, self()}, fn ->
-          case cache_read(key, ttl_ms) do
-            {:fresh, val} -> val
-            _ ->
+          case :ets.lookup(APICache, key) do
+            [{_, _ts, val}] -> val
+            [] ->
               val = fun.()
-              :persistent_term.put({API.Cache, key}, {:os.system_time(1000), val})
+              :ets.insert(APICache, {key, :os.system_time(1000), val})
               val
           end
         end, [node()])
@@ -24,10 +24,10 @@ defmodule API do
 
   defp cache_read(key, ttl_ms) do
     now = :os.system_time(1000)
-    case :persistent_term.get({API.Cache, key}, nil) do
-      {ts, val} when now - ts < ttl_ms -> {:fresh, val}
-      {_ts, val} -> {:stale, val}
-      nil -> :miss
+    case :ets.lookup(APICache, key) do
+      [{_, ts, val}] when now - ts < ttl_ms -> {:fresh, val}
+      [{_, _ts, val}] -> {:stale, val}
+      [] -> :miss
     end
   end
 
@@ -41,8 +41,7 @@ defmodule API do
           case cache_read(key, ttl_ms) do
             {:fresh, _} -> :ok
             _ ->
-              val = fun.()
-              :persistent_term.put({API.Cache, key}, {:os.system_time(1000), val})
+              :ets.insert(APICache, {key, :os.system_time(1000), fun.()})
           end
         after
           :global.del_lock(lock, [node()])

@@ -7,7 +7,7 @@ defmodule DB.Chain do
     DB.Entry.by_hash(tip(db_opts), db_opts)
   end
 
-  def height(db_opts \\ %{}) do tip_entry(db_opts).header.height end
+  def height(db_opts \\ %{}) do DB.Entry.height(tip(db_opts), db_opts) end
   def epoch(db_opts \\ %{}) do div(height(db_opts), 100_000) end
 
   def rooted_tip(db_opts \\ %{}) do RocksDB.get("rooted_tip", db_handle(db_opts, :sysconf, %{})) end
@@ -16,12 +16,7 @@ defmodule DB.Chain do
     DB.Entry.by_hash(rooted_tip(db_opts), db_opts)
   end
 
-  def rooted_height(db_opts \\ %{}) do
-      entry = rooted_tip_entry(db_opts)
-      if entry do
-          entry.header.height
-      end
-  end
+  def rooted_height(db_opts \\ %{}) do DB.Entry.height(rooted_tip(db_opts), db_opts) end
 
   def segment_vr_hash(db_opts \\ %{}) do
     RocksDB.get("bic:epoch:segment_vr_hash", db_handle(db_opts, :contractstate, %{}))
@@ -77,22 +72,25 @@ defmodule DB.Chain do
     RocksDB.put("pruned_below_height", :erlang.integer_to_binary(height), db_handle(db_opts, :sysconf, %{}))
   end
 
-  def tx_from_map(map, db_opts \\ %{}) do
-    map = map |> RDB.vecpak_decode()
-    entry_bytes = RocksDB.get(map.entry_hash, db_handle(db_opts, :entry, %{}))
-    if !entry_bytes, do: throw(%{error: :tx_entry_missing, entry_hash: map.entry_hash})
-    entry = Entry.unpack_from_db(entry_bytes)
-    tx_bytes = binary_part(entry_bytes, map.index_start, map.index_size)
+  def tx_from_map(map, db_opts \\ %{}), do: hd(txs_from_maps([map], db_opts))
 
-    receipt = if map[:result] do map.result else map.receipt end
-
-    status = cond do
-      rooted_height() >= entry.header.height -> :finalized
-      true -> :committed
-    end
-    TX.unpack(tx_bytes)
-    |> Map.put(:receipt, receipt)
-    |> Map.put(:metadata, %{entry_hash: map.entry_hash, entry_height: entry.header.height, status: status})
+  #adjacent txs of one entry share a single read of it (entries are up to
+  #~3MB); one entry is held at a time
+  def txs_from_maps(maps, db_opts \\ %{}) do
+    rooted = rooted_height(db_opts)
+    Enum.map(maps, &RDB.vecpak_decode/1)
+    |> Enum.chunk_by(& &1.entry_hash)
+    |> Enum.flat_map(fn chunk = [%{entry_hash: entry_hash} | _] ->
+      entry_bytes = RocksDB.get(entry_hash, db_handle(db_opts, :entry, %{}))
+      if !entry_bytes, do: throw(%{error: :tx_entry_missing, entry_hash: entry_hash})
+      height = DB.Entry.height(entry_hash, db_opts)
+      status = if rooted >= height, do: :finalized, else: :committed
+      Enum.map(chunk, fn map ->
+        TX.unpack(binary_part(entry_bytes, map.index_start, map.index_size))
+        |> Map.put(:receipt, map[:result] || map[:receipt])
+        |> Map.put(:metadata, %{entry_hash: entry_hash, entry_height: height, status: status})
+      end)
+    end)
   end
 
   # Validator

@@ -217,9 +217,14 @@ defmodule SpecialMeetingGen do
       true = FabricSyncAttestGen.isQuorumSynced()
       cur_entry = DB.Chain.tip_entry()
 
-      txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, length(ValidatorSet.roster(st.validator_set)))]
-      next_entry = Entry.build_next(sk, cur_entry, txs)
-      next_entry = Entry.sign(sk, next_entry)
+      next_entry = case MnesiaKV.get(ReplicaKV, "slash_entry") do
+        %{entry: e} = stored when e.header.prev_hash == cur_entry.hash and stored.mpk == st.mpk -> e
+        _ ->
+          txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, length(ValidatorSet.roster(st.validator_set)))]
+          e = Entry.sign(sk, Entry.build_next(sk, cur_entry, txs))
+          MnesiaKV.merge_override(ReplicaKV, "slash_entry", %{entry: e, mpk: st.mpk})
+          e
+      end
 
     #same single-shot rule as attesters: we sign our own entry, so it goes
     #through the same persisted height lock, quorum-replicated before signing

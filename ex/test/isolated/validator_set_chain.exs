@@ -15,6 +15,8 @@ defmodule ValidatorSetChainTest do
     end
     Application.put_env(:ama, :keys, keys)
     Application.put_env(:ama, :keys_all_pks, Enum.map(keys, & &1.pk))
+    :ets.whereis(EntryHeight) == :undefined && :ets.new(EntryHeight, [:set, :named_table, :public])
+    :persistent_term.put(EntryHeight, :atomics.new(1, []))
     DB.API.init()
     on_exit(fn ->
       :persistent_term.erase({:rocksdb, Fabric})

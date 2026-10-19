@@ -68,7 +68,8 @@ defmodule NodeGen do
   end
 
   def broadcast_ping_and_tip(ts_m) do
-    :erlang.spawn(fn()->
+    !Process.whereis(NodeGenPingTip) and :erlang.spawn(fn()->
+      try do Process.register(self(), NodeGenPingTip) rescue ArgumentError -> exit(:normal) end
       msg = NodeProto.ping(ts_m)
       msg2 = NodeProto.event_tip()
 

@@ -35,7 +35,7 @@ defmodule Ama.MultiServer do
                         state = put_in(state, [:request], request)
                         cond do
                             request[:step] in [:next, :body] ->
-                                state = handle_http(state)
+                                state = HTTP.Stats.measure(request, fn -> handle_http(state) end)
                                 if request.headers["connection"] in ["close", "upgrade"] do
                                     :gen_tcp.shutdown(socket, :write)
                                 else
@@ -304,7 +304,7 @@ defmodule Ama.MultiServer do
                 quick_reply(state, %{error: :ok, removed_trainers: removed_trainers})
 
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/stats") ->
-                stats = API.Chain.stats()
+                stats = API.cached(:chain_stats, 1_000, &API.Chain.stats/0)
                 quick_reply(state, %{error: :ok, stats: stats})
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/kpi") ->
                 kpi = API.Chain.kpi()
@@ -368,8 +368,15 @@ defmodule Ama.MultiServer do
                 if not is_binary(key) or byte_size(key) < 8 do
                     quick_reply(%{state|request: r}, JSX.encode!(%{error: :prefix_too_short, min: 8}), 400)
                 else
-                    result = API.Contract.get_prefix(key)
-                    quick_reply(%{state|request: r}, RDB.vecpak_encode(result))
+                    #paged: ?cursor=<cursor of the previous page>; cursor is nil on the
+                    #last page. one row past the page tells whether more follow
+                    query = r.query && Photon.HTTP.parse_query(r.query) || %{}
+                    page = %{limit: 1_001, max_bytes: 1_048_576, start_after: query[:cursor] && Base58.decode(query.cursor)}
+                    rows = API.Contract.get_prefix(key, nil, page)
+                    more = length(rows) > 1_000 or Enum.sum_by(rows, fn {k, v} -> byte_size(k) + byte_size(v) end) >= 1_048_576
+                    rows = Enum.take(rows, 1_000)
+                    cursor = more && Base58.encode(elem(List.last(rows), 0)) || nil
+                    quick_reply(%{state|request: r}, RDB.vecpak_encode(%{rows: rows, cursor: cursor}))
                 end
             r.method == "POST" and r.path == "/api/contract/view" ->
                 {r, vecpak} = read_body_all_limited(state, r)

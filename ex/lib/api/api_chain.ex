@@ -32,7 +32,21 @@ defmodule API.Chain do
         %{error: :ok, entries: entries}
     end
 
+    #at or below rooted a height's entries never change: cache the reply.
+    #replies over 256KB are not cached, bounding the table to ~512MB
+    @height_txs_cache_max 2_000
     def by_height_with_txs(height) do
+      if height > (DB.Chain.rooted_height() || 0) do by_height_with_txs_1(height) else
+        :ets.lookup_element(HeightTxsCache, height, 2, nil) || cache_height_with_txs(height, by_height_with_txs_1(height))
+      end
+    end
+
+    defp cache_height_with_txs(height, result = %{entries: [_ | _]}) do
+      if :erlang.external_size(result) <= 262_144, do: Util.put_maybe_clear(HeightTxsCache, height, result, @height_txs_cache_max), else: result
+    end
+    defp cache_height_with_txs(_height, result), do: result
+
+    defp by_height_with_txs_1(height) do
         entries = DB.Entry.by_height(height)
         |> Enum.map(fn(entry)->
             txs = API.TX.get_by_entry(entry.hash)
@@ -88,7 +102,8 @@ defmodule API.Chain do
       }
     end
 
-    def kpi() do
+    def kpi(), do: API.cached(:chain_kpi, 10_000, &kpi_compute/0)
+    defp kpi_compute() do
       {_, uaw} = API.Contract.richlist()
       validator_pks = DB.Chain.validators_for_height(DB.Chain.height() + 1) |> Enum.map(& Base58.encode(&1))
       sol_pks = Enum.map(API.Epoch.score(), fn([pk, _score])-> pk end)

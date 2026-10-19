@@ -1,4 +1,13 @@
 defmodule Util do
+    def put_maybe_clear(table, key, value, max) do
+        if :ets.insert_new(table, {key, value}) do
+            count = :persistent_term.get(table)
+            n = :atomics.add_get(count, 1, 1)
+            if n > max and :atomics.compare_exchange(count, 1, n, 0) == :ok, do: :ets.delete_all_objects(table)
+        end
+        value
+    end
+
     def hexdump(binary) when is_binary(binary) do
         :binary.bin_to_list(binary)
         |> Enum.chunk_every(16, 16, [])

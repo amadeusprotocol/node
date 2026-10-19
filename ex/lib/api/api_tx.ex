@@ -56,9 +56,7 @@ defmodule API.TX do
 
       %{db: db} = :persistent_term.get({:rocksdb, Fabric})
       {cursor, tx_maps} = RDB.query_tx_hashfilter(db, signer, arg0, contract, function, limit, sort_desc, cursor)
-      txus = Enum.map(tx_maps, fn(tx_map)->
-        DB.Chain.tx_from_map(tx_map) |> format_tx_for_client()
-      end)
+      txus = DB.Chain.txs_from_maps(tx_maps) |> Enum.map(&format_tx_for_client/1)
       cursor = cursor && Base58.encode(cursor)
       {cursor, txus}
     end
@@ -102,14 +100,8 @@ defmodule API.TX do
         {next_cursor, tx_maps} = RDB.query_tx_hashfilter(db, signer, arg0, contract, function,
             filters.limit, sort_desc, cursor)
 
-        txs = tx_maps
-        |> Enum.map(fn tm ->
-            case DB.Chain.tx_from_map(tm) do
-                nil -> nil
-                txu -> txu |> put_in([:metadata, :tx_event], type) |> format_tx_for_client()
-            end
-        end)
-        |> Enum.reject(&is_nil/1)
+        txs = DB.Chain.txs_from_maps(tx_maps)
+        |> Enum.map(& &1 |> put_in([:metadata, :tx_event], type) |> format_tx_for_client())
 
         {next_cursor && Base58.encode(next_cursor), txs}
     end

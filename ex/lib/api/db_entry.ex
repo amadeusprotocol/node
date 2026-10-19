@@ -18,6 +18,18 @@ defmodule DB.Entry do
     end
   end
 
+  @height_memo_max 300_000
+  def height(hash, db_opts \\ %{})
+  def height(nil, _db_opts), do: nil
+  def height(hash, db_opts) do
+    :ets.lookup_element(EntryHeight, hash, 2, nil) || get_and_cache_height(hash, db_opts)
+  end
+
+  defp get_and_cache_height(hash, db_opts) do
+    height = by_hash(hash, db_opts)[:header][:height]
+    height && Util.put_maybe_clear(EntryHeight, hash, height, @height_memo_max)
+  end
+
   def by_height(height, db_opts \\ %{}) do
     RocksDB.get_prefix("by_height:#{pad_integer(height)}:", db_handle(db_opts, :entry_meta, %{}))
     |> Enum.map(& by_hash(elem(&1,0), db_opts) )
