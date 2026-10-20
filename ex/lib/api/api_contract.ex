@@ -79,7 +79,7 @@ defmodule API.Contract do
       if pk != last_pk do {count + 1, pk} else {count, last_pk} end
     end
 
-    def total_burned() do
-      API.Wallet.balance(BIC.Coin.burn_address())
+    def total_burned(symbol \\ "AMA") do
+      API.Wallet.balance(BIC.Coin.burn_address(), symbol)
     end
 end

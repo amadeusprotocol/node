@@ -132,6 +132,70 @@ pub fn call_transfer(env: &mut crate::consensus::consensus_apply::ApplyEnv, args
     }
 }
 
+pub const MAX_BURN_REF_LEN: usize = 64;
+//consensus allowlist; widening it needs a new fork height. other issuers may rely on soulbound coins never leaving
+pub const BURNABLE_SYMBOLS: &[&[u8]] = &[b"PRIME"];
+
+//keyed by holder so nobody can front-run or squat another account's ref
+pub fn burn_record_key(symbol: &[u8], account: &[u8], burn_ref: &[u8]) -> Vec<u8> {
+    bcat(&[b"bic:coin:burn:", symbol, b":", account, b":", burn_ref])
+}
+
+pub fn burned_key(symbol: &[u8], account: &[u8]) -> Vec<u8> {
+    bcat(&[b"bic:coin:burned:", symbol, b":", account])
+}
+
+//Holder destroys its own BURNABLE_SYMBOLS coins against a ref (e.g. an off-chain
+//order id). Soulbound is not checked since destroying is not transferring; paused is.
+//Each (symbol, holder, ref) can be used once and leaves a permanent record of
+//"<amount>:<height>:<tx_hash b58>".
+pub fn call_burn(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Vec<Vec<u8>>) {
+    if args.len() != 3 {
+        panic_any("invalid_args")
+    }
+    let amount_raw = args[0].as_slice();
+    let symbol = args[1].as_slice();
+    let burn_ref = args[2].as_slice();
+
+    let amount = std::str::from_utf8(amount_raw).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_amount"));
+    //canonical digits only, so a record amount always matches the signed arg byte for byte
+    if amount <= 0 || amount.to_string().as_bytes() != amount_raw {
+        panic_any("invalid_amount")
+    }
+    validate_symbol(symbol);
+    if !BURNABLE_SYMBOLS.contains(&symbol) {
+        panic_any("symbol_not_burnable")
+    }
+    //no ':' so the record key splits unambiguously
+    if burn_ref.is_empty() || burn_ref.len() > MAX_BURN_REF_LEN || !burn_ref.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_') {
+        panic_any("invalid_ref")
+    }
+
+    if !exists(env, symbol) {
+        panic_any("symbol_doesnt_exist")
+    }
+    if paused(env, symbol) {
+        panic_any("paused")
+    }
+    let caller = env.caller_env.account_caller.clone();
+    let record_key = burn_record_key(symbol, &caller, burn_ref);
+    if consensus::consensus_kv::kv_exists(env, &record_key) {
+        panic_any("ref_already_used")
+    }
+    if amount > balance(env, &caller, symbol) {
+        panic_any("insufficient_funds")
+    }
+
+    kv_increment(env, &bcat(&[b"account:", &caller, b":balance:", symbol]), -amount);
+    kv_increment(env, &bcat(&[b"account:", &BURN_ADDRESS, b":balance:", symbol]), amount);
+    kv_increment(env, &bcat(&[b"coin:", symbol, b":totalSupply"]), -amount);
+    kv_increment(env, &burned_key(symbol, &caller), amount);
+
+    let height = env.caller_env.entry_height.to_string();
+    let tx_hash = bs58::encode(&env.caller_env.tx_hash).into_string();
+    kv_put(env, &record_key, &bcat(&[amount_raw, b":", height.as_bytes(), b":", tx_hash.as_bytes()]));
+}
+
 pub fn validate_name(name: &[u8], invalid: &'static str, too_short: &'static str, too_long: &'static str) {
     if !name.iter().all(u8::is_ascii_alphanumeric) {
         panic_any(invalid)

@@ -948,6 +948,7 @@ pub fn call_bic(
         }
 
         (b"Coin", b"transfer") => consensus::bic::coin::call_transfer(env, args),
+        (b"Coin", b"burn") if protocol::is_fork2(env) => consensus::bic::coin::call_burn(env, args),
 
         //coin admins can mint, pause, and atomically rotate permissions for existing symbols
         (b"Coin", b"mint") => consensus::bic::coin::call_mint(env, args),

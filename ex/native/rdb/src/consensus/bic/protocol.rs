@@ -23,6 +23,25 @@ pub fn is_fork(env: &crate::consensus::consensus_apply::ApplyEnv) -> bool {
     env.caller_env.entry_height >= forkheight(env)
 }
 
+//epoch 890 mainnet / 45 testnet: Coin.burn, a holder-only destroy of PRIME
+//with a per-account ref record. separate from FORKHEIGHT because 877 already
+//shipped in v1.6.2. both must still be ahead of the tips when the release is cut
+pub const FORKHEIGHT2: u64 = 890_00000;
+pub const FORKHEIGHT2_TESTNET: u64 = 45_00000;
+
+pub fn forkheight2(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
+    if env.testnet {
+        FORKHEIGHT2_TESTNET
+    } else {
+        FORKHEIGHT2
+    }
+}
+
+//height only: a kv read here would change exec_used of pre-fork replays
+pub fn is_fork2(env: &crate::consensus::consensus_apply::ApplyEnv) -> bool {
+    env.caller_env.entry_height >= forkheight2(env)
+}
+
 pub const AMA_1_DOLLAR: i128 = 1_000_000_000;
 pub const AMA_10_CENT: i128 = 100_000_000;
 pub const AMA_1_CENT: i128 = 10_000_000;

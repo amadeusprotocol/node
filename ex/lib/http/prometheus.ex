@@ -57,6 +57,9 @@ defmodule HTTP.Prometheus do
     # HELP amadeus_burned_ama Total AMA burned
     # TYPE amadeus_burned_ama counter
     amadeus_burned_ama #{format_float(stats.burned)}
+    # HELP amadeus_burned_prime Total PRIME burned
+    # TYPE amadeus_burned_prime counter
+    amadeus_burned_prime #{format_float(stats.prime_burned)}
 
     # HELP amadeus_total_supply_y3 Total supply at year 3
     # TYPE amadeus_total_supply_y3 gauge
