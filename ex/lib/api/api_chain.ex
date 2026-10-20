@@ -95,6 +95,7 @@ defmodule API.Chain do
         total_supply_y3: total_supply_y3(),
         total_supply_y30: total_supply_y30(),
         burned: API.Contract.total_burned().float,
+        prime_burned: API.Contract.total_burned("PRIME").float,
         diff_bits: API.Epoch.get_diff_bits(),
         pflops: pflops(tip.header.height),
         txs_per_sec: stat_txs_sec(tip.header.height),

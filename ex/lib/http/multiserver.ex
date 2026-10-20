@@ -465,6 +465,31 @@ defmodule Ama.MultiServer do
                 balances = API.Wallet.balance_all(pk)
                 quick_reply(state, json_fix_floats(%{error: :ok, balances: balances}))
 
+            r.method == "GET" and String.starts_with?(r.path, "/api/wallet/burn/") ->
+                case String.split(String.replace(r.path, "/api/wallet/burn/", ""), "/") do
+                    [pk, symbol, ref] ->
+                        case API.Wallet.burn_record(pk, symbol, ref) do
+                            nil -> quick_reply(state, %{error: :not_found}, 404)
+                            #no json_fix_floats: its regex would rewrite refs like "a1e-5"
+                            burn -> quick_reply(state, %{error: :ok, burn: burn})
+                        end
+                    _ -> quick_reply(state, %{error: :not_found}, 404)
+                end
+
+            r.method == "GET" and String.starts_with?(r.path, "/api/wallet/burns/") ->
+                case String.split(String.replace(r.path, "/api/wallet/burns/", ""), "/") do
+                    [pk] -> quick_reply(state, %{error: :ok, burns: API.Wallet.burns(pk)})
+                    [pk, symbol] -> quick_reply(state, %{error: :ok, burns: API.Wallet.burns(pk, symbol)})
+                    _ -> quick_reply(state, %{error: :not_found}, 404)
+                end
+
+            r.method == "GET" and String.starts_with?(r.path, "/api/wallet/burned/") ->
+                case String.split(String.replace(r.path, "/api/wallet/burned/", ""), "/") do
+                    [pk] -> quick_reply(state, json_fix_floats(%{error: :ok, burned: API.Wallet.burned(pk)}))
+                    [pk, symbol] -> quick_reply(state, json_fix_floats(%{error: :ok, burned: API.Wallet.burned(pk, symbol)}))
+                    _ -> quick_reply(state, %{error: :not_found}, 404)
+                end
+
             r.method == "GET" and r.path == "/api/wallet/malicious_address" ->
                 list = ["7XnWYc4RT6ujKhVb8MgWJfks9ECR8iQsPjZwzpJM1UFJWhQhazsSXAZP42E1o37qGR",
                 "5wcwqPYHUGLrPECGiJsAn3XeLXUtuyMSRedJTAYiK4GwNrM2jksU5TxAh4TWPwV3sU",

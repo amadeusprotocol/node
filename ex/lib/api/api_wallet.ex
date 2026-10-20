@@ -64,6 +64,50 @@ defmodule API.Wallet do
         txu
     end
 
+    def burn(amount, symbol, ref) do
+        sk = Application.fetch_env!(:ama, :trainer_sk)
+        burn(sk, amount, symbol, ref)
+    end
+
+    #amount is flat units; no float conversion so it matches what was minted exactly
+    def burn(from_sk, amount, symbol, ref, broadcast \\ true) do
+        from_sk = API.maybe_b58(64, from_sk)
+        amount = if is_integer(amount) do :erlang.integer_to_binary(amount) else amount end
+        txu = TX.build(from_sk, "Coin", "burn", [amount, symbol, ref])
+        broadcast && TXPool.insert_and_broadcast(txu)
+        txu
+    end
+
+    def burned(pk, symbol \\ "PRIME") do
+        pk = API.maybe_b58(48, pk)
+        flat = API.Contract.get("bic:coin:burned:#{symbol}:#{pk}", :to_integer) || 0
+        %{symbol: symbol, flat: flat, float: BIC.Coin.from_flat(flat)}
+    end
+
+    def burn_record(pk, symbol, ref) do
+        pk = API.maybe_b58(48, pk)
+        case API.Contract.get("bic:coin:burn:#{symbol}:#{pk}:#{ref}") do
+            nil -> nil
+            value -> parse_burn_record(symbol, ref, value, DB.Chain.rooted_height())
+        end
+    end
+
+    def burns(pk, symbol \\ "PRIME") do
+        pk = API.maybe_b58(48, pk)
+        rooted_height = DB.Chain.rooted_height()
+        API.Contract.get_prefix("bic:coin:burn:#{symbol}:#{pk}:")
+        |> Enum.map(fn({ref, value})-> parse_burn_record(symbol, ref, value, rooted_height) end)
+    end
+
+    #records are read at the tip; fulfil only once finalized, a rewind erases unrooted ones
+    defp parse_burn_record(symbol, ref, value, rooted_height) do
+        [amount, height, tx_hash] = :binary.split(value, ":", [:global])
+        height = :erlang.binary_to_integer(height)
+        finalized = is_integer(rooted_height) and height <= rooted_height
+        #flat only: redemptions are matched on exact units, never floats
+        %{symbol: symbol, ref: ref, flat: :erlang.binary_to_integer(amount), height: height, tx_hash: tx_hash, finalized: finalized}
+    end
+
     def generate_key() do
         sk = :crypto.strong_rand_bytes(64)
         pk = BlsEx.get_public_key!(sk)
