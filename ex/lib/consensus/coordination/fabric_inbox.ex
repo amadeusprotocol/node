@@ -6,7 +6,7 @@ defmodule FabricInbox do
   #order and runs the full checks right before storing/applying, so data for
   #heights far ahead of us never touches RocksDB
   #
-  #row: {key, %{value, bytes, vouched, validated_on_parent}}
+  #row: {key, %{value, bytes, vouched, validated_on_parent, verified_roster_hash}}
   #  validated_on_parent: main chain hash at height-1 when the row was verified
   #  and applied (false: not yet). a softfork that replaces it makes the drain
   #  revalidate against the new branch's validators. rows stay until rooted
@@ -106,7 +106,6 @@ defmodule FabricInbox do
     end
   end
 
-  #the aggregate signature needs the validator set: checked at drain
   def insert_consensus(consensus, height \\ nil) do
     try do
       aggsig = Map.take(consensus.aggsig, [:mask, :mask_active, :aggsig])
@@ -123,7 +122,11 @@ defmodule FabricInbox do
         !is_binary(mask) or BLS12AggSig.signer_count(aggsig) == 0 -> {:error, :invalid_mask}
         true ->
           key = {height, @consensus, entry_hash, mutations_hash, aggsig}
-          insert_row(key, consensus, :erlang.external_size(consensus) + @row_overhead, true)
+          case !:ets.member(FabricInbox, key) and Consensus.verify_signature_vs_epoch_roster(consensus, height) do
+            false -> :exists
+            :invalid -> {:error, :invalid_signature}
+            verified_roster_hash -> insert_row(key, consensus, :erlang.external_size(consensus) + @row_overhead, true, verified_roster_hash)
+          end
       end
     catch
       _, _ -> {:error, :malformed}
@@ -143,8 +146,8 @@ defmodule FabricInbox do
 
   #insert, then evict from the top until under the cap (maybe the row itself).
   #take/1 hands every row to exactly one process, so bytes are released once
-  defp insert_row(key, value, bytes, vouched) do
-    row = %{value: value, bytes: bytes, vouched: vouched, validated_on_parent: false}
+  defp insert_row(key, value, bytes, vouched, verified_roster_hash \\ nil) do
+    row = %{value: value, bytes: bytes, vouched: vouched, validated_on_parent: false, verified_roster_hash: verified_roster_hash}
     cond do
       !:ets.insert_new(FabricInbox, {key, row}) -> :exists
       :atomics.add_get(byte_counter(), 1, bytes) > max_bytes() and (evict_highest(); !:ets.member(FabricInbox, key)) -> {:error, :inbox_full}
@@ -188,7 +191,7 @@ defmodule FabricInbox do
     #a sibling that arrived after this height was applied: consensus may pick it
     pending(height, @entry, parent_hash) |> store_entries()
 
-    verify_in_parallel(pending(height, @consensus, parent_hash), & Consensus.validate_vs_chain(&1) == %{error: :ok})
+    verify_in_parallel(pending(height, @consensus, parent_hash), & Consensus.validate_vs_chain(&1.value, &1.verified_roster_hash) == %{error: :ok})
     |> Enum.each(fn({key, row, parent_hash, valid})->
       valid && (DB.Attestation.set_consensus(row.value); mark_validated(key, row, parent_hash))
     end)
@@ -208,7 +211,7 @@ defmodule FabricInbox do
 
   #entries are done once verified, valid or not
   defp store_entries(pending) do
-    verify_in_parallel(pending, & Entry.validate_vs_validators(&1) == %{error: :ok})
+    verify_in_parallel(pending, & Entry.validate_vs_validators(&1.value) == %{error: :ok})
     |> Enum.each(fn({key, row, parent_hash, valid})->
       valid && DB.Entry.insert(row.value)
       mark_validated(key, row, parent_hash)
@@ -218,7 +221,7 @@ defmodule FabricInbox do
   #verification only, no writes: {key, row, parent_hash, valid}
   defp verify_in_parallel(pending, verify) do
     Task.async_stream(pending, fn({key, row, parent_hash})->
-      {key, row, parent_hash, try do verify.(row.value) catch _, _ -> false end}
+      {key, row, parent_hash, try do verify.(row) catch _, _ -> false end}
     end, ordered: true, timeout: :infinity)
     |> Enum.map(fn({:ok, result})-> result end)
   end
