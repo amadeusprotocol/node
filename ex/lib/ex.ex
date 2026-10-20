@@ -88,7 +88,7 @@ defmodule Ama do
     if !DB.Chain.tip() do
       %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
       RocksDB.put("bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}",
-        RDB.vecpak_encode([EntryGenesis.signer()]), %{db: db, cf: cf.contractstate})
+        RDB.vecpak_encode(ValidatorSet.normalize([EntryGenesis.signer()])), %{db: db, cf: cf.contractstate})
 
       entry = EntryGenesis.get()
       entry = Map.put(entry, :header, :erlang.binary_to_term(entry.header, [:safe]))

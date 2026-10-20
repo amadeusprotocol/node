@@ -30,8 +30,6 @@ defmodule ConsensusStorageSecurityTest do
           mutations_hash: :crypto.hash(:sha256, <<index::64>>),
           aggsig: Map.merge(BLS12AggSig.new_padded(set), %{
             mask: Util.pad_bitstring_to_bytes(mask),
-            mask_size: validator_count,
-            mask_set_size: length(signers),
             aggsig: :binary.copy(<<0>>, 96)
           })
         }

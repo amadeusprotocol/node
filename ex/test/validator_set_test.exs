@@ -18,9 +18,6 @@ defmodule ValidatorSetTest do
     assert BLS12AggSig.quorum?(agg, set)
     assert {:error, :inactive_signer} = BLS12AggSig.validate(%{agg | mask: Util.set_bit(mask, 256)}, set)
     assert {:error, :mask_nonzero_padding} = BLS12AggSig.validate(%{agg | mask: Util.set_bit(mask, 1007)}, set)
-    #from the fork both sizes are derived: a stale copy is ignored, and never stored
-    assert {:ok, _} = BLS12AggSig.validate(Map.merge(agg, %{mask_size: 997, mask_set_size: 1}), set)
-    assert BLS12AggSig.canonical(Map.merge(agg, %{mask_size: 997, mask_set_size: 1})) == agg
   end
 
   test "an untrusted active mask cannot lower the quorum denominator" do
@@ -59,11 +56,9 @@ defmodule ValidatorSetTest do
     first = hd(attestations)
     assert BLS12AggSig.add_padded(agg, set, first.signer, first.signature) == agg
     assert catch_throw(BLS12AggSig.add_padded(agg, set, Enum.at(roster, 1), first.signature)) == %{error: :inactive_signer}
-    legacy = BLS12AggSig.aggregate(roster, attestations)
-    refute Map.has_key?(legacy, :mask_active)
-    assert legacy.mask_size == 5 and legacy.mask_set_size == 3
-    assert {:ok, ^signers} = BLS12AggSig.validate(legacy, roster)
-    #a fork aggregate carries no mask_size, so a legacy roster rejects it first
-    assert {:error, :mask_size_mismatch} = BLS12AggSig.validate(agg, roster)
+    #an aggregate without mask_active (the pre-877 shape) no longer validates
+    assert {:error, :mask_active_mismatch} = BLS12AggSig.validate(Map.delete(agg, :mask_active), set)
+    #a legacy list record reads as an all-active roster
+    assert ValidatorSet.normalize(roster) == %{validators: roster, mask_active: <<0b11111000>>}
   end
 end

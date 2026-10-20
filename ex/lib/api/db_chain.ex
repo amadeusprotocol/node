@@ -74,8 +74,6 @@ defmodule DB.Chain do
 
   def tx_from_map(map, db_opts \\ %{}), do: hd(txs_from_maps([map], db_opts))
 
-  #adjacent txs of one entry share a single read of it (entries are up to
-  #~3MB); one entry is held at a time
   def txs_from_maps(maps, db_opts \\ %{}) do
     rooted = rooted_height(db_opts)
     Enum.map(maps, &RDB.vecpak_decode/1)
@@ -117,7 +115,7 @@ defmodule DB.Chain do
         {_, value} = RocksDB.get_prev_or_first("bic:epoch:validators:height:", pad_integer(height), opts)
         RDB.vecpak_decode(value)
     end
-    |> ValidatorSet.at_height(height)
+    |> ValidatorSet.normalize()
   end
 
   def validators_last_change_height(height, db_opts \\ %{}) do

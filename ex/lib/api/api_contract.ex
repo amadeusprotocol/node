@@ -6,7 +6,6 @@ defmodule API.Contract do
         RocksDB.get(key, opts)
     end
 
-    #page: optional :start_after / :limit / :max_bytes, see RocksDB.get_prefix/2
     def get_prefix(prefix, parse_type \\ nil, page \\ %{}) do
         %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
         opts = Map.merge(%{db: db, cf: cf.contractstate}, page)

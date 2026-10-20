@@ -1,13 +1,9 @@
 defmodule ValidatorSet do
   @moduledoc """
   Bitmap indices use the immutable epoch roster; scheduling uses active keys.
-  Pre-fork contexts remain lists. Post-fork contexts carry a canonical, MSB-first
-  active mask, including when the activation record is still a legacy list.
+  A set is always the roster plus a canonical, MSB-first active mask; a record
+  still stored as a legacy list reads as an all-active roster.
   """
-
-  def at_height(record, height) do
-    if height < RDBProtocol.forkheight(), do: record, else: normalize(record)
-  end
 
   def normalize(validators) when is_list(validators) do
     size = length(validators)
@@ -18,14 +14,11 @@ defmodule ValidatorSet do
     set
   end
 
-  def roster(validators) when is_list(validators), do: validators
   def roster(%{validators: validators}), do: validators
 
-  def active(validators) when is_list(validators), do: validators
   def active(%{validators: validators, mask_active: mask}) do
     BLS12AggSig.unmask_trainers(validators, mask, length(validators))
   end
 
-  def active_count(validators) when is_list(validators), do: length(validators)
   def active_count(%{mask_active: mask}), do: Util.popcnt(mask)
 end

@@ -58,7 +58,6 @@ defmodule DB.Attestation do
   end
 
   defp put_consensus(consensus, db_opts) do
-    consensus = %{consensus | aggsig: BLS12AggSig.canonical(consensus.aggsig)}
     RocksDB.put("consensus:#{consensus.entry_hash}:#{consensus.mutations_hash}", RDB.vecpak_encode(consensus), db_handle(db_opts, :attestation, %{}))
   end
 
@@ -117,9 +116,6 @@ defmodule DB.Attestation do
   end
 
 
-  def missing_attestations(height, mask, mask_size, db_opts \\ %{}) do
-
-  end
 
   def put(attestation, height, db_opts \\ %{}) do
     a = attestation

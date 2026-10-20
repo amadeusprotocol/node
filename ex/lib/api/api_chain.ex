@@ -59,8 +59,7 @@ defmodule API.Chain do
     def consensuses_by_height(height) do
         DB.Attestation.consensuses_by_height(height)
         |> Enum.map(fn(c)->
-            aggsig = Map.take(c.aggsig, [:mask_size, :mask_set_size])
-            |> Map.merge(Map.new(Map.take(c.aggsig, [:aggsig, :mask, :mask_active]), fn {k, v} -> {k, Base58.encode(v)} end))
+            aggsig = Map.new(Map.take(c.aggsig, [:aggsig, :mask, :mask_active]), fn {k, v} -> {k, Base58.encode(v)} end)
             c = put_in(c, [:mutations_hash], Base58.encode(c.mutations_hash))
             c = put_in(c, [:entry_hash], Base58.encode(c.entry_hash))
             c = put_in(c, [:score], BLS12AggSig.score(c.aggsig))

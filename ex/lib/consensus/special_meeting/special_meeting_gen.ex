@@ -165,7 +165,7 @@ defmodule SpecialMeetingGen do
       st.type == :entry and BLS12AggSig.quorum?(st.entry.aggsig) ->
         IO.inspect {:entry_with_score, BLS12AggSig.score(st.entry.aggsig)}
         entry = st.entry.entry
-          |> Map.merge(Map.take(st.entry.aggsig, [:mask, :mask_active, :mask_size, :mask_set_size]))
+          |> Map.merge(Map.take(st.entry.aggsig, [:mask, :mask_active]))
           |> Map.put(:signature, st.entry.aggsig.aggsig)
         IO.inspect entry, limit: 1111111111, printable_limit: 1111111111
         DB.Entry.insert(entry)
@@ -201,13 +201,11 @@ defmodule SpecialMeetingGen do
   #the carrier's balance before execution and a shortfall invalidates the whole
   #replacement entry, so attach nothing unless the carrier can cover it
   def slash_attached_gas(sk, height) do
-    if height < RDBProtocol.forkheight() do nil else
-      set = DB.Chain.validator_set_for_height(height)
-      bytes = 2 * byte_size(RDB.vecpak_encode(set))
-      gas = RDBProtocol.cost_per_new_leaf_merkle() + RDBProtocol.cost_per_byte_state() * bytes
-      pk = BlsEx.get_public_key!(sk)
-      if DB.Chain.balance(pk) >= RDBProtocol.tx_budget() + gas do gas else nil end
-    end
+    set = DB.Chain.validator_set_for_height(height)
+    bytes = 2 * byte_size(RDB.vecpak_encode(set))
+    gas = RDBProtocol.cost_per_new_leaf_merkle() + RDBProtocol.cost_per_byte_state() * bytes
+    pk = BlsEx.get_public_key!(sk)
+    if DB.Chain.balance(pk) >= RDBProtocol.tx_budget() + gas do gas else nil end
   end
 
   def build_slash_entry(st) do

@@ -188,7 +188,7 @@ defmodule EntryGenesis do
 
         vault_flat = 1_000_000 * 1_000_000_000
         rows = [
-          {"bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}", RDB.vecpak_encode(validator_pks)},
+          {"bic:epoch:validators:height:#{String.pad_leading("0", 12, "0")}", RDB.vecpak_encode(ValidatorSet.normalize(validator_pks))},
           {"bic:epoch:diff_bits", "8"},
           {"bic:epoch:segment_vr_hash", Blake3.hash(vr)},
         ] ++ Enum.flat_map(Application.fetch_env!(:ama, :keys), fn(key)->

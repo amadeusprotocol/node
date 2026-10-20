@@ -265,16 +265,11 @@ defmodule SpecialMeetingAttestGen do
 
   def slash_trainer_verify(malicious_pk, cur_epoch, set, mask, mask_size, signature) do
     # Motion TXs carry only the signer mask; eligibility is read from chain state.
-    # Preserve the legacy permissive mask interpretation before the fork.
-    signers = if is_list(set) do
-      BLS12AggSig.unmask_trainers(set, mask, mask_size)
-    else
-      BLS12AggSig.validate!(%{mask: mask, mask_active: set.mask_active}, set)
-    end
+    signers = BLS12AggSig.validate!(%{mask: mask, mask_active: set.mask_active}, set)
 
     cond do
       #the tx still carries mask_size: it must be the roster size, as the contract checks
-      is_map(set) and mask_size != length(set.validators) -> :invalid_mask_size
+      mask_size != length(set.validators) -> :invalid_mask_size
       malicious_pk not in ValidatorSet.active(set) -> :invalid_trainer_pk
       !BLS12AggSig.quorum?(length(signers), ValidatorSet.active_count(set)) -> :invalid_amount_of_signatures
       true ->

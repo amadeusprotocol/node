@@ -29,11 +29,10 @@ defmodule Entry do
             chain_root:     0 1 2 3 4 chain_id chain_tip chain_tip_height (leave out for a future update)
         }
         hash <header>
-        aggsig { (mask_size always 1 if proposer is not 0) (if proposer is 0, it means proposer is down and VDF executed + network arrived at empty block)
+        aggsig { (only on a special meeting entry: proposer is down, a quorum signed a replacement)
           signature
           mask
-          mask_size
-          mask_set_size
+          mask_active
         }
         txs []
     }
@@ -45,15 +44,14 @@ defmodule Entry do
       entry_hash: <32>,
       aggsig: %{
         mask: <<0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0>>,
-        aggsig: <96>,
-        mask_size: 99,
-        mask_set_size: 1
+        mask_active: <<255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 224>>,
+        aggsig: <96>
       }
     }
     h (entry_hash || state_root || receipts_logs_extra_root)
     """
 
-    @fields [:header, :hash, :signature, :txs, :mask, :mask_active, :mask_size, :mask_set_size]
+    @fields [:header, :hash, :signature, :txs, :mask, :mask_active]
     @fields_header [:height, :prev_hash, :slot, :prev_slot, :signer, :dr, :vr, :root_tx, :root_validator, :root_chain]
 
     #size = sum of packed tx bytes, the same measure TXPool packs against
@@ -75,7 +73,7 @@ defmodule Entry do
 
     def unpack_from_net(nil), do: nil
     def unpack_from_net(entry) do
-        entry = Map.take(entry, @fields) |> BLS12AggSig.canonical()
+        entry = Map.take(entry, @fields)
         Map.put(entry, :header, Map.take(entry.header, @fields_header))
     end
 

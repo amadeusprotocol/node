@@ -109,7 +109,7 @@ defmodule FabricInbox do
   #the aggregate signature needs the validator set: checked at drain
   def insert_consensus(consensus, height \\ nil) do
     try do
-      aggsig = Map.take(consensus.aggsig, [:mask, :mask_active, :aggsig, :mask_size, :mask_set_size]) |> BLS12AggSig.canonical()
+      aggsig = Map.take(consensus.aggsig, [:mask, :mask_active, :aggsig])
       consensus = %{entry_hash: consensus.entry_hash, mutations_hash: consensus.mutations_hash, aggsig: aggsig}
       %{entry_hash: entry_hash, mutations_hash: mutations_hash} = consensus
       %{mask: mask, aggsig: signature} = aggsig

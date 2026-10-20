@@ -77,11 +77,6 @@ defmodule ValidatorSetChainTest do
     assert DB.Chain.validator_set_for_height(1, %{rtx: tx}) == set
     RocksDB.transaction_rollback(tx)
     assert DB.Chain.validator_set_for_height(2) == set
-
-    Application.put_env(:ama, :testnet, nil)
-    fork = RDBProtocol.forkheight()
-    assert ValidatorSet.at_height(set.validators, fork - 1) == set.validators
-    assert ValidatorSet.at_height(set.validators, fork) == ValidatorSet.normalize(set.validators)
   end
 
   test "consensus, coordinator, storage, and reports use the same active denominator", ctx do

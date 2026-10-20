@@ -813,88 +813,6 @@ fn unique_mutations(mutations: Vec<consensus_muts::Mutation>, reverse: bool) -> 
     result
 }
 
-fn migrate_db(env: &mut ApplyEnv) {
-    let mut cursor: Vec<u8> = Vec::new();
-    while let Some((next_key_wo_prefix, _val)) = crate::consensus::consensus_kv::kv_get_next(env, b"bic:epoch:trainers:height:", &cursor) {
-        let height = std::str::from_utf8(&next_key_wo_prefix).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_epoch"));
-        let trainers: Vec<vecpak::Term> = consensus::bic::epoch::kv_get_trainers(env, height).into_iter().map(vecpak::Term::Binary).collect();
-        let buf = vecpak::encode(vecpak::Term::List(trainers)).unwrap_or_else(|error| panic_any(error));
-        crate::consensus::consensus_kv::kv_put(env, &crate::bcat(&[b"bic:epoch:validators:height:", &next_key_wo_prefix]), &buf);
-        cursor = next_key_wo_prefix;
-    }
-
-    /*
-    //"bic:epoch:trainers:85"
-    //"bic:epoch:trainers:height:000039625024"
-    //"bic:epoch:trainers:removed:
-    let mut cursor: Vec<u8> = Vec::new();
-    while let Some((next_key_wo_prefix, _val)) = crate::consensus::consensus_kv::kv_get_next(env, b"bic:epoch:trainers:height:", &cursor) {
-        let height = std::str::from_utf8(&next_key_wo_prefix).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_epoch"));
-        let trainers: Vec<vecpak::Term> = consensus::bic::epoch::kv_get_trainers(env, height)
-            .into_iter()
-            .map(vecpak::Term::Binary)
-            .collect();
-        let buf = vecpak::encode(vecpak::Term::List(trainers));
-        crate::consensus::consensus_kv::kv_put(env, &crate::bcat(&[b"bic:epoch:validators:height:", &next_key_wo_prefix]), &buf);
-        cursor = next_key_wo_prefix;
-    }
-    cursor = Vec::new();
-    while let Some((next_key_wo_prefix, _val)) = crate::consensus::consensus_kv::kv_get_next(env, b"bic:epoch:trainers:", &cursor) {
-        let full_key = [b"bic:epoch:trainers:" as &[u8], &next_key_wo_prefix].concat();
-        crate::consensus::consensus_kv::kv_delete(env, &full_key);
-        cursor = next_key_wo_prefix;
-    }
-
-    //"bic:coin:balance:???ii?????d???K\\?????c??[??y????)?o??{=?;????n?9:AMA"
-    cursor = Vec::new();
-    while let Some((next_key_wo_prefix, val)) = crate::consensus::consensus_kv::kv_get_next(env, b"bic:coin:balance:", &cursor) {
-        let pk = &next_key_wo_prefix[..48];
-        crate::consensus::consensus_kv::kv_put(env, &crate::bcat(&[b"account:", &pk, b":balance:AMA"]), &val);
-
-        let full_key = [b"bic:coin:balance:" as &[u8], &next_key_wo_prefix].concat();
-        crate::consensus::consensus_kv::kv_delete(env, &full_key);
-
-        cursor = next_key_wo_prefix;
-    }
-
-    //"bic:base:nonce:????GH??D?ss???????dT??14o?P??nA?I&??6?????e3I??"
-    cursor = Vec::new();
-    while let Some((next_key_wo_prefix, val)) = crate::consensus::consensus_kv::kv_get_next(env, b"bic:base:nonce:", &cursor) {
-        let pk = &next_key_wo_prefix[..48];
-        crate::consensus::consensus_kv::kv_put(env, &crate::bcat(&[b"account:", &pk, b":attribute:nonce"]), &val);
-
-        let full_key = [b"bic:base:nonce:" as &[u8], &next_key_wo_prefix].concat();
-        crate::consensus::consensus_kv::kv_delete(env, &full_key);
-
-        cursor = next_key_wo_prefix;
-    }
-
-    //"bic:epoch:emission_address:????GH??D?ss???????dT??14o?P??nA?I&??6?????e3I??"
-    cursor = Vec::new();
-    while let Some((next_key_wo_prefix, val)) = crate::consensus::consensus_kv::kv_get_next(env, b"bic:epoch:emission_address:", &cursor) {
-        let pk = &next_key_wo_prefix[..48];
-        crate::consensus::consensus_kv::kv_put(env, &crate::bcat(&[b"account:", &pk, b":attribute:emission_address"]), &val);
-
-        let full_key = [b"bic:epoch:emission_address:" as &[u8], &next_key_wo_prefix].concat();
-        crate::consensus::consensus_kv::kv_delete(env, &full_key);
-
-        cursor = next_key_wo_prefix;
-    }
-
-    //"bic:epoch:pop:????GH??D?ss???????dT??14o?P??nA?I&??6?????e3I??"
-    cursor = Vec::new();
-    while let Some((next_key_wo_prefix, val)) = crate::consensus::consensus_kv::kv_get_next(env, b"bic:epoch:pop:", &cursor) {
-        let pk = &next_key_wo_prefix[..48];
-        crate::consensus::consensus_kv::kv_put(env, &crate::bcat(&[b"account:", &pk, b":attribute:pop"]), &val);
-
-        let full_key = [b"bic:epoch:pop:" as &[u8], &next_key_wo_prefix].concat();
-        crate::consensus::consensus_kv::kv_delete(env, &full_key);
-
-        cursor = next_key_wo_prefix;
-    }
-    */
-}
-
 pub fn call_bic(
     env: &mut ApplyEnv,
     contract: Vec<u8>,
@@ -914,12 +832,7 @@ pub fn call_bic(
             (b"Nft", b"update_permission") => return consensus::bic::nft::call_update_permission(env, args),
             (b"Lockup", b"lock") => return consensus::bic::lockup::call_lock(env, args),
             (b"Lockup", b"unlock") => return consensus::bic::lockup::call_unlock(env, args),
-            (b"Contract", b"deploy") => {
-                if !protocol::is_fork(env) {
-                    consensus_kv::exec_budget_decr(env, protocol::COST_PER_DEPLOY);
-                }
-                return consensus::bic::contract::call_deploy(env, args)
-            }
+            (b"Contract", b"deploy") => return consensus::bic::contract::call_deploy(env, args),
             (b"LockupPrime", b"lock") => return consensus::bic::lockup_prime::call_lock(env, args),
             (b"LockupPrime", b"unlock") => return consensus::bic::lockup_prime::call_unlock(env, args),
             (b"LockupPrime", b"daily_checkin") => return consensus::bic::lockup_prime::call_daily_checkin(env, args),
@@ -940,12 +853,7 @@ pub fn call_bic(
 
         (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
         (b"Epoch", b"submit_sol") => consensus::bic::epoch::call_submit_sol(env, args),
-        (b"Epoch", b"slash_trainer") => {
-            if !protocol::is_fork(env) {
-                consensus_kv::exec_budget_decr(env, protocol::COST_PER_SLASH);
-            }
-            consensus::bic::epoch::call_slash_trainer(env, args)
-        }
+        (b"Epoch", b"slash_trainer") => consensus::bic::epoch::call_slash_trainer(env, args),
 
         (b"Coin", b"transfer") => consensus::bic::coin::call_transfer(env, args),
 
@@ -962,10 +870,7 @@ pub fn call_bic(
         (b"Nft", b"update_permission") => consensus::bic::nft::call_update_permission(env, args),
         (b"Lockup", b"lock") => consensus::bic::lockup::call_lock(env, args),
         (b"Lockup", b"unlock") => consensus::bic::lockup::call_unlock(env, args),
-        (b"Contract", b"deploy") => {
-                consensus_kv::exec_budget_decr(env, protocol::COST_PER_DEPLOY);
-                consensus::bic::contract::call_deploy(env, args)
-        },
+        (b"Contract", b"deploy") => consensus::bic::contract::call_deploy(env, args),
         */
         _ => std::panic::panic_any("invalid_bic_action"),
     }

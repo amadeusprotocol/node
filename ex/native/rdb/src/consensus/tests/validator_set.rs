@@ -77,28 +77,21 @@ fn validator_set_slashes_accumulate_and_take_effect_at_next_height() {
 }
 
 #[test]
-fn validator_set_fork_boundary_preserves_legacy_format_then_seeds_roster() {
-    for height in [protocol::FORKHEIGHT - 1, protocol::FORKHEIGHT] {
-        let mut chain = Chain::new();
-        chain.height = height;
-        let wallets: Vec<_> = (0..4).map(|_| new_wallet()).collect();
-        let roster: Vec<_> = wallets.iter().map(|w| w.pk.to_vec()).collect();
-        chain.put(&key(0), &crate::consensus::bic::list_of_binaries_to_vecpak(roster.clone()));
-        chain.with_env(&wallets[0].pk, |env| {
-            env.testnet = false;
-            epoch::call_slash_trainer(env, motion(&wallets, 1, height / 100_000, &[0, 2, 3]));
-        });
-        let encoded = chain.get(&key(height + 1)).unwrap();
-        let set = ValidatorSet::decode(&encoded);
-        if height < protocol::FORKHEIGHT {
-            assert!(matches!(vecpak::decode(&encoded).unwrap(), vecpak::Term::List(_)));
-            assert_eq!(set.validators, vec![roster[0].clone(), roster[2].clone(), roster[3].clone()]);
-            assert_eq!(set.mask_active, vec![224]);
-        } else {
-            assert_eq!(set.validators, roster);
-            assert_eq!(set.mask_active, vec![176]);
-        }
-    }
+fn validator_set_legacy_list_record_seeds_roster() {
+    // epoch 877 opened on a list record written before the fork: it reads as an
+    // all-active roster, and a slash on top of it writes roster + mask
+    let mut chain = Chain::new();
+    chain.height = protocol::FORKHEIGHT;
+    let wallets: Vec<_> = (0..4).map(|_| new_wallet()).collect();
+    let roster: Vec<_> = wallets.iter().map(|w| w.pk.to_vec()).collect();
+    chain.put(&key(0), &crate::consensus::bic::list_of_binaries_to_vecpak(roster.clone()));
+    chain.with_env(&wallets[0].pk, |env| {
+        env.testnet = false;
+        epoch::call_slash_trainer(env, motion(&wallets, 1, protocol::FORKHEIGHT / 100_000, &[0, 2, 3]));
+    });
+    let set = ValidatorSet::decode(&chain.get(&key(protocol::FORKHEIGHT + 1)).unwrap());
+    assert_eq!(set.validators, roster);
+    assert_eq!(set.mask_active, vec![176]);
 }
 
 #[test]
