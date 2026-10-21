@@ -123,24 +123,6 @@ defmodule DB.Attestation do
     RocksDB.put("attestation:#{pad_integer(height)}:#{a.entry_hash}:#{a.signer}:#{a.mutations_hash}", a_packed, db_handle(db_opts, :attestation, %{}))
   end
 
-  #def put_or_error(attestation, db_opts \\ %{}) do
-  #  a = attestation
-  #  height = 0
-  #  round = 0
-
-  #  existing = attestations_for_height_by_signer(a.height, a.signer, db_opts)
-  #  cond do
-  #    length(existing) >= 1 and a not in existing ->
-  #      #DB.Slash.record()
-  #      %{error: :multiple_vote_cast}
-  #    a in existing ->
-  #      %{error: :ok}
-  #    true ->
-  #      RocksDB.put("attestation:#{height}:#{a.entry_hash}:#{a.signer}:#{a.mutations_hash}", Attestation2.pack(a), db_handle(db_opts, :attestation, %{}))
-  #      %{error: :ok}
-  #  end
-  #end
-
   #[attestation]
  # attestation:{hash}:{signer}:{muthash} attestation
   #attestation_agg:{hash}:{muthash} consensus

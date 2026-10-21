@@ -48,6 +48,7 @@ defmodule FabricSyncGen do
   #the ~20 peers announcing the same height through to the GenServer
   def peer_tip(peer, height) when is_integer(height) do
     with atomic when atomic != nil <- :persistent_term.get({Net, :requestedTip}, nil),
+         height = min(height, DB.Chain.height() + @max_heights),
          last = :atomics.get(atomic, 1),
          true <- height > last,
          :ok <- :atomics.compare_exchange(atomic, 1, last, height),
