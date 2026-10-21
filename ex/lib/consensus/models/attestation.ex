@@ -1,52 +1,31 @@
 defmodule Attestation do
-    _ = """
-    attestation {
-        hash: <>,
-        entry_hash: <>,
-        entry_height: <>,
-        mutations_hash: <>,
-        root_receipts: <>,
-        root_contractstate: <>,
-        root_entries: <>,
-        signer: <>,
-        signature: <entry_hash,mutations_hash>,
-    }
-    """
-    #@fields [:hash, :signature, :attestation, :signer, :entry_hash, :entry_height, :mutations_hash, :root_receipts, :root_contractstate, :root_entries]
-    @fields [:entry_hash, :mutations_hash, :signer, :signature]
-    @fields_attestation [:signer, :entry_hash, :entry_height, :root_receipts, :root_contractstate, :root_entries]
+    #a claim (see Claim) plus signer and signature over Claim.pack
 
     def pack_for_db(attestation_unpacked) when is_binary(attestation_unpacked) do attestation_unpacked end
     def pack_for_db(attestation_unpacked) do
       attestation_unpacked
-      |> Map.take(@fields)
+      |> unpack()
       |> RDB.vecpak_encode()
     end
 
-    def sign(sk, entry_hash, entry_height, mutations_hash, root_receipts, root_contractstate, root_entries) do
-        pk = BlsEx.get_public_key!(sk)
-        signature = BlsEx.sign!(sk, <<entry_hash::binary, mutations_hash::binary>>, BLS12AggSig.dst_att())
-        %{
-            entry_hash: entry_hash,
-            mutations_hash: mutations_hash,
-            signer: pk,
-            signature: signature,
-        }
+    def unpack(a), do: Map.merge(Claim.take(a), Map.take(a, [:signer, :signature]))
+
+    def sign(sk, claim) do
+        Map.merge(claim, %{
+            signer: BlsEx.get_public_key!(sk),
+            signature: BlsEx.sign!(sk, Claim.pack(claim), BLS12AggSig.dst_att()),
+        })
     end
 
     def validate(a) do
       try do
-        a = Map.take(a, @fields)
+        a = unpack(a)
 
-        if !is_binary(a.entry_hash), do: throw(%{error: :entry_hash_not_binary})
-        if byte_size(a.entry_hash) != 32, do: throw(%{error: :entry_hash_not_256_bits})
-        if !is_binary(a.mutations_hash), do: throw(%{error: :mutations_hash_not_binary})
-        if byte_size(a.mutations_hash) != 32, do: throw(%{error: :mutations_hash_not_256_bits})
+        if !Claim.valid?(a), do: throw(%{error: :invalid_claim})
         if !is_binary(a.signer), do: throw(%{error: :signer_not_binary})
         if byte_size(a.signer) != 48, do: throw(%{error: :signer_not_48_bytes})
 
-        claim = <<a.entry_hash::binary, a.mutations_hash::binary>>
-        if !BlsEx.verify?(a.signer, a.signature, claim, BLS12AggSig.dst_att()), do: throw(%{error: :invalid_signature})
+        if !BlsEx.verify?(a.signer, a.signature, Claim.pack(a), BLS12AggSig.dst_att()), do: throw(%{error: :invalid_signature})
 
         %{error: :ok, attestation: a}
       catch

@@ -1,12 +1,12 @@
 defmodule FabricEventGen do
   use GenServer
 
-  def event_rooted(entry, mut_hash) do
-    send(FabricEventGen, {:entry_rooted, entry, mut_hash})
+  def event_rooted(entry, claim_hash) do
+    send(FabricEventGen, {:entry_rooted, entry, claim_hash})
   end
 
-  def event_applied(entry, mut_hash, m, l) do
-    send(FabricEventGen, {:entry, entry, mut_hash, m, l})
+  def event_applied(entry, claim_hash, m, l) do
+    send(FabricEventGen, {:entry, entry, claim_hash, m, l})
   end
 
   def broadcast(update) do
@@ -44,7 +44,7 @@ defmodule FabricEventGen do
     {:noreply, state}
   end
 
-  def handle_info({:entry, entry, muts_hash, muts, receipts}, state) do
+  def handle_info({:entry, entry, _claim_hash, muts, receipts}, state) do
     height = Entry.height(entry)
     if receipts != [] do
       #IO.inspect {height, logs, muts}
@@ -66,7 +66,7 @@ defmodule FabricEventGen do
     {:noreply, state}
   end
 
-  def handle_info({:entry_rooted, entry, mut_hash}, state) do
+  def handle_info({:entry_rooted, _entry, _claim_hash}, state) do
     {:noreply, state}
   end
 end

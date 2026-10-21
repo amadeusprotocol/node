@@ -13,7 +13,6 @@ pub struct Header {
     pub dr: Vec<u8>,
     pub vr: Vec<u8>,
     pub root_tx: Vec<u8>,
-    pub root_validator: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,7 +36,6 @@ impl EncodeToTerm for Header {
             (Term::Binary(b"dr".to_vec()), Term::Binary(self.dr.clone())),
             (Term::Binary(b"vr".to_vec()), Term::Binary(self.vr.clone())),
             (Term::Binary(b"root_tx".to_vec()), Term::Binary(self.root_tx.clone())),
-            (Term::Binary(b"root_validator".to_vec()), Term::Binary(self.root_validator.clone())),
         ]))
     }
 }
@@ -55,7 +53,6 @@ impl DecodeFromTerm for Header {
             dr: codec::pl_get_bytes(pairs, b"dr").to_vec(),
             vr: codec::pl_get_bytes(pairs, b"vr").to_vec(),
             root_tx: codec::pl_get_bytes(pairs, b"root_tx").to_vec(),
-            root_validator: codec::pl_get_bytes(pairs, b"root_validator").to_vec(),
         }
     }
 }

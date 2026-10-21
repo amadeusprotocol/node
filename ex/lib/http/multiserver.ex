@@ -507,10 +507,6 @@ defmodule Ama.MultiServer do
                         end
                 end
 
-            r.method == "GET" and String.starts_with?(r.path, "/api/proof/validators/") ->
-                entry_hash = String.replace(r.path, "/api/proof/validators/", "")
-                result = API.Proof.validators(entry_hash)
-                quick_reply(state, result)
             r.method == "GET" and String.starts_with?(r.path, "/api/proof/contractstate/") ->
                 key_value = String.replace(r.path, "/api/proof/contractstate/", "")
                 result = case :binary.split(key_value, "/") do

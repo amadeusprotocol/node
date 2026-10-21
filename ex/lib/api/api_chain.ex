@@ -60,11 +60,9 @@ defmodule API.Chain do
         DB.Attestation.consensuses_by_height(height)
         |> Enum.map(fn(c)->
             aggsig = Map.new(Map.take(c.aggsig, [:aggsig, :mask, :mask_active]), fn {k, v} -> {k, Base58.encode(v)} end)
-            c = put_in(c, [:mutations_hash], Base58.encode(c.mutations_hash))
-            c = put_in(c, [:entry_hash], Base58.encode(c.entry_hash))
-            c = put_in(c, [:score], BLS12AggSig.score(c.aggsig))
-            c = put_in(c, [:aggsig], aggsig)
-            Map.drop(c, [:mask])
+            Claim.take(c)
+            |> Map.new(fn {k, v} -> {k, if(is_binary(v), do: Base58.encode(v), else: v)} end)
+            |> Map.merge(%{claim_hash: Base58.encode(Claim.hash(c)), score: BLS12AggSig.score(c.aggsig), aggsig: aggsig})
         end)
     end
 
@@ -181,12 +179,12 @@ defmodule API.Chain do
         entry = if !entry.header[:root_validator] do entry else put_in(entry, [:header, :root_validator], Base58.encode(entry.header.root_validator)) end
 
         entry = put_in(entry, [:header], entry.header)
-        {mut_hash, score} = DB.Attestation.best_consensus_by_entryhash(hash)
-        if !mut_hash do entry else
+        {claim_hash, score} = DB.Attestation.best_consensus_by_entryhash(hash)
+        if !claim_hash do entry else
             entry = put_in(entry, [:consensus], %{})
             entry = put_in(entry, [:consensus, :score], Float.round(score, 3))
-            entry = put_in(entry, [:consensus, :finality_reached], DB.Attestation.quorum?(hash, mut_hash))
-            entry = put_in(entry, [:consensus, :mut_hash], Base58.encode(mut_hash))
+            entry = put_in(entry, [:consensus, :finality_reached], DB.Attestation.quorum?(hash, claim_hash))
+            entry = put_in(entry, [:consensus, :mut_hash], Base58.encode(claim_hash))
             entry
         end
     end

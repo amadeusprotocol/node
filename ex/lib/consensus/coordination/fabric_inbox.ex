@@ -11,16 +11,16 @@ defmodule FabricInbox do
   #  and applied (false: not yet). a softfork that replaces it makes the drain
   #  revalidate against the new branch's validators. rows stay until rooted
   #  passes their height
-  #key: {height, type, entry_hash, mutations_hash, extra}
+  #key: {height, type, entry_hash, claim_hash, extra}
   #  type 0 entry, 1 consensus, 2 attestation. extra: signature / aggsig / signer
   #  (a consensus is stored before the attestations of its height aggregate
   #  onto it: the other way round it would replace their aggregate)
   #  (entry hash covers the header only: an unchecked forged copy must not
   #  claim the key of the real one)
   #  unused fields are nil: every key is a 5-tuple, tuples order by size first
-  #  attestations/consensuses carry no height: catchup gives the trie height,
-  #  gossip the one of its entry at tip+1 here or in RocksDB (else dropped;
-  #  catchup refetches). they are retried until they apply
+  #  a claim carries its height; a legacy one has none: catchup gives the trie
+  #  height, gossip the one of its entry at tip+1 here or in RocksDB (else
+  #  dropped; catchup refetches). they are retried until they apply
   #vouched: entry signer is in the validator set as we know it at arrival. only
   #a hint for the sync loops (a junk entry must not hide a height we lack)
   #
@@ -88,8 +88,8 @@ defmodule FabricInbox do
 
   def insert_attestation(attestation, height \\ nil) do
     try do
-      height = height || entry_height(attestation.entry_hash)
-      key = {height, @attestation, attestation.entry_hash, attestation.mutations_hash, attestation.signer}
+      height = Claim.take(attestation)[:entry_height] || height || entry_height(attestation.entry_hash)
+      key = {height, @attestation, attestation.entry_hash, Claim.hash(attestation), attestation.signer}
       cond do
         !is_integer(height) -> {:error, :entry_unknown}
         height <= chain_rooted_height() -> {:error, :below_rooted}
@@ -109,19 +109,17 @@ defmodule FabricInbox do
   def insert_consensus(consensus, height \\ nil) do
     try do
       aggsig = Map.take(consensus.aggsig, [:mask, :mask_active, :aggsig])
-      consensus = %{entry_hash: consensus.entry_hash, mutations_hash: consensus.mutations_hash, aggsig: aggsig}
-      %{entry_hash: entry_hash, mutations_hash: mutations_hash} = consensus
+      consensus = Map.put(Claim.take(consensus), :aggsig, aggsig)
       %{mask: mask, aggsig: signature} = aggsig
-      height = height || entry_height(entry_hash)
+      height = consensus[:entry_height] || height || entry_height(consensus.entry_hash)
       cond do
         !is_integer(height) -> {:error, :entry_unknown}
         height <= chain_rooted_height() -> {:error, :below_rooted}
-        !is_binary(entry_hash) or byte_size(entry_hash) != 32 -> {:error, :entry_hash_not_256_bits}
-        !is_binary(mutations_hash) or byte_size(mutations_hash) != 32 -> {:error, :mutations_hash_not_256_bits}
+        !Claim.valid?(consensus) -> {:error, :invalid_claim}
         !is_binary(signature) or byte_size(signature) != 96 -> {:error, :aggsig_not_96_bytes}
         !is_binary(mask) or BLS12AggSig.signer_count(aggsig) == 0 -> {:error, :invalid_mask}
         true ->
-          key = {height, @consensus, entry_hash, mutations_hash, aggsig}
+          key = {height, @consensus, consensus.entry_hash, Claim.hash(consensus), aggsig}
           case !:ets.member(FabricInbox, key) and Consensus.verify_signature_vs_epoch_roster(consensus, height) do
             false -> :exists
             :invalid -> {:error, :invalid_signature}
@@ -236,13 +234,14 @@ defmodule FabricInbox do
     %{db: db} = :persistent_term.get({:rocksdb, Fabric})
     rtx = RocksDB.transaction(db)
 
-    %{entry_hash: entry_hash, mutations_hash: mutations_hash, signer: signer, signature: signature} = attestation
+    %{entry_hash: entry_hash, signer: signer, signature: signature} = attestation
+    claim = Claim.take(attestation)
     entry = DB.Entry.by_hash(entry_hash, %{rtx: rtx})
     set = if entry, do: DB.Chain.validator_set_for_height(Entry.height(entry), %{rtx: rtx})
     #add_padded throws on a stored aggsig that no longer matches the set (softfork)
     result = try do
       if entry && set && signer in ValidatorSet.active(set) && entry.header.height <= DB.Chain.height(%{rtx: rtx}) do
-        consensus = DB.Attestation.consensus(entry_hash, mutations_hash, %{rtx: rtx}) || %{mutations_hash: mutations_hash, entry_hash: entry_hash}
+        consensus = DB.Attestation.consensus(entry_hash, Claim.hash(claim), %{rtx: rtx}) || claim
         aggsig = consensus[:aggsig] || BLS12AggSig.new_padded(set)
         consensus = Map.put(consensus, :aggsig, BLS12AggSig.add_padded(aggsig, set, signer, signature))
         case DB.Attestation.set_consensus(consensus, %{rtx: rtx}) do

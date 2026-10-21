@@ -1,6 +1,7 @@
 defmodule MMR do
   @moduledoc """
-  Merkle Mountain Range accumulator over block hashes.
+  Merkle Mountain Range accumulator over block hashes (claim hashes from the
+  claim fork on, see Claim.mmr_leaf).
 
   State is `%{peaks: [hash], size: leaf_count}`. Peaks are ordered from the
   largest subtree (highest peak) down to the smallest. The implicit height of

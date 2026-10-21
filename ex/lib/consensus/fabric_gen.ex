@@ -168,11 +168,11 @@ defmodule FabricGen do
     |> DB.Entry.by_height()
     |> Enum.filter(& &1.header.prev_hash == parent_hash)
     |> Enum.map(fn(entry)->
-        {mut_hash, score} = DB.Attestation.best_consensus_by_entryhash(entry.hash)
-        {entry, mut_hash, score}
+        {claim_hash, score} = DB.Attestation.best_consensus_by_entryhash(entry.hash)
+        {entry, claim_hash, score}
     end)
-    |> Enum.filter(fn {entry, mut_hash, score} -> mut_hash end)
-    |> Enum.sort_by(fn {entry, mut_hash, score} -> {-score, entry.header.slot, !entry[:mask], entry.hash} end)
+    |> Enum.filter(fn {_entry, claim_hash, _score} -> claim_hash end)
+    |> Enum.sort_by(fn {entry, _claim_hash, score} -> {-score, entry.header.slot, !entry[:mask], entry.hash} end)
   end
 
   def proc_consensus() do
@@ -194,9 +194,9 @@ defmodule FabricGen do
     next_entries = best_entry_for_height(next_height)
     #IO.inspect {next_entries, next_height}
     case List.first(next_entries) do
-        {best_entry, muts_hash, _score} ->
-          if DB.Attestation.quorum?(best_entry.hash, muts_hash) do
-            my_muts_hash = DB.Entry.muts_hash(best_entry.hash)
+        {best_entry, claim_hash, _score} ->
+          if DB.Attestation.quorum?(best_entry.hash, claim_hash) do
+            my_claim_hash = DB.Entry.claim_hash(best_entry.hash)
             in_chain = DB.Entry.in_chain(best_entry.hash)
             cond do
               #We did not apply the entry due to doubleblock or slash block
@@ -207,18 +207,18 @@ defmodule FabricGen do
                 true = DB.Chain.rewind(rewind_to_hash)
                 proc_consensus()
 
-              muts_hash != my_muts_hash ->
+              claim_hash != my_claim_hash ->
                 height = best_entry.header.height
                 slot = best_entry.header.slot
                 rewind_to_hash = DB.Entry.by_height_in_main_chain(best_entry.header.height - 1)
                 IO.puts "EMERGENCY: consensus chose entry #{Base58.encode(best_entry.hash)} for height/slot #{height}/#{slot}"
-                IO.puts "but our mutations are #{Base58.encode(my_muts_hash)} while consensus is #{Base58.encode(muts_hash)}"
+                IO.puts "but our claim is #{Base58.encode(my_claim_hash)} while consensus is #{Base58.encode(claim_hash)}"
                 IO.puts "EMERGENCY: consensus halted as state is out of sync with network"
                 true = DB.Chain.rewind(rewind_to_hash)
                 :erlang.halt()
 
               true ->
-                Application.fetch_env!(:ama, :rpc_events) && FabricEventGen.event_rooted(best_entry, muts_hash)
+                Application.fetch_env!(:ama, :rpc_events) && FabricEventGen.event_rooted(best_entry, claim_hash)
                 %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
                 RocksDB.put("rooted_tip", best_entry.hash, %{db: db, cf: cf.sysconf})
                 FabricInbox.drop_rooted(best_entry.header.height)
@@ -274,12 +274,9 @@ defmodule FabricGen do
       entry ->
         start_ts = :os.system_time(1000)
         task = Task.async(fn -> FabricGen.apply_entry(entry) end)
-        %{error: :ok, mutations_hash: m_hash, receipts: r, muts: m
-        } = case Task.await(task, :infinity) do
-          result = %{error: :ok} -> result
-        end
+        %{error: :ok, claim_hash: claim_hash, receipts: r, muts: m} = Task.await(task, :infinity)
 
-        Application.fetch_env!(:ama, :rpc_events) && FabricEventGen.event_applied(entry, m_hash, m, r)
+        Application.fetch_env!(:ama, :rpc_events) && FabricEventGen.event_applied(entry, claim_hash, m, r)
         TXPool.delete_packed(entry.txs)
 
         proc_entries()
@@ -309,16 +306,14 @@ defmodule FabricGen do
   defp retro_attest_tip(entry, now) do
     height = entry.header.height
     hash = entry.hash
-    muts_hash = DB.Entry.muts_hash(hash)
+    claim = DB.Entry.claim(hash)
     seen = DB.Entry.seentime(hash)
     cond do
-      !muts_hash -> nil
+      !claim -> nil
       !seen or now - seen < @retro_attest_grace_ms -> nil
       true ->
         set = DB.Chain.validator_set_for_height(height)
         validators = ValidatorSet.active(set)
-        root_receipts = DB.Entry.root_receipts(hash)
-        root_contractstate = DB.Entry.root_contractstate(hash)
         attestations = Application.fetch_env!(:ama, :keys)
         |> Enum.filter(& &1.pk in validators)
         |> Enum.filter(fn(seed)->
@@ -326,10 +321,10 @@ defmodule FabricGen do
           #already visible in an aggregate (followers never store the leader's
           #raw attestation, only the consensus carries its mask bit)
           !DB.Attestation.by_height_by_signer(height, seed.pk)
-            and !signer_in_consensus?(hash, muts_hash, set, seed.pk)
+            and !signer_in_consensus?(hash, Claim.hash(claim), set, seed.pk)
         end)
         |> Enum.map(fn(seed)->
-          attestation = Attestation.sign(seed.seed, hash, height, muts_hash, root_receipts, root_contractstate, :binary.copy(<<0>>, 32))
+          attestation = Attestation.sign(seed.seed, claim)
           DB.Attestation.put(attestation, height)
           FabricInbox.aggregate_attestation(attestation)
           attestation
@@ -344,8 +339,8 @@ defmodule FabricGen do
     end
   end
 
-  defp signer_in_consensus?(entry_hash, muts_hash, set, pk) do
-    case DB.Attestation.consensus(entry_hash, muts_hash) do
+  defp signer_in_consensus?(entry_hash, claim_hash, set, pk) do
+    case DB.Attestation.consensus(entry_hash, claim_hash) do
       %{aggsig: aggsig} ->
         case BLS12AggSig.validate(aggsig, set) do
           {:ok, signers} -> pk in signers
@@ -357,7 +352,7 @@ defmodule FabricGen do
 
   defp root_validator_ok?(entry) do
     height = Entry.height(entry)
-    entry.header.root_validator ==
+    Claim.fork?(height) or entry.header.root_validator ==
       Entry.root_validator(DB.Chain.validators_for_height(height), DB.Chain.validators_last_change_height(height))
   end
 
@@ -528,7 +523,9 @@ defmodule FabricGen do
       #m = m ++ m_exit
       #m_rev = m_rev ++ m_exit_rev
 
-      mutations_hash = RDB.vecpak_encode(receipts ++ m) |> Blake3.hash()
+      height = Entry.height(next_entry)
+      mutations_hash = if !Claim.fork?(height), do: RDB.vecpak_encode(receipts ++ m) |> Blake3.hash()
+      claim = Claim.build(height, next_entry.hash, mutations_hash, root_contractstate, root_receipts)
 
       RocksDB.put("temporal_tip", next_entry.hash, %{rtx: rtx, cf: cf.sysconf})
 
@@ -537,29 +534,19 @@ defmodule FabricGen do
           DB.Entry.apply_into_main_chain_muts(next_entry.hash, m, %{rtx: rtx})
       end
 
-      set = DB.Chain.validator_set_for_height(Entry.height(next_entry), %{rtx: rtx})
+      set = DB.Chain.validator_set_for_height(height, %{rtx: rtx})
       validators = ValidatorSet.active(set)
       #replica followers never attest: the leader attests for the shared keys
       my_validators = if !ReplicaGen.can_sign?() do [] else
         Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
       end
-      # {next_entry, mutations_hash} = {%{hash: DB.Chain.tip(), header_unpacked: %{height: DB.Chain.height()}}, DB.Entry.muts_hash(DB.Chain.tip())}
-      # my_validators = Application.fetch_env!(:ama, :keys)
-      # rtx = RocksDB.transaction(:persistent_term.get({:rocksdb, Fabric}).db)
-      # :ok = RocksDB.transaction_commit(rtx)
       attestations = Enum.map(my_validators, fn(seed)->
-        attestation = Attestation.sign(seed.seed, next_entry.hash, next_entry.header.height, mutations_hash, root_receipts, root_contractstate, :binary.copy(<<0>>, 32))
-        DB.Attestation.put(attestation, Entry.height(next_entry), %{rtx: rtx})
+        attestation = Attestation.sign(seed.seed, claim)
+        DB.Attestation.put(attestation, height, %{rtx: rtx})
         attestation
       end)
       if length(attestations) > 0 do
-        aggsig = BLS12AggSig.aggregate(set, attestations)
-        consensus = %{
-          aggsig: aggsig,
-          mutations_hash: mutations_hash,
-          entry_hash: next_entry.hash
-        }
-        DB.Attestation.set_consensus(consensus, %{rtx: rtx})
+        DB.Attestation.set_consensus(Map.put(claim, :aggsig, BLS12AggSig.aggregate(set, attestations)), %{rtx: rtx})
 
         if FabricSyncAttestGen.isQuorumSyncedOffByX(6) do
           msg = NodeProto.event_attestation(attestations)
@@ -573,6 +560,6 @@ defmodule FabricGen do
 
       :ok = RocksDB.transaction_commit(rtx)
 
-      %{error: :ok, mutations_hash: mutations_hash, muts: m, receipts: receipts}
+      %{error: :ok, claim_hash: Claim.hash(claim), muts: m, receipts: receipts}
   end
 end

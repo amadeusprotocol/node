@@ -1,5 +1,5 @@
 use super::chain_harness::{new_wallet, Chain, Wallet};
-use crate::consensus::{aggsig::DST_MOTION, bic::{epoch, protocol}, bls12_381, validator_set::{valid_mask, ValidatorSet}};
+use crate::consensus::{aggsig::DST_MOTION, bic::epoch, bls12_381, validator_set::{valid_mask, ValidatorSet}};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 fn key(height: u64) -> Vec<u8> {
@@ -81,15 +81,15 @@ fn validator_set_legacy_list_record_seeds_roster() {
     // epoch 877 opened on a list record written before the fork: it reads as an
     // all-active roster, and a slash on top of it writes roster + mask
     let mut chain = Chain::new();
-    chain.height = protocol::FORKHEIGHT;
+    chain.height = 87_700_000;
     let wallets: Vec<_> = (0..4).map(|_| new_wallet()).collect();
     let roster: Vec<_> = wallets.iter().map(|w| w.pk.to_vec()).collect();
     chain.put(&key(0), &crate::consensus::bic::list_of_binaries_to_vecpak(roster.clone()));
     chain.with_env(&wallets[0].pk, |env| {
         env.testnet = false;
-        epoch::call_slash_trainer(env, motion(&wallets, 1, protocol::FORKHEIGHT / 100_000, &[0, 2, 3]));
+        epoch::call_slash_trainer(env, motion(&wallets, 1, 87_700_000 / 100_000, &[0, 2, 3]));
     });
-    let set = ValidatorSet::decode(&chain.get(&key(protocol::FORKHEIGHT + 1)).unwrap());
+    let set = ValidatorSet::decode(&chain.get(&key(87_700_000 + 1)).unwrap());
     assert_eq!(set.validators, roster);
     assert_eq!(set.mask_active, vec![176]);
 }

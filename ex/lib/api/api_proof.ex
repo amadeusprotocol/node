@@ -1,15 +1,4 @@
 defmodule API.Proof do
-  def validators(entry_hash) do
-    entry_hash = API.maybe_b58(32, entry_hash)
-    proof = Entry.proof_validators(entry_hash)
-    %{
-      key: proof.key,
-      value: Base58.encode(proof.value),
-      validators: Enum.map(proof.validators, & Base58.encode(&1)),
-      proof: encode_hbsmt_proof(proof.proof)
-    }
-  end
-
   defp encode_hbsmt_proof(proof) do
     terminus = case proof.terminus do
       :empty -> :empty
@@ -83,13 +72,15 @@ defmodule API.Proof do
           {:ok, state} when height >= state.size ->
             %{error: :out_of_range, height: height, mmr_size: state.size}
           {:ok, state} ->
-            proof = MMR.generate_proof(state, height, &DB.Entry.by_height_in_main_chain/1)
+            proof = MMR.generate_proof(state, height, &DB.Entry.mmr_leaf/1)
+            claim = if Claim.fork?(height), do: DB.Entry.claim(block_hash)
             cid = DB.MMR.chain_id()
             root = MMR.root_chain(cid, state)
             commitment_hash = DB.Entry.by_height_in_main_chain(state.size)
 
             %{
               block_hash:  Base58.encode(block_hash),
+              claim:       claim && Base58.encode(Claim.pack(claim)),
               height:      height,
               at_height:   state.size,
               at_hash:     Base58.encode(commitment_hash),
@@ -171,6 +162,11 @@ defmodule API.Proof do
         true ->
           cid         = DB.MMR.chain_id()
           block_hash  = Base58.decode(proof_map.block_hash)
+          #from the fork on the leaf is the block's claim, below it the block hash
+          leaf = case {Claim.fork?(proof_map.height), proof_map[:claim] && Base58.decode(proof_map.claim)} do
+            {true, <<claim_height::64, ^block_hash::binary-32, _::binary-64>> = claim} when claim_height == proof_map.height -> :crypto.hash(:sha256, claim)
+            {false, nil} -> block_hash
+          end
           siblings    = Enum.map(proof_map.siblings,    &Base58.decode/1)
           other_peaks = Enum.map(proof_map.other_peaks, &Base58.decode/1)
 
@@ -181,7 +177,7 @@ defmodule API.Proof do
             siblings:    siblings,
             other_peaks: other_peaks
           }
-          MMR.verify_proof(proof, block_hash, cid, trusted)
+          MMR.verify_proof(proof, leaf, cid, trusted)
       end
     rescue
       _ -> false

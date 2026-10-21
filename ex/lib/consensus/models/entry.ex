@@ -52,6 +52,7 @@ defmodule Entry do
     """
 
     @fields [:header, :hash, :signature, :txs, :mask, :mask_active]
+    #keep :root_validator even after the claim fork: pre-fork headers hash with it
     @fields_header [:height, :prev_hash, :slot, :prev_slot, :signer, :dr, :vr, :root_tx, :root_validator, :root_chain]
 
     #size = sum of packed tx bytes, the same measure TXPool packs against
@@ -106,8 +107,8 @@ defmodule Entry do
         header = entry.header
         validators = DB.Chain.validators_for_height(header.height) || []
         if header.signer not in validators, do: throw(%{error: :signer_not_in_validator_set})
-        validators_last_change_height = DB.Chain.validators_last_change_height(header.height)
-        if header.root_validator != root_validator(validators, validators_last_change_height), do: throw(%{error: :root_validator_invalid})
+        if !Claim.fork?(header.height) and header.root_validator != root_validator(validators, DB.Chain.validators_last_change_height(header.height)),
+          do: throw(%{error: :root_validator_invalid})
         if entry[:mask] do
           %{error: error} = validate_signature(entry)
           if error != :ok, do: throw(%{error: error})
@@ -154,8 +155,12 @@ defmodule Entry do
         if byte_size(eh.root_tx) != 32, do: throw(%{error: :root_tx_not_256_bits})
         if eh.root_tx != root_tx(tx_hashes), do: throw(%{error: :root_tx_invalid})
 
-        if !is_binary(eh.root_validator), do: throw(%{error: :root_validator_not_binary})
-        if byte_size(eh.root_validator) != 32, do: throw(%{error: :root_validator_not_256_bits})
+        cond do
+          Claim.fork?(eh.height) -> Map.has_key?(eh, :root_validator) && throw(%{error: :root_validator_after_fork})
+          !is_binary(eh[:root_validator]) -> throw(%{error: :root_validator_not_binary})
+          byte_size(eh.root_validator) != 32 -> throw(%{error: :root_validator_not_256_bits})
+          true -> :ok
+        end
 
         if Enum.any?(e.txs, &(is_map(&1[:tx]) and is_map(&1.tx[:action]) and !TX.fits_budget?(&1))),
           do: throw(%{error: :tx_exceeds_budget})
@@ -268,9 +273,6 @@ defmodule Entry do
         dr = :crypto.hash(:sha256, cur_entry.header.dr)
         vr = BlsEx.sign!(seed, cur_entry.header.vr, BLS12AggSig.dst_vrf())
 
-        validators = DB.Chain.validators_for_height(next_height)
-        validators_last_change_height = DB.Chain.validators_last_change_height(next_height)
-
         mmr = DB.MMR.load_or_empty()
         if mmr.size != next_height do
           raise "build_next root_chain: MMR size #{mmr.size} != next_height #{next_height}; refusing to build (out-of-sync root_chain would halt consensus)"
@@ -285,9 +287,11 @@ defmodule Entry do
             vr: vr,
             signer: pk,
             root_tx: root_tx(Enum.map(txus, & &1.hash)),
-            root_validator: root_validator(validators, validators_last_change_height),
             root_chain: MMR.root_chain(DB.MMR.chain_id(), mmr)
         }
+        header = if Claim.fork?(next_height) do header else
+          Map.put(header, :root_validator, root_validator(DB.Chain.validators_for_height(next_height), DB.Chain.validators_last_change_height(next_height)))
+        end
 
         %{header: header, txs: txus}
     end
@@ -349,18 +353,5 @@ defmodule Entry do
 
       #p = Entry.proof_tx_included Base58.decode("BzF3P2a5gMpQ2FwAuiftHC85BnDfxcmYXPfW95BmNnXU"), Base58.decode("3ySbVoruCQsGb9K1XkRbQdm5WSuxnEoVCugAUj6qouS6")
       #RDB.bintree_root_verify2(p, nil, Base58.decode("3ySbVoruCQsGb9K1XkRbQdm5WSuxnEoVCugAUj6qouS6"), "0")
-    end
-
-    def proof_validators(entry_hash) do
-      entry = DB.Entry.by_hash(entry_hash)
-
-      validators = DB.Chain.validators_for_height(entry.header.height)
-      validators_last_change_height = DB.Chain.validators_last_change_height(entry.header.height)
-
-      hash = :crypto.hash(:sha256, Enum.join(validators))
-
-      kvs = root_validator_build(validators, validators_last_change_height)
-      proof = RDB.hbsmt_root_prove(kvs, nil, "hash")
-      %{proof: proof, key: "hash", value: hash, validators: validators}
     end
 end

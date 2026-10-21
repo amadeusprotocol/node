@@ -113,9 +113,9 @@ defmodule MMR.Bootstrap do
             IO.puts "MMR bootstrap: height #{h} / #{tip_height}  #{Float.round(pct, 2)}%  (#{Float.round(rate, 0)} blocks/s)"
           end
 
-          case DB.Entry.by_height_in_main_chain(h) do
+          case DB.Entry.mmr_leaf(h) do
             nil  -> throw({:missing_block, h})
-            hash -> MMR.append(acc, hash)
+            leaf -> MMR.append(acc, leaf)
           end
         end)
 

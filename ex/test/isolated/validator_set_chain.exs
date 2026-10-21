@@ -9,6 +9,8 @@ defmodule ValidatorSetChainTest do
     dir = Path.join(System.tmp_dir!(), "ama-validator-set-#{System.unique_integer([:positive])}")
     Application.put_env(:ama, :work_folder, dir)
     Application.put_env(:ama, :testnet, true)
+    #claim fork active from genesis in this suite
+    :persistent_term.put({ProtocolConstant, :forkheight_testnet}, 0)
     keys = for i <- 1..5 do
       seed = :crypto.hash(:sha512, <<i>>)
       %{seed: seed, pk: BlsEx.get_public_key!(seed)}
@@ -19,6 +21,7 @@ defmodule ValidatorSetChainTest do
     :persistent_term.put(EntryHeight, :atomics.new(1, []))
     DB.API.init()
     on_exit(fn ->
+      :persistent_term.erase({ProtocolConstant, :forkheight_testnet})
       :persistent_term.erase({:rocksdb, Fabric})
       # Let the NIF resources own DB destruction (close_db drops it in place).
       :erlang.garbage_collect()
@@ -30,7 +33,7 @@ defmodule ValidatorSetChainTest do
     put_set(0, roster)
     set = %{validators: roster, mask_active: <<0b10111000>>}
     put_set(1, set)
-    entry = entry(1, set, keys)
+    entry = entry(1, keys)
     DB.Entry.insert(entry)
     RocksDB.put("temporal_tip", entry.hash, DB.API.db_handle(%{}, :sysconf))
     RocksDB.put("rooted_tip", entry.hash, DB.API.db_handle(%{}, :sysconf))
@@ -42,11 +45,11 @@ defmodule ValidatorSetChainTest do
       RDB.vecpak_encode(record), DB.API.db_handle(%{}, :contractstate))
   end
 
-  defp entry(height, set, keys) do
+  defp entry(height, keys) do
     header = %{
       height: height, slot: height, prev_slot: height - 1, prev_hash: <<0::256>>,
       signer: hd(keys).pk, dr: <<0::256>>, vr: <<0::768>>,
-      root_tx: Entry.root_tx([]), root_validator: Entry.root_validator(ValidatorSet.active(set), 1)
+      root_tx: Entry.root_tx([])
     }
     hash = :crypto.hash(:sha256, RDB.vecpak_encode(header))
     sig = BlsEx.sign!(hd(keys).seed, hash, BLS12AggSig.dst_entry())
@@ -80,13 +83,12 @@ defmodule ValidatorSetChainTest do
   end
 
   test "consensus, coordinator, storage, and reports use the same active denominator", ctx do
-    muts = :crypto.hash(:sha256, "state")
-    claim = ctx.entry.hash <> muts
-    agg = aggregate(ctx.set, ctx.keys, [0, 3, 4], claim, BLS12AggSig.dst_att())
-    consensus = %{entry_hash: ctx.entry.hash, mutations_hash: muts, aggsig: agg}
+    claim = Claim.build(1, ctx.entry.hash, nil, :crypto.hash(:sha256, "state"), :crypto.hash(:sha256, "receipts"))
+    agg = aggregate(ctx.set, ctx.keys, [0, 3, 4], Claim.pack(claim), BLS12AggSig.dst_att())
+    consensus = Map.put(claim, :aggsig, agg)
     assert Consensus.validate_vs_chain(consensus) == %{error: :ok}
     assert DB.Attestation.set_consensus(consensus) == :ok
-    assert DB.Attestation.best_consensus_by_entryhash(ctx.entry.hash) == {muts, 0.75}
+    assert DB.Attestation.best_consensus_by_entryhash(ctx.entry.hash) == {Claim.hash(claim), 0.75}
     [report] = API.Chain.consensuses_by_height(1)
     assert report.score == 0.75
     assert report.aggsig.mask_active == Base58.encode(ctx.set.mask_active)
@@ -98,15 +100,99 @@ defmodule ValidatorSetChainTest do
     stale = put_in(consensus.aggsig.mask, <<0b11001000>>)
     assert Consensus.validate_vs_chain(stale) == %{error: :inactive_signer}
 
-    key = Enum.at(ctx.keys, 2)
-    a = %{entry_hash: ctx.entry.hash, mutations_hash: muts, signer: key.pk,
-      signature: BlsEx.sign!(key.seed, claim, BLS12AggSig.dst_att())}
+    legacy = %{entry_hash: ctx.entry.hash, mutations_hash: claim.root_contractstate, aggsig: agg}
+    assert Consensus.validate_vs_chain(legacy) == %{error: :invalid_claim}
+    assert DB.Attestation.set_consensus(legacy) == {:error, :invalid_claim}
+    assert Consensus.validate_vs_chain(%{consensus | entry_height: 2}) == %{error: :invalid_claim}
+    assert Consensus.validate_vs_chain(%{consensus | root_receipts: <<0::256>>}) == %{error: :invalid_signature}
+
+    a = Attestation.sign(Enum.at(ctx.keys, 2).seed, claim)
+    assert Attestation.validate(a) == %{error: :ok, attestation: a}
+    assert Attestation.validate(%{a | entry_height: 2}).error == :invalid_signature
     assert FabricInbox.aggregate_attestation(a) == :aggregated
-    stored = DB.Attestation.consensus(ctx.entry.hash, muts)
+    stored = DB.Attestation.consensus(ctx.entry.hash, Claim.hash(claim))
     assert stored.aggsig.mask == ctx.set.mask_active
     refute Map.has_key?(stored.aggsig, :mask_size)
     assert Consensus.validate_vs_chain(stored) == %{error: :ok}
-    refute FabricInbox.aggregate_attestation(%{a | signer: Enum.at(ctx.keys, 1).pk})
+    refute FabricInbox.aggregate_attestation(Attestation.sign(Enum.at(ctx.keys, 1).seed, claim))
+  end
+
+  for testnet <- [true, false] do
+    @tag testnet: testnet
+    test "mmr leaves, bootstrap and proofs agree (fork active: #{testnet})", ctx do
+      Application.put_env(:ama, :testnet, ctx.testnet)
+      fork? = Claim.fork?(0)
+      assert fork? == ctx.testnet
+      e0 = entry(0, ctx.keys)
+      %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+      rtx = RocksDB.transaction(db)
+      for {e, i} <- [{e0, 0}, {ctx.entry, 1}] do
+        DB.Entry.apply_into_main_chain(e, <<i::256>>, [], [], <<i + 10::256>>, <<i + 20::256>>, %{rtx: rtx})
+      end
+      :ok = RocksDB.transaction_commit(rtx)
+
+      leaves = Enum.map(0..1, &DB.Entry.mmr_leaf/1)
+      expected = for {e, i} <- [{e0, 0}, {ctx.entry, 1}] do
+        if fork?, do: :crypto.hash(:sha256, <<i::64, e.hash::binary, i + 20::256, i + 10::256>>), else: e.hash
+      end
+      assert leaves == expected
+      assert DB.MMR.load() == Enum.reduce(leaves, MMR.empty(), &MMR.append(&2, &1))
+
+      proof = API.Proof.block(0)
+      root = Base58.encode(MMR.root_chain(DB.MMR.chain_id(), DB.MMR.snapshot_for(ctx.entry.hash)))
+      assert API.Proof.verify_block(proof, root)
+      refute API.Proof.verify_block(%{proof | height: 1}, root)
+      if fork? do
+        assert byte_size(Base58.decode(proof.claim)) == 104
+        refute API.Proof.verify_block(%{proof | claim: nil}, root)
+        #the claim hash is the leaf: it must not pass as a bare block hash
+        claim_hash = :crypto.hash(:sha256, Base58.decode(proof.claim))
+        refute API.Proof.verify_block(%{proof | claim: nil, block_hash: Base58.encode(claim_hash)}, root)
+        <<_::64, rest::binary>> = Base58.decode(proof.claim)
+        refute API.Proof.verify_block(%{proof | claim: Base58.encode(<<1::64, rest::binary>>)}, root)
+      else
+        assert proof.claim == nil
+        refute API.Proof.verify_block(%{proof | claim: Base58.encode(<<0::64, e0.hash::binary, 0::512>>)}, root)
+        #legacy history without claim meta still yields its leaf
+        RocksDB.delete("entry:#{e0.hash}:root_contractstate", DB.API.db_handle(%{}, :entry_meta))
+        assert DB.Entry.mmr_leaf(0) == e0.hash
+        assert API.Proof.verify_block(API.Proof.block(0), root)
+      end
+    end
+  end
+
+  test "a legacy claim needs only mutations_hash; inbox files attestations by their signed height", ctx do
+    Application.put_env(:ama, :testnet, false)
+    %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+    rtx = RocksDB.transaction(db)
+    DB.Entry.apply_into_main_chain(entry(0, ctx.keys), <<7::256>>, [], [], <<1::256>>, <<2::256>>, %{rtx: rtx})
+    :ok = RocksDB.transaction_commit(rtx)
+    e0 = entry(0, ctx.keys)
+    RocksDB.delete("entry:#{e0.hash}:root_contractstate", DB.API.db_handle(%{}, :entry_meta))
+    assert DB.Entry.claim(e0.hash) == %{entry_hash: e0.hash, mutations_hash: <<7::256>>}
+    RocksDB.delete("entry:#{e0.hash}:muts_hash", DB.API.db_handle(%{}, :entry_meta))
+    assert DB.Entry.claim(e0.hash) == nil
+
+    Application.put_env(:ama, :testnet, true)
+    Application.put_env(:ama, :fabric_inbox_max_bytes, 1_000_000_000)
+    :ets.whereis(FabricInbox) == :undefined && FabricInbox.init()
+    claim = Claim.build(5, ctx.entry.hash, nil, <<1::256>>, <<2::256>>)
+    a = Attestation.sign(hd(ctx.keys).seed, claim)
+    #an unsigned height hint never overrides the signed one
+    assert FabricInbox.insert_attestation(a, 9) == :ok
+    assert [{{5, _, _, _, _}, _}] = :ets.tab2list(FabricInbox)
+    #a legacy attestation carrying an entry_height field is not filed by it
+    legacy = Attestation.sign(hd(ctx.keys).seed, %{entry_hash: ctx.entry.hash, mutations_hash: <<3::256>>}) |> Map.put(:entry_height, 7)
+    assert FabricInbox.insert_attestation(legacy, 6) == :ok
+    assert Enum.sort(Enum.map(:ets.tab2list(FabricInbox), fn {{h, _, _, _, _}, _} -> h end)) == [5, 6]
+  end
+
+  test "headers drop root_validator once the claim fork is active", ctx do
+    assert Entry.validate_entry(ctx.entry) == %{error: :ok}
+    header = Map.put(ctx.entry.header, :root_validator, <<0::256>>)
+    hash = :crypto.hash(:sha256, RDB.vecpak_encode(header))
+    assert Entry.validate_entry(%{ctx.entry | header: header, hash: hash}) == %{error: :root_validator_after_fork}
+    assert Entry.validate_vs_validators(ctx.entry) == %{error: :ok}
   end
 
   test "special entry packing, slash verification, and stale motion context", ctx do
@@ -161,7 +247,7 @@ defmodule ValidatorSetChainTest do
     agg = aggregate(set, keys, indices, claim, BLS12AggSig.dst_motion())
     txu = SpecialMeetingGen.build_slash_tx(carrier.seed, target, 0, agg.aggsig, agg.mask, length(set.validators))
     assert txu.tx.action.attached_gas > 0
-    block = entry(2, set, keys) |> Map.put(:txs, [txu])
+    block = entry(2, keys) |> Map.put(:txs, [txu])
     %{db: db} = :persistent_term.get({:rocksdb, Fabric})
     RDB.hbsmt_seed_contractstate(db, RocksDB.get_prefix("", DB.API.db_handle(%{}, :contractstate)))
     {rtx, _muts, _reverse, receipts, _, _} = RDB.apply_entry(db, Entry.pack_for_db(block), carrier.pk, carrier.seed, true)
