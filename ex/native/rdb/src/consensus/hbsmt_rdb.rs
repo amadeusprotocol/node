@@ -166,7 +166,7 @@ impl HbsmtRdb {
 // reconstructs to the returned root. Point reads (split / leaf) go through that
 // same iterator via exact `seek` so they share the view (no per-read `get_cf`,
 // no snapshot object). Backs both `HbsmtRdb::prove`/`root` and the consensus
-// DB-prove helper `hbsmt_prove_and_root_db`.
+// DB-prove helper `hbsmt_prove_many_at_tip`.
 // ============================================================================
 
 /// Exact point lookup through the pinned iterator (shares its consistent view).
@@ -298,23 +298,25 @@ fn first_two_leaves_db(iter: &mut RawIter, lo: &Path, hi: &Path) -> (Option<(Pat
     (first, more)
 }
 
-/// Produce `(root, proof)` for `(ns, key)` over a named CF of an externally-managed
-/// `TransactionDB` — the consensus contractstate HBSMT. Root AND proof are read through a
-/// SINGLE pinned `raw_iterator`, so they reflect one consistent point-in-time view even
-/// while blocks mutate the CF concurrently (the proof always reconstructs to the returned
-/// root). Verify with [`crate::consensus::hbsmt_common::verify_hbsmt`].
-pub fn hbsmt_prove_and_root_db(
+/// `(temporal_tip, root, proofs)` for `keys` over a named CF of the consensus
+/// `TransactionDB`, all read from ONE snapshot: the tip and the tree are committed in the
+/// same transaction, so the root is that tip's `root_contractstate` and every proof
+/// reconstructs to it even while blocks keep applying. Verify with
+/// [`crate::consensus::hbsmt_common::verify_hbsmt`].
+pub fn hbsmt_prove_many_at_tip(
     db: &TransactionDB<MultiThreaded>,
     cf_name: &str,
-    ns: Option<&[u8]>,
-    k: &[u8],
-) -> (Hash, HbsmtProof) {
-    let cf = db.cf_handle(cf_name).unwrap();
+    keys: &[(Option<Vec<u8>>, Vec<u8>)],
+) -> (Option<Vec<u8>>, Hash, Vec<HbsmtProof>) {
+    let snapshot = db.snapshot();
+    let tip = snapshot.get_cf(&db.cf_handle("sysconf").unwrap(), b"temporal_tip").ok().flatten();
+    let mut opts = ReadOptions::default();
+    opts.set_snapshot(&snapshot);
+    let mut iter = db.raw_iterator_cf_opt(&db.cf_handle(cf_name).unwrap(), opts);
     let empties = make_empties();
-    let mut iter = db.raw_iterator_cf(&cf);
     let root = root_db_cf(&mut iter, &empties);
-    let proof = prove_db_cf(&mut iter, &empties, ns, k);
-    (root, proof)
+    let proofs = keys.iter().map(|(ns, k)| prove_db_cf(&mut iter, &empties, ns.as_deref(), k)).collect();
+    (tip, root, proofs)
 }
 
 #[inline]

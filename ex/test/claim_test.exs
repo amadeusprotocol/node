@@ -22,4 +22,11 @@ defmodule ClaimTest do
     assert Claim.mmr_leaf(old) == <<1::256>>
     assert Claim.mmr_leaf(new) == Claim.hash(new)
   end
+
+  test "peak_of finds the mmr peak holding a leaf" do
+    assert MMR.peak_of(7, 0) == {2, 4, 0, 3}
+    assert MMR.peak_of(7, 5) == {1, 2, 4, 5}
+    assert MMR.peak_of(7, 6) == {0, 1, 6, 6}
+    assert MMR.peak_of(7, 7) == nil
+  end
 end

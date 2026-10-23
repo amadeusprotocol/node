@@ -56,6 +56,29 @@ defmodule API.Chain do
         %{error: :ok, entries: entries}
     end
 
+    #the quorum consensus on our claim for a rooted height (default: the rooted tip)
+    def consensus(height \\ nil) do
+        rooted = DB.Chain.rooted_height()
+        height = height || rooted
+        hash = height <= rooted && DB.Entry.by_height_in_main_chain(height)
+        claim = hash && DB.Entry.claim(hash)
+        c = claim && DB.Attestation.consensus(hash, Claim.hash(claim))
+        if c && BLS12AggSig.quorum?(c.aggsig) do
+            %{error: :ok, consensus: %{
+                entry_height: height,
+                entry_hash: Base58.encode(hash),
+                root_contractstate: Base58.encode(claim.root_contractstate),
+                root_receipts: Base58.encode(claim.root_receipts),
+                claim: Base58.encode(Claim.pack(claim)),
+                claim_hash: Base58.encode(Claim.hash(claim)),
+                aggsig: Map.new(Map.take(c.aggsig, [:aggsig, :mask, :mask_active]), fn {k, v} -> {k, Base58.encode(v)} end),
+                score: BLS12AggSig.score(c.aggsig)
+            }}
+        else
+            %{error: :not_found}
+        end
+    end
+
     def consensuses_by_height(height) do
         DB.Attestation.consensuses_by_height(height)
         |> Enum.map(fn(c)->

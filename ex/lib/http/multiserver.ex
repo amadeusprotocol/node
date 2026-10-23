@@ -309,6 +309,11 @@ defmodule Ama.MultiServer do
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/kpi") ->
                 kpi = API.Chain.kpi()
                 quick_reply(state, %{error: :ok, kpi: kpi})
+            r.method == "GET" and r.path == "/api/chain/consensus" ->
+                quick_reply(state, API.cached(:chain_consensus, 1_000, fn -> API.Chain.consensus() end))
+            r.method == "GET" and String.starts_with?(r.path, "/api/chain/consensus/") ->
+                height = String.replace(r.path, "/api/chain/consensus/", "") |> :erlang.binary_to_integer()
+                quick_reply(state, API.Chain.consensus(height))
             r.method == "GET" and String.starts_with?(r.path, "/api/chain/tip") ->
                 result = API.Chain.entry_tip()
                 quick_reply(state, result)
@@ -508,17 +513,19 @@ defmodule Ama.MultiServer do
                 end
 
             r.method == "GET" and String.starts_with?(r.path, "/api/proof/contractstate/") ->
-                key_value = String.replace(r.path, "/api/proof/contractstate/", "")
-                result = case :binary.split(key_value, "/") do
-                  [key] -> API.Proof.contractstate(Base58.decode(key))
-                  [key, value] -> API.Proof.contractstate(Base58.decode(key), Base58.decode(value))
-                end
-                quick_reply(state, result)
+                key = String.replace(r.path, "/api/proof/contractstate/", "")
+                quick_reply(state, API.Proof.contractstate([Base58.decode(key)]))
+            #vecpak %{keys: [key]}: every proof from the same tip
             r.method == "POST" and String.starts_with?(r.path, "/api/proof/contractstate") ->
                 {r, vecpak_bin} = read_body_all_limited(state, r)
-                map = RDB.vecpak_decode(vecpak_bin)
-                result = API.Proof.contractstate(map.key, map[:value])
-                quick_reply(%{state|request: r}, result)
+                keys = RDB.vecpak_decode(vecpak_bin).keys |> Enum.take(100)
+                quick_reply(%{state|request: r}, API.Proof.contractstate(keys))
+            #?at_height=H proves against the MMR the header at H commits (default: the rooted tip)
+            r.method == "GET" and String.starts_with?(r.path, "/api/proof/block/") ->
+                height = String.replace(r.path, "/api/proof/block/", "") |> :erlang.binary_to_integer()
+                query = r.query && Photon.HTTP.parse_query(r.query) || %{}
+                opts = if query[:at_height], do: [at_height: :erlang.binary_to_integer(query.at_height)], else: []
+                quick_reply(state, API.Proof.block(height, opts))
 
             testnet and r.method == "GET" and r.path == "/api/upow/seed" ->
               rate_limited_reply(state, 100, 60_000, fn ->

@@ -58,7 +58,7 @@ defmodule RDB do
   def hbsmt_root(_propslist), do: :erlang.nif_error(:nif_not_loaded)
   def hbsmt_root_prove(_propslist, _ns, _key), do: :erlang.nif_error(:nif_not_loaded)
   def hbsmt_root_verify(_expected_root, _proof, _ns, _key, _value), do: :erlang.nif_error(:nif_not_loaded)
-  def hbsmt_contractstate_root_prove(_db, _ns, _key), do: :erlang.nif_error(:nif_not_loaded)
+  def hbsmt_contractstate_prove(_db, _keys), do: :erlang.nif_error(:nif_not_loaded)
   def hbsmt_seed_contractstate(_db, _proplist), do: :erlang.nif_error(:nif_not_loaded)
 
   def protocol_constants(), do: :erlang.nif_error(:nif_not_loaded)

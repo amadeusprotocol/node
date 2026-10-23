@@ -182,6 +182,9 @@ defmodule MMR do
     end
   end
 
+  #{height, leaves, first_leaf, last_leaf} of the peak holding leaf_idx
+  def peak_of(size, leaf_idx), do: Enum.find(peaks_info(size), fn {_, _, s, e} -> leaf_idx >= s and leaf_idx <= e end)
+
   defp peaks_info(size), do: peaks_info(size, 0, []) |> Enum.reverse()
   defp peaks_info(0, _leaf_idx, acc), do: acc
   defp peaks_info(size, leaf_idx, acc) do

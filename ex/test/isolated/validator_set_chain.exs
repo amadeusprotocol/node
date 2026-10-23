@@ -161,6 +161,40 @@ defmodule ValidatorSetChainTest do
     refute API.Proof.verify_block(%{proof | claim: Base58.encode(<<1::64, rest::binary>>)}, root)
   end
 
+  test "consensus of a rooted block", ctx do
+    [_e0, e1] = apply_chain([0, 1], ctx.keys)
+    claim = DB.Entry.claim(e1.hash)
+    assert claim == Claim.build(1, e1.hash, <<21::256>>, <<11::256>>)
+    assert API.Chain.consensus() == %{error: :not_found}
+    one = aggregate(ctx.set, ctx.keys, [0], Claim.pack(claim), BLS12AggSig.dst_att())
+    :ok = DB.Attestation.set_consensus(Map.put(claim, :aggsig, one))
+    assert API.Chain.consensus() == %{error: :not_found}
+    agg = aggregate(ctx.set, ctx.keys, [0, 3, 4], Claim.pack(claim), BLS12AggSig.dst_att())
+    :ok = DB.Attestation.set_consensus(Map.put(claim, :aggsig, agg))
+    %{error: :ok, consensus: cert} = API.Chain.consensus()
+    assert cert == API.Chain.consensus(1).consensus
+    assert Base58.decode(cert.claim) == Claim.pack(claim)
+    assert cert.entry_height == 1 and cert.score == 0.75
+    assert Base58.decode(cert.aggsig.mask) == agg.mask
+    assert API.Chain.consensus(2) == %{error: :not_found}
+  end
+
+  test "contractstate proofs come from one snapshot with the tip they belong to", ctx do
+    %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+    rows = [{"bic:epoch:diff_bits", "8"}, {"bic:epoch:total_sols", "5"}]
+    RDB.hbsmt_seed_contractstate(db, rows)
+    {tip, root, [p1, p2]} = RDB.hbsmt_contractstate_prove(db, Enum.map(rows, fn {k, _} -> {"bic", k} end))
+    assert tip == ctx.entry.hash
+    for {{k, v}, p} <- Enum.zip(rows, [p1, p2]), do: assert RDB.hbsmt_root_verify(root, p, "bic", k, v) == :included
+    assert RDB.hbsmt_root_verify(root, p1, "bic", "bic:epoch:diff_bits", "9") == :mismatch
+
+    assert API.Proof.contractstate(["bic:epoch:diff_bits"]) == %{error: :state_root_mismatch}
+    RocksDB.put("entry:#{tip}:root_contractstate", root, DB.API.db_handle(%{}, :entry_meta))
+    %{error: :ok, entry_height: 1, root_contractstate: r, proofs: [a, b]} = API.Proof.contractstate(Enum.map(rows, &elem(&1, 0)))
+    assert Base58.decode(r) == root
+    assert a.key == Base58.encode("bic:epoch:diff_bits") and b.namespace == Base58.encode("bic")
+  end
+
   test "the inbox files attestations by their signed height", ctx do
     Application.put_env(:ama, :fabric_inbox_max_bytes, 1_000_000_000)
     :ets.whereis(FabricInbox) == :undefined && FabricInbox.init()

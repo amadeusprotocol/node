@@ -1,4 +1,6 @@
 defmodule API.Proof do
+  @max_proof_peak_leaves 65_536
+
   defp encode_hbsmt_proof(proof) do
     terminus = case proof.terminus do
       :empty -> :empty
@@ -72,26 +74,34 @@ defmodule API.Proof do
           {:ok, state} when height >= state.size ->
             %{error: :out_of_range, height: height, mmr_size: state.size}
           {:ok, state} ->
-            proof = MMR.generate_proof(state, height, &DB.Entry.mmr_leaf/1)
-            claim = if height >= Claim.first_leaf_height(), do: DB.Entry.claim(block_hash)
-            cid = DB.MMR.chain_id()
-            root = MMR.root_chain(cid, state)
-            commitment_hash = DB.Entry.by_height_in_main_chain(state.size)
-
-            %{
-              block_hash:  Base58.encode(block_hash),
-              claim:       claim && Base58.encode(Claim.pack(claim)),
-              height:      height,
-              at_height:   state.size,
-              at_hash:     Base58.encode(commitment_hash),
-              chain_id:    Base58.encode(cid),
-              root_chain:  Base58.encode(root),
-              peak_pos:    proof.peak_pos,
-              siblings:    Enum.map(proof.siblings,    &Base58.encode/1),
-              other_peaks: Enum.map(proof.other_peaks, &Base58.encode/1)
-            }
+            #building a proof reads every leaf of the target's peak
+            {_, peak_leaves, _, _} = MMR.peak_of(state.size, height)
+            if peak_leaves > @max_proof_peak_leaves do %{error: :proof_too_costly, height: height, peak_leaves: peak_leaves} else
+              block_proof(state, block_hash, height)
+            end
         end
     end
+  end
+
+  defp block_proof(state, block_hash, height) do
+    proof = MMR.generate_proof(state, height, &DB.Entry.mmr_leaf/1)
+    claim = if height >= Claim.first_leaf_height(), do: DB.Entry.claim(block_hash)
+    cid = DB.MMR.chain_id()
+    root = MMR.root_chain(cid, state)
+    commitment_hash = DB.Entry.by_height_in_main_chain(state.size)
+
+    %{
+      block_hash:  Base58.encode(block_hash),
+      claim:       claim && Base58.encode(Claim.pack(claim)),
+      height:      height,
+      at_height:   state.size,
+      at_hash:     Base58.encode(commitment_hash),
+      chain_id:    Base58.encode(cid),
+      root_chain:  Base58.encode(root),
+      peak_pos:    proof.peak_pos,
+      siblings:    Enum.map(proof.siblings,    &Base58.encode/1),
+      other_peaks: Enum.map(proof.other_peaks, &Base58.encode/1)
+    }
   end
 
   # Both `:at_hash` and `:at_height` resolve to a height first, then walk the
@@ -186,18 +196,20 @@ defmodule API.Proof do
     end
   end
 
-  def contractstate(key, value \\ nil) do
-    %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
-    namespace = contractstate_namespace(key)
-    proof = RDB.hbsmt_contractstate_root_prove(db, namespace, key)
-    map = %{
-      namespace: Base58.encode(namespace),
-      key: Base58.encode(key),
-      proof: encode_hbsmt_proof(proof)
-    }
-    if !value do map else
-      result = RDB.hbsmt_root_verify(proof.root, proof, namespace, key, value)
-      Map.merge(map, %{value: Base58.encode(value), result: result})
+  def contractstate(keys) do
+    %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+    keys = Enum.map(keys, &{contractstate_namespace(&1), &1})
+    {tip, root, proofs} = RDB.hbsmt_contractstate_prove(db, keys)
+    if root != DB.Entry.root_contractstate(tip) do %{error: :state_root_mismatch} else
+      %{
+        error: :ok,
+        entry_height: DB.Entry.height(tip),
+        entry_hash: Base58.encode(tip),
+        root_contractstate: Base58.encode(root),
+        proofs: Enum.zip_with(keys, proofs, fn {namespace, key}, proof ->
+          %{namespace: namespace && Base58.encode(namespace), key: Base58.encode(key), proof: encode_hbsmt_proof(proof)}
+        end)
+      }
     end
   end
 end

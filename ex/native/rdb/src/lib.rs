@@ -1045,15 +1045,14 @@ fn hbsmt_seed_contractstate<'a>(env: Env<'a>, db: ResourceArc<DbResource>, propl
     atoms::ok().encode(env)
 }
 
-//rocksdb proof over the consensus contractstate HBSMT
+//contractstate HBSMT proofs for [{ns, key}] plus the temporal tip they belong to, one snapshot
 #[rustler::nif(schedule = "DirtyIo")]
-fn hbsmt_contractstate_root_prove<'a>(env: Env<'a>, db: ResourceArc<DbResource>, ns: Option<Binary<'a>>, key: Binary<'a>) -> Term<'a> {
-    let ns_vec: Option<Vec<u8>> = ns.map(|b| b.to_vec());
-    // Root + proof read through ONE pinned iterator → consistent point-in-time view.
-    let (root, proof) = crate::consensus::hbsmt_rdb::hbsmt_prove_and_root_db(
-        &db.db, "contractstate_tree_hbsmt", ns_vec.as_deref(), key.as_slice());
-
-    encode_hbsmt_proof(env, &root, &proof).encode(env)
+fn hbsmt_contractstate_prove<'a>(env: Env<'a>, db: ResourceArc<DbResource>, keys: Vec<(Option<Binary<'a>>, Binary<'a>)>) -> Term<'a> {
+    let keys: Vec<(Option<Vec<u8>>, Vec<u8>)> = keys.iter().map(|(ns, k)| (ns.map(|b| b.to_vec()), k.to_vec())).collect();
+    let (tip, root, proofs) = crate::consensus::hbsmt_rdb::hbsmt_prove_many_at_tip(&db.db, "contractstate_tree_hbsmt", &keys);
+    let tip = match tip { Some(t) => to_binary2(env, &t).encode(env), None => rustler::types::atom::nil().encode(env) };
+    let proofs: Vec<Term> = proofs.iter().map(|p| encode_hbsmt_proof(env, &root, p)).collect();
+    (tip, to_binary2(env, &root), proofs).encode(env)
 }
 
 fn term_to_fixed_array(term: Term) -> Result<[u8; 32], Error> {
