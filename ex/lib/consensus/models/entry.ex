@@ -52,7 +52,7 @@ defmodule Entry do
     """
 
     @fields [:header, :hash, :signature, :txs, :mask, :mask_active]
-    #keep :root_validator even after the claim fork: pre-fork headers hash with it
+    #:root_validator stays: pre-fork headers hash with it
     @fields_header [:height, :prev_hash, :slot, :prev_slot, :signer, :dr, :vr, :root_tx, :root_validator, :root_chain]
 
     #size = sum of packed tx bytes, the same measure TXPool packs against
@@ -107,8 +107,6 @@ defmodule Entry do
         header = entry.header
         validators = DB.Chain.validators_for_height(header.height) || []
         if header.signer not in validators, do: throw(%{error: :signer_not_in_validator_set})
-        if !Claim.fork?(header.height) and header.root_validator != root_validator(validators, DB.Chain.validators_last_change_height(header.height)),
-          do: throw(%{error: :root_validator_invalid})
         if entry[:mask] do
           %{error: error} = validate_signature(entry)
           if error != :ok, do: throw(%{error: error})
@@ -155,12 +153,7 @@ defmodule Entry do
         if byte_size(eh.root_tx) != 32, do: throw(%{error: :root_tx_not_256_bits})
         if eh.root_tx != root_tx(tx_hashes), do: throw(%{error: :root_tx_invalid})
 
-        cond do
-          Claim.fork?(eh.height) -> Map.has_key?(eh, :root_validator) && throw(%{error: :root_validator_after_fork})
-          !is_binary(eh[:root_validator]) -> throw(%{error: :root_validator_not_binary})
-          byte_size(eh.root_validator) != 32 -> throw(%{error: :root_validator_not_256_bits})
-          true -> :ok
-        end
+        if Map.has_key?(eh, :root_validator), do: throw(%{error: :root_validator_removed})
 
         if Enum.any?(e.txs, &(is_map(&1[:tx]) and is_map(&1.tx[:action]) and !TX.fits_budget?(&1))),
           do: throw(%{error: :tx_exceeds_budget})
@@ -289,9 +282,6 @@ defmodule Entry do
             root_tx: root_tx(Enum.map(txus, & &1.hash)),
             root_chain: MMR.root_chain(DB.MMR.chain_id(), mmr)
         }
-        header = if Claim.fork?(next_height) do header else
-          Map.put(header, :root_validator, root_validator(DB.Chain.validators_for_height(next_height), DB.Chain.validators_last_change_height(next_height)))
-        end
 
         %{header: header, txs: txus}
     end
@@ -327,17 +317,6 @@ defmodule Entry do
         [{nil, hash, "#{index}"}]
       end)
       by_index_hash ++ [{nil, "count", "#{length(hashes)}"}]
-    end
-
-    def root_validator(validator_pks, last_change_height) do
-      merkle_root(root_validator_build(validator_pks, last_change_height))
-    end
-    def root_validator_build(validator_pks, last_change_height) do
-      by_index_hash = Enum.flat_map(Enum.with_index(validator_pks), fn{hash, index}->
-        [{nil, hash, "#{index}"}]
-      end)
-      kvs = by_index_hash ++ [{nil, "count", "#{length(validator_pks)}"}]
-      kvs ++ [{nil, "hash", :crypto.hash(:sha256, Enum.join(validator_pks))}, {nil, "last_change_height", "#{last_change_height}"}]
     end
 
     def root_block() do

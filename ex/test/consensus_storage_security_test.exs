@@ -25,17 +25,14 @@ defmodule ConsensusStorageSecurityTest do
 
       consensus = fn index, signers ->
         mask = Enum.reduce(signers, <<0::size(validator_count)>>, &Util.set_bit(&2, &1))
-        %{
-          entry_hash: entry_hash,
-          mutations_hash: :crypto.hash(:sha256, <<index::64>>),
-          aggsig: Map.merge(BLS12AggSig.new_padded(set), %{
+        Claim.build(Entry.height(entry), entry_hash, :crypto.hash(:sha256, <<index::64>>), <<0::256>>)
+        |> Map.put(:aggsig, Map.merge(BLS12AggSig.new_padded(set), %{
             mask: Util.pad_bitstring_to_bytes(mask),
             aggsig: :binary.copy(<<0>>, 96)
-          })
-        }
+          }))
       end
 
-      #validator 0 fills its own quota with junk mutations_hashes
+      #validator 0 fills its own quota with junk claims
       Enum.each(1..3, fn index ->
         assert :ok = DB.Attestation.set_consensus(consensus.(index, [v0]), db_opts)
       end)

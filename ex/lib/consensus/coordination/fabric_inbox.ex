@@ -18,9 +18,8 @@ defmodule FabricInbox do
   #  (entry hash covers the header only: an unchecked forged copy must not
   #  claim the key of the real one)
   #  unused fields are nil: every key is a 5-tuple, tuples order by size first
-  #  a claim carries its height; a legacy one has none: catchup gives the trie
-  #  height, gossip the one of its entry at tip+1 here or in RocksDB (else
-  #  dropped; catchup refetches). they are retried until they apply
+  #  attestations/consensuses are filed by the height in their signed claim
+  #  and retried until they apply
   #vouched: entry signer is in the validator set as we know it at arrival. only
   #a hint for the sync loops (a junk entry must not hide a height we lack)
   #
@@ -86,12 +85,11 @@ defmodule FabricInbox do
     end
   end
 
-  def insert_attestation(attestation, height \\ nil) do
+  def insert_attestation(attestation) do
     try do
-      height = Claim.take(attestation)[:entry_height] || height || entry_height(attestation.entry_hash)
+      height = attestation.entry_height
       key = {height, @attestation, attestation.entry_hash, Claim.hash(attestation), attestation.signer}
       cond do
-        !is_integer(height) -> {:error, :entry_unknown}
         height <= chain_rooted_height() -> {:error, :below_rooted}
         :ets.member(FabricInbox, key) -> :exists
         true ->
@@ -106,16 +104,15 @@ defmodule FabricInbox do
     end
   end
 
-  def insert_consensus(consensus, height \\ nil) do
+  def insert_consensus(consensus) do
     try do
       aggsig = Map.take(consensus.aggsig, [:mask, :mask_active, :aggsig])
       consensus = Map.put(Claim.take(consensus), :aggsig, aggsig)
       %{mask: mask, aggsig: signature} = aggsig
-      height = consensus[:entry_height] || height || entry_height(consensus.entry_hash)
+      height = consensus.entry_height
       cond do
-        !is_integer(height) -> {:error, :entry_unknown}
-        height <= chain_rooted_height() -> {:error, :below_rooted}
         !Claim.valid?(consensus) -> {:error, :invalid_claim}
+        height <= chain_rooted_height() -> {:error, :below_rooted}
         !is_binary(signature) or byte_size(signature) != 96 -> {:error, :aggsig_not_96_bytes}
         !is_binary(mask) or BLS12AggSig.signer_count(aggsig) == 0 -> {:error, :invalid_mask}
         true ->
@@ -133,13 +130,6 @@ defmodule FabricInbox do
 
   defp vouched?(entry) do
     entry.header.signer in (DB.Chain.validators_for_height(entry.header.height) || [])
-  end
-
-  #gossip outruns our drain: its entry is often still waiting here at tip+1
-  defp entry_height(entry_hash) do
-    next_height = DB.Chain.height() + 1
-    if :ets.select_count(FabricInbox, [{{{next_height, @entry, entry_hash, :_, :_}, :_}, [], [true]}]) > 0,
-      do: next_height, else: DB.Entry.height(entry_hash)
   end
 
   #insert, then evict from the top until under the cap (maybe the row itself).

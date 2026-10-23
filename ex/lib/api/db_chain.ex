@@ -118,12 +118,6 @@ defmodule DB.Chain do
     |> ValidatorSet.normalize()
   end
 
-  def validators_last_change_height(height, db_opts \\ %{}) do
-    opts = db_handle(db_opts, :contractstate, %{})
-    {key, _value} = RocksDB.get_prev_or_first("bic:epoch:validators:height:", pad_integer(height), opts)
-    :erlang.binary_to_integer(key)
-  end
-
   def validators_for_hash(hash, db_opts \\ %{}) do
     entry = DB.Entry.by_hash(hash)
     if entry do validators_for_height(entry.header.height, db_opts) end

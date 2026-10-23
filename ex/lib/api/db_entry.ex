@@ -48,14 +48,10 @@ defmodule DB.Entry do
     RocksDB.get("entry:#{hash}:seentime", db_handle(db_opts, :entry_meta, %{to_integer: true}))
   end
 
-  def muts_hash(hash, db_opts \\ %{}) do
-    RocksDB.get("entry:#{hash}:muts_hash", db_handle(db_opts, :entry_meta, %{}))
-  end
-
   #nil until the entry is applied
   def claim(hash, db_opts \\ %{}) do
     height = height(hash, db_opts)
-    claim = height && Claim.build(height, hash, muts_hash(hash, db_opts), root_contractstate(hash, db_opts), root_receipts(hash, db_opts))
+    claim = height && Claim.build(height, hash, root_contractstate(hash, db_opts), root_receipts(hash, db_opts))
     if claim && Enum.all?(Map.values(claim)), do: claim
   end
 
@@ -64,10 +60,10 @@ defmodule DB.Entry do
     claim && Claim.hash(claim)
   end
 
-  #pre-fork leaves are entry hashes: old history may lack the meta a claim needs
+  #old history lacks the meta a claim needs: its leaves are entry hashes
   def mmr_leaf(height, db_opts \\ %{}) do
     hash = by_height_in_main_chain(height, db_opts)
-    if hash && Claim.fork?(height), do: claim_hash(hash, db_opts), else: hash
+    if hash && height >= Claim.first_leaf_height(), do: claim_hash(hash, db_opts), else: hash
   end
 
   def prev(hash, db_opts \\ %{}) do
@@ -118,12 +114,12 @@ defmodule DB.Entry do
     db_opts[:rtx_commit] && RocksDB.transaction_commit(db_opts.rtx)
   end
 
-  def apply_into_main_chain(entry, muts_hash, muts_rev, receipts, root_receipts, root_contractstate, db_opts = %{rtx: _}) do
+  def apply_into_main_chain(entry, muts_rev, receipts, root_receipts, root_contractstate, db_opts = %{rtx: _}) do
     prev_mmr = DB.MMR.load_or_empty(db_opts)
     if prev_mmr.size != entry.header.height do
       raise "apply_into_main_chain: MMR size #{prev_mmr.size} != entry height #{entry.header.height}; entry is not the next block above the root, refusing to append"
     end
-    claim = Claim.build(entry.header.height, entry.hash, muts_hash, root_contractstate, root_receipts)
+    claim = Claim.build(entry.header.height, entry.hash, root_contractstate, root_receipts)
     DB.MMR.snapshot_before(entry.hash, prev_mmr, db_opts)
     new_mmr = MMR.append(prev_mmr, Claim.mmr_leaf(claim))
     DB.MMR.save(new_mmr, db_opts)
@@ -138,7 +134,6 @@ defmodule DB.Entry do
     RocksDB.put("entry:#{entry.hash}:prev", entry.header.prev_hash, db_handle(db_opts, :entry_meta, %{}))
     RocksDB.put("entry:#{entry.header.prev_hash}:next", entry.hash, db_handle(db_opts, :entry_meta, %{}))
     RocksDB.put("entry:#{entry.hash}:in_chain", "", db_handle(db_opts, :entry_meta, %{}))
-    muts_hash && RocksDB.put("entry:#{entry.hash}:muts_hash", muts_hash, db_handle(db_opts, :entry_meta, %{}))
     RocksDB.put("entry:#{entry.hash}:muts_rev", RDB.vecpak_encode(muts_rev), db_handle(db_opts, :entry_meta, %{}))
     RocksDB.put("entry:#{entry.hash}:root_receipts", root_receipts, db_handle(db_opts, :entry_meta, %{}))
     RocksDB.put("entry:#{entry.hash}:root_contractstate", root_contractstate, db_handle(db_opts, :entry_meta, %{}))

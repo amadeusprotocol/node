@@ -8,24 +8,6 @@ defmodule EntryGenesis do
          246, 6, 151, 128, 196, 116, 93, 20, 204, 153, 217, 81, 205, 1, 133, 65, 204,
          177, 138, 74, 8, 104, 109, 214, 59, 245, 51, 47, 218, 15, 207, 190, 73, 40,
          128, 108, 147, 250, 88, 241, 61, 129, 47, 189, 173, 118, 76>>
-    @attestation %{
-       signature: <<151, 160, 206, 230, 190, 143, 68, 181, 248, 53, 105, 176, 56,
-         44, 82, 68, 252, 20, 61, 83, 33, 137, 74, 216, 149, 11, 242, 157, 237, 53,
-         139, 120, 202, 52, 30, 65, 9, 155, 243, 52, 53, 41, 236, 86, 235, 128, 52,
-         74, 12, 80, 187, 82, 174, 138, 121, 69, 159, 251, 97, 201, 238, 119, 163,
-         203, 122, 207, 179, 5, 178, 32, 145, 32, 183, 62, 184, 189, 136, 134, 80,
-         7, 193, 218, 133, 171, 154, 215, 219, 77, 33, 161, 152, 129, 142, 35, 9,
-         183>>,
-       mutations_hash: <<72, 67, 216, 106, 224, 102, 200, 77, 84, 86, 71, 38, 221,
-         89, 178, 87, 170, 13, 141, 117, 29, 103, 251, 177, 92, 143, 88, 218, 21,
-         177, 139, 196>>,
-       signer: <<140, 27, 75, 245, 48, 112, 140, 244, 78, 114, 11, 45, 8, 201, 199,
-         184, 71, 69, 96, 112, 52, 204, 31, 56, 143, 115, 222, 87, 7, 185, 3, 168,
-         252, 90, 91, 114, 16, 244, 47, 228, 198, 82, 12, 130, 10, 126, 118, 193>>,
-       entry_hash: <<250, 154, 199, 170, 114, 250, 155, 84, 2, 215, 37, 236, 138,
-         98, 19, 87, 19, 163, 21, 138, 131, 205, 205, 189, 176, 217, 5, 112, 225,
-         13, 15, 217>>
-     }
     @genesis_entry %{
        header: <<131, 116, 0, 0, 0, 8, 119, 2, 100, 114, 109, 0, 0, 0, 32, 85, 13,
          37, 23, 114, 150, 131, 140, 136, 174, 76, 72, 122, 45, 180, 165, 94, 229,
@@ -90,10 +72,6 @@ defmodule EntryGenesis do
         @pop
     end
 
-    def attestation() do
-        @attestation
-    end
-
     def get() do
         @genesis_entry
     end
@@ -126,10 +104,7 @@ defmodule EntryGenesis do
 
         %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
         rtx = RocksDB.transaction(db)
-        #{mutations, _} = BIC.Base.call_exit(%{entry: entry})
-        mutations = []
-        mutations_hash = RDB.vecpak_encode(mutations) |> Blake3.hash()
-        attestation = Attestation.sign(sk, %{entry_hash: entry_signed.hash, mutations_hash: mutations_hash})
+        attestation = Attestation.sign(sk, Claim.build(0, entry_signed.hash, <<0::256>>, <<0::256>>))
 
         pop = BlsEx.sign!(sk, pk, BLS12AggSig.dst_pop())
 
@@ -174,10 +149,8 @@ defmodule EntryGenesis do
 
         rtx = RocksDB.transaction(db)
 
-        mutations_hash = RDB.vecpak_encode([]) |> Blake3.hash()
-
         DB.Entry.insert(entry_signed, %{rtx: rtx})
-        DB.Entry.apply_into_main_chain(entry_signed, mutations_hash, [], [], <<0::256>>, <<0::256>>, %{rtx: rtx})
+        DB.Entry.apply_into_main_chain(entry_signed, [], [], <<0::256>>, <<0::256>>, %{rtx: rtx})
         RocksDB.put("temporal_tip", entry_signed.hash, %{rtx: rtx, cf: cf.sysconf})
         RocksDB.put("rooted_tip", entry_signed.hash, %{rtx: rtx, cf: cf.sysconf})
 

@@ -480,12 +480,11 @@ defmodule FabricSnapshot do
       entry = Entry.unpack_from_db(entry_packed)
       height = entry.header.height
       if height != signed_height, do: raise "bundle anchor height #{height} != signed height #{signed_height}"
-      if !payload[:muts_hash] and !Claim.fork?(height), do: raise "bundle missing muts_hash below the claim fork"
 
       verify_rooted_entry!(entry, rtx)
 
       DB.Entry.insert(entry, %{rtx: rtx})
-      DB.Entry.apply_into_main_chain(entry, payload[:muts_hash], muts_rev, receipts,
+      DB.Entry.apply_into_main_chain(entry, muts_rev, receipts,
                                      root_receipts, root_cs, %{rtx: rtx})
 
       RDB.transaction_put_cf(rtx, cf.sysconf, "pruned_below_height", Integer.to_string(height))
@@ -534,10 +533,8 @@ defmodule FabricSnapshot do
     defp build_apply_payload(rtx, cf, rooted_hash) do
       meta = %{rtx: rtx, cf: cf.entry_meta}
       with entry_packed when is_binary(entry_packed) <-
-             RocksDB.get(rooted_hash, %{rtx: rtx, cf: cf.entry}),
-           entry = Entry.unpack_from_db(entry_packed),
-           muts_hash = RocksDB.get("entry:#{rooted_hash}:muts_hash", meta),
-           true <- is_binary(muts_hash) or Claim.fork?(entry.header.height) do
+             RocksDB.get(rooted_hash, %{rtx: rtx, cf: cf.entry}) do
+        entry = Entry.unpack_from_db(entry_packed)
         muts_rev_packed = RocksDB.get("entry:#{rooted_hash}:muts_rev", meta)
         muts_rev = if is_binary(muts_rev_packed), do: RDB.vecpak_decode(muts_rev_packed), else: []
         root_receipts = RocksDB.get("entry:#{rooted_hash}:root_receipts", meta) || ""
@@ -555,14 +552,13 @@ defmodule FabricSnapshot do
           end)
           |> Enum.reject(&is_nil/1)
 
-        payload = %{
+        {:ok, %{
           entry: entry_packed,
           muts_rev: muts_rev,
           receipts: receipts,
           root_receipts: root_receipts,
           root_contractstate: root_cs
-        }
-        {:ok, if(muts_hash, do: Map.put(payload, :muts_hash, muts_hash), else: payload)}
+        }}
       else
         _ -> :error
       end

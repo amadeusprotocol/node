@@ -73,7 +73,7 @@ defmodule API.Proof do
             %{error: :out_of_range, height: height, mmr_size: state.size}
           {:ok, state} ->
             proof = MMR.generate_proof(state, height, &DB.Entry.mmr_leaf/1)
-            claim = if Claim.fork?(height), do: DB.Entry.claim(block_hash)
+            claim = if height >= Claim.first_leaf_height(), do: DB.Entry.claim(block_hash)
             cid = DB.MMR.chain_id()
             root = MMR.root_chain(cid, state)
             commitment_hash = DB.Entry.by_height_in_main_chain(state.size)
@@ -162,8 +162,8 @@ defmodule API.Proof do
         true ->
           cid         = DB.MMR.chain_id()
           block_hash  = Base58.decode(proof_map.block_hash)
-          #from the fork on the leaf is the block's claim, below it the block hash
-          leaf = case {Claim.fork?(proof_map.height), proof_map[:claim] && Base58.decode(proof_map.claim)} do
+          #from the claim fork on the leaf is the block's claim, below it the block hash
+          leaf = case {proof_map.height >= Claim.first_leaf_height(), proof_map[:claim] && Base58.decode(proof_map.claim)} do
             {true, <<claim_height::64, ^block_hash::binary-32, _::binary-64>> = claim} when claim_height == proof_map.height -> :crypto.hash(:sha256, claim)
             {false, nil} -> block_hash
           end

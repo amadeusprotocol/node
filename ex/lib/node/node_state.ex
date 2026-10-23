@@ -158,8 +158,8 @@ defmodule NodeState do
     Enum.take(term.tries, 200)
     |> Enum.each(fn(trie)->
       Enum.each(Enum.take(trie[:entries]||[], 20), & FabricInbox.insert_entry(&1, istate.peer.pk))
-      Enum.each(Enum.take(trie[:attestations]||[], 100), & FabricInbox.insert_attestation(&1, trie[:height]))
-      Enum.each(Enum.take(trie[:consensuses]||[], 100), & FabricInbox.insert_consensus(&1, trie[:height]))
+      Enum.each(Enum.take(trie[:attestations]||[], 100), & FabricInbox.insert_attestation/1)
+      Enum.each(Enum.take(trie[:consensuses]||[], 100), & FabricInbox.insert_consensus/1)
     end)
   end
 

@@ -1,9 +1,8 @@
 use crate::consensus::bic::coin;
 use crate::consensus::consensus_kv;
 
-//claim fork: epoch 881
-pub const FORKHEIGHT: u64 = 881 * 100_000;
-pub const FORKHEIGHT_TESTNET: u64 = 41 * 100_000;
+pub const FORKHEIGHT: u64 = 0;
+pub const FORKHEIGHT_TESTNET: u64 = 0;
 
 pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
     if env.testnet {

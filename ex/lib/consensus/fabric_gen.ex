@@ -262,7 +262,6 @@ defmodule FabricGen do
         next_entry.hash in softfork_deny_hash -> false
         #arrival-time checks used whatever validator set we had then; a slash in
         #the parent can change it, so re-check against the state we apply on
-        !root_validator_ok?(next_entry) -> false
         Entry.validate_next(cur_entry, next_entry) != %{error: :ok} -> false
         true -> true
       end
@@ -350,12 +349,6 @@ defmodule FabricGen do
     end
   end
 
-  defp root_validator_ok?(entry) do
-    height = Entry.height(entry)
-    Claim.fork?(height) or entry.header.root_validator ==
-      Entry.root_validator(DB.Chain.validators_for_height(height), DB.Chain.validators_last_change_height(height))
-  end
-
   def proc_if_my_slot() do
     entry = DB.Chain.tip_entry()
     next_slot = entry.header.slot + 1
@@ -372,7 +365,6 @@ defmodule FabricGen do
       cond do
         #a stored fork at this height (other parent) must not inhibit production
         e.header.prev_hash != entry.hash -> false
-        !root_validator_ok?(e) -> false
         e.header.signer == next_validator -> true
         !!e[:mask] -> BLS12AggSig.quorum?(e, set_next)
         true -> false
@@ -524,12 +516,11 @@ defmodule FabricGen do
       #m_rev = m_rev ++ m_exit_rev
 
       height = Entry.height(next_entry)
-      mutations_hash = if !Claim.fork?(height), do: RDB.vecpak_encode(receipts ++ m) |> Blake3.hash()
-      claim = Claim.build(height, next_entry.hash, mutations_hash, root_contractstate, root_receipts)
+      claim = Claim.build(height, next_entry.hash, root_contractstate, root_receipts)
 
       RocksDB.put("temporal_tip", next_entry.hash, %{rtx: rtx, cf: cf.sysconf})
 
-      DB.Entry.apply_into_main_chain(next_entry, mutations_hash, m_rev, receipts, root_receipts, root_contractstate, %{rtx: rtx})
+      DB.Entry.apply_into_main_chain(next_entry, m_rev, receipts, root_receipts, root_contractstate, %{rtx: rtx})
       if Application.fetch_env!(:ama, :archival_node) do
           DB.Entry.apply_into_main_chain_muts(next_entry.hash, m, %{rtx: rtx})
       end
