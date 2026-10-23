@@ -6,6 +6,7 @@ pub mod hbsmt;
 pub mod hbsmt_common;
 pub mod hbsmt_rdb;
 pub mod bls12_381;
+pub mod bridge;
 
 pub mod consensus_apply;
 pub mod consensus_kv;

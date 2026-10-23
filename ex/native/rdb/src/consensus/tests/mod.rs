@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+pub mod bsc;
+pub mod bsc_vectors;
 pub mod chain_harness;
 pub mod lockup_vault;
 pub mod nft;
