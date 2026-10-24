@@ -520,6 +520,20 @@ defmodule Ama.MultiServer do
                 {r, vecpak_bin} = read_body_all_limited(state, r)
                 keys = RDB.vecpak_decode(vecpak_bin).keys |> Enum.take(100)
                 quick_reply(%{state|request: r}, API.Proof.contractstate(keys))
+            r.method == "GET" and String.starts_with?(r.path, "/api/bridge/") ->
+                result = case String.split(String.replace(r.path, "/api/bridge/", ""), "/") do
+                  ["nonce"] -> API.Bridge.nonce()
+                  ["order", n] -> API.Bridge.order(:erlang.binary_to_integer(n))
+                  ["received", chain, n] -> API.Bridge.received(chain, :erlang.binary_to_integer(n))
+                  ["validator_set", h] -> API.Bridge.validator_set(:erlang.binary_to_integer(h))
+                  ["remote_root", chain, h] -> API.Bridge.remote_root(chain, :erlang.binary_to_integer(h))
+                  ["remote_set", chain] -> API.Bridge.remote_set(chain)
+                  _ -> %{error: :not_found}
+                end
+                quick_reply(state, result)
+            r.method == "GET" and String.starts_with?(r.path, "/api/proof/validator_record/") ->
+                height = String.replace(r.path, "/api/proof/validator_record/", "") |> :erlang.binary_to_integer()
+                quick_reply(state, API.Proof.validator_record(height))
             #?at_height=H proves against the MMR the header at H commits (default: the rooted tip)
             r.method == "GET" and String.starts_with?(r.path, "/api/proof/block/") ->
                 height = String.replace(r.path, "/api/proof/block/", "") |> :erlang.binary_to_integer()

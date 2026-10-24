@@ -2,3 +2,7 @@ _build/
 deps/
 priv/index.html
 native/rdb/target/
+/amadeusd
+/amadeusd.sig
+/amadeusd_bridge_testnet
+priv/native/

@@ -550,6 +550,7 @@ defmodule FabricGen do
       end
 
       :ok = RocksDB.transaction_commit(rtx)
+      DB.Entry.store_validator_record_proof(next_entry)
 
       %{error: :ok, claim_hash: Claim.hash(claim), muts: m, receipts: receipts}
   end

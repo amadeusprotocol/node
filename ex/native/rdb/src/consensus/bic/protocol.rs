@@ -4,6 +4,13 @@ use crate::consensus::consensus_kv;
 pub const FORKHEIGHT: u64 = 0;
 pub const FORKHEIGHT_TESTNET: u64 = 0;
 
+pub const BRIDGE_FORKHEIGHT: u64 = u64::MAX;
+pub const BRIDGE_FORKHEIGHT_TESTNET: u64 = 0;
+
+pub fn bridge_forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
+    if env.testnet { BRIDGE_FORKHEIGHT_TESTNET } else { BRIDGE_FORKHEIGHT }
+}
+
 pub fn forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
     if env.testnet {
         FORKHEIGHT_TESTNET

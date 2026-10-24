@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod coin;
 pub mod coin_symbol_reserved;
 pub mod contract;

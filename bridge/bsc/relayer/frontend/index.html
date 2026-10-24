@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Amadeus ⇄ BSC bridge</title>
+<style>
+  body { font: 15px/1.45 system-ui, sans-serif; max-width: 760px; margin: 32px auto; padding: 0 16px; color: #1b1b1f; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; margin-top: 28px; }
+  section { border: 1px solid #ddd; border-radius: 10px; padding: 14px 16px; margin: 14px 0; }
+  label { display: block; margin: 8px 0 2px; font-size: 13px; color: #555; }
+  label.check { display: flex; gap: 8px; align-items: center; color: #1b1b1f; }
+  input:not([type=checkbox]) { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font: inherit; }
+  button { margin-top: 10px; padding: 8px 14px; border: 0; border-radius: 6px; background: #2b59c3; color: white; font: inherit; cursor: pointer; }
+  button.small { margin: 0; padding: 3px 9px; font-size: 13px; }
+  button:disabled { background: #999; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .muted { color: #666; font-size: 13px; } code { font-size: 12px; word-break: break-all; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; } td, th { padding: 4px 6px; border-bottom: 1px solid #eee; text-align: left; }
+  #log { white-space: pre-wrap; font: 12px ui-monospace, monospace; color: #444; }
+</style>
+<!-- filled in by the worker for this network (worker/index.js) -->
+<script id="config" type="application/json">{}</script>
+</head>
+<body>
+<h1>Amadeus ⇄ BSC bridge <span class="muted" id="network"></span></h1>
+<p class="muted">Trustless: BSC verifies Amadeus consensus, Amadeus verifies BSC finality. Fee 0.1 bp (burned, Amadeus side only).
+Claim yourself, or pay a small tip and a relay delivers it (and funds gas on arrival).</p>
+
+<section>
+  <div class="row">
+    <button id="connect-bsc">Connect MetaMask</button> <span id="bsc-account" class="muted">not connected</span>
+  </div>
+  <div class="row">
+    <button id="connect-ama">Connect Amadeus wallet</button> <span id="ama-account" class="muted">not connected</span>
+  </div>
+  <p class="muted">AMA: <b id="ama-balance">–</b> · wAMA on BSC: <b id="wama-balance">–</b> · <span class="gas"></span>: <b id="bnb-balance">–</b></p>
+  <p class="muted" id="relay-status"></p>
+</section>
+
+<section>
+  <h2>AMA → BSC (receive wAMA)</h2>
+  <label>Amount (AMA)</label><input id="out-amount" placeholder="10">
+  <label>BSC recipient</label><input id="out-recipient" placeholder="0x… (defaults to your MetaMask address)">
+  <label class="check"><input type="checkbox" id="out-relay"> <span id="out-relay-text"></span></label>
+  <p class="muted">Unticked: claim it below with MetaMask (~750k gas) once Amadeus finalizes it.</p>
+  <button id="send-out" disabled>Send with Amadeus wallet</button>
+</section>
+
+<section>
+  <h2>BSC → AMA (burn wAMA)</h2>
+  <label>Amount (wAMA)</label><input id="in-amount" placeholder="10">
+  <label>Amadeus recipient</label><input id="in-recipient" placeholder="Base58 address (defaults to your Amadeus wallet)">
+  <p class="muted" id="in-relay-text"></p>
+  <button id="send-in" disabled>Send with MetaMask</button>
+</section>
+
+<section>
+  <h2>Recent orders</h2>
+  <table><thead><tr><th>From</th><th>Nonce</th><th>Amount</th><th>To</th><th>Delivery</th><th>Status</th></tr></thead><tbody id="orders"></tbody></table>
+</section>
+
+<div id="log"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

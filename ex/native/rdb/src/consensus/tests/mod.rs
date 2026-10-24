@@ -1,6 +1,9 @@
 #![cfg(test)]
 
+pub mod bridge;
+pub mod bridge_vectors_gen;
 pub mod bsc;
+pub mod bsc_testnet_vectors;
 pub mod bsc_vectors;
 pub mod chain_harness;
 pub mod lockup_vault;

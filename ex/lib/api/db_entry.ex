@@ -161,6 +161,23 @@ defmodule DB.Entry do
     end)
   end
 
+  #a block that writes the validator record for height+1 keeps that record's proof against
+  #its own state root (the tree is not kept per height): bridges adopt new sets from it.
+  #call after the block is committed, so the tip tree is exactly this block's state
+  def store_validator_record_proof(entry) do
+    key = "bic:epoch:validators:height:#{pad_integer(entry.header.height + 1)}"
+    if RocksDB.get(key, db_handle(%{}, :contractstate, %{})) do
+      %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+      {tip, _root, [proof]} = RDB.hbsmt_contractstate_prove(db, [{"bic", key}])
+      tip == entry.hash && RocksDB.put("entry:#{entry.hash}:validator_record_proof", RDB.vecpak_encode(proof), db_handle(%{}, :entry_meta, %{}))
+    end
+  end
+
+  def validator_record_proof(hash, db_opts \\ %{}) do
+    proof = RocksDB.get("entry:#{hash}:validator_record_proof", db_handle(db_opts, :entry_meta, %{}))
+    proof && RDB.vecpak_decode(proof)
+  end
+
   def apply_into_main_chain_muts(hash, muts, db_opts = %{rtx: _}) do
     RocksDB.put("entry:#{hash}:muts", RDB.vecpak_encode(muts), db_handle(db_opts, :entry_meta, %{}))
   end
@@ -195,6 +212,7 @@ defmodule DB.Entry do
     RocksDB.delete("entry:#{hash}:root_receipts", db_handle(db_opts, :entry_meta, %{}))
     RocksDB.delete("entry:#{hash}:root_contractstate", db_handle(db_opts, :entry_meta, %{}))
     RocksDB.delete("entry:#{hash}:mmr_peaks_before", db_handle(db_opts, :entry_meta, %{}))
+    RocksDB.delete("entry:#{hash}:validator_record_proof", db_handle(db_opts, :entry_meta, %{}))
     RocksDB.delete_prefix("consensus:#{hash}:", db_handle(db_opts, :attestation, %{}))
     RocksDB.delete_prefix("attestation:#{height_padded}:#{hash}:", db_handle(db_opts, :attestation, %{}))
 

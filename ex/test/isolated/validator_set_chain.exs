@@ -195,6 +195,25 @@ defmodule ValidatorSetChainTest do
     assert a.key == Base58.encode("bic:epoch:diff_bits") and b.namespace == Base58.encode("bic")
   end
 
+  test "a block writing a validator record keeps its proof for bridges", ctx do
+    %{db: db} = :persistent_term.get({:rocksdb, Fabric})
+    key = "bic:epoch:validators:height:000000000002"
+    record = RDB.vecpak_encode(%{ctx.set | mask_active: <<0b10011000>>})
+    put_set(2, %{ctx.set | mask_active: <<0b10011000>>})
+    RDB.hbsmt_seed_contractstate(db, [{key, record}, {"bic:epoch:diff_bits", "8"}])
+    RocksDB.put("by_height_in_main_chain:000000000001", ctx.entry.hash, DB.API.db_handle(%{}, :entry_meta))
+    assert API.Proof.validator_record(2) == %{error: :not_found}
+
+    DB.Entry.store_validator_record_proof(ctx.entry)
+    {_tip, root, _} = RDB.hbsmt_contractstate_prove(db, [{"bic", key}])
+    assert RDB.hbsmt_root_verify(root, DB.Entry.validator_record_proof(ctx.entry.hash), "bic", key, record) == :included
+    %{error: :ok, entry_height: 1, value: value, proof: proof} = API.Proof.validator_record(2)
+    assert Base58.decode(value) == record and Base58.decode(proof.root) == root
+    #a block that wrote no record keeps nothing
+    DB.Entry.store_validator_record_proof(%{ctx.entry | header: %{ctx.entry.header | height: 5}})
+    assert API.Proof.validator_record(6) == %{error: :not_found}
+  end
+
   test "the inbox files attestations by their signed height", ctx do
     Application.put_env(:ama, :fabric_inbox_max_bytes, 1_000_000_000)
     :ets.whereis(FabricInbox) == :undefined && FabricInbox.init()

@@ -196,6 +196,25 @@ defmodule API.Proof do
     end
   end
 
+  #the validator record for `height`, proven against the state root of block height-1 (the
+  #block that wrote it): verify against /api/chain/consensus/<entry_height>
+  def validator_record(height) do
+    key = "bic:epoch:validators:height:#{DB.API.pad_integer(height)}"
+    hash = DB.Entry.by_height_in_main_chain(height - 1)
+    proof = hash && DB.Entry.validator_record_proof(hash)
+    value = RocksDB.get(key, DB.API.db_handle(%{}, :contractstate, %{}))
+    if !proof or !value do %{error: :not_found} else
+      %{
+        error: :ok,
+        entry_height: height - 1,
+        entry_hash: Base58.encode(hash),
+        key: Base58.encode(key),
+        value: Base58.encode(value),
+        proof: encode_hbsmt_proof(proof)
+      }
+    end
+  end
+
   def contractstate(keys) do
     %{db: db} = :persistent_term.get({:rocksdb, Fabric})
     keys = Enum.map(keys, &{contractstate_namespace(&1), &1})

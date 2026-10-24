@@ -857,6 +857,11 @@ pub fn call_bic(
 
         (b"Coin", b"transfer") => consensus::bic::coin::call_transfer(env, args),
 
+        (b"Bridge", b"send") => consensus::bic::bridge::call_send(env, args),
+        (b"Bridge", b"receive") => consensus::bic::bridge::call_receive(env, args),
+        (b"Bridge", b"update") => consensus::bic::bridge::call_update(env, args),
+        (b"Bridge", b"pause") => consensus::bic::bridge::call_pause(env, args),
+
         //coin admins can mint, pause, and atomically rotate permissions for existing symbols
         (b"Coin", b"mint") => consensus::bic::coin::call_mint(env, args),
         (b"Coin", b"pause") => consensus::bic::coin::call_pause(env, args),

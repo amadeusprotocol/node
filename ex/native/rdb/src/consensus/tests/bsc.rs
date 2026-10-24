@@ -111,3 +111,17 @@ fn bsc_rlp_is_canonical() {
 
 
 
+
+#[test]
+fn bsc_testnet_attestation_finalizes_its_source() {
+    use super::bsc_testnet_vectors as t;
+    for (raw, hash) in [(t::LATEST_RAW, t::LATEST_HASH), (t::SOURCE_RAW, t::SOURCE_HASH), (t::EPOCH0_RAW, t::EPOCH0_HASH), (t::EPOCH1_RAW, t::EPOCH1_HASH)] {
+        assert_eq!(header::parse(&hex(raw)).unwrap().hash, h32(hash));
+    }
+    let latest_raw = hex(t::LATEST_RAW);
+    let att = header::attestation(&header::parse(&latest_raw).unwrap()).unwrap().expect("attestation");
+    let (old, new) = (epoch_set(&hex(t::EPOCH0_RAW)), epoch_set(&hex(t::EPOCH1_RAW)));
+    let set = if finality::uses_announced_set(att.data.target_number, t::EPOCH1_NUMBER, &old) { &new } else { &old };
+    finality::verify_attestation(&att, set).unwrap();
+    assert_eq!(finality::finalized(&att), Some((t::SOURCE_NUMBER, h32(t::SOURCE_HASH))));
+}
