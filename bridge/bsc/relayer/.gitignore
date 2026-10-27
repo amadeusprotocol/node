@@ -1,5 +1,0 @@
-public/
-.wrangler/
-.dev.vars*
-.env*
-state.json

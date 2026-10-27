@@ -3,7 +3,7 @@
 //!
 //! Notes (checked against mainnet 2026-10, BSC height ~129.3M):
 //! - BSC runs 21 validators with turnLength 8 (Fermi lowered it from 16). Both are read from
-//!   the epoch header; only EPOCH_LENGTH = 1000 (Maxwell) is a constant.
+//!   the epoch header; epoch blocks are told by content, so the epoch length is not a constant.
 //! - Public BSC RPCs mostly refuse eth_getProof except at the head block: the relayer needs its
 //!   own BSC node or a provider that serves proofs.
 //! - Since Fermi BSC accepts attestations targeting an ancestor up to 3 blocks back. We only

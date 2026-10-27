@@ -528,6 +528,8 @@ defmodule Ama.MultiServer do
                   ["validator_set", h] -> API.Bridge.validator_set(:erlang.binary_to_integer(h))
                   ["remote_root", chain, h] -> API.Bridge.remote_root(chain, :erlang.binary_to_integer(h))
                   ["remote_set", chain] -> API.Bridge.remote_set(chain)
+                  ["remote_keys", chain] -> API.Bridge.remote_keys(chain)
+                  ["remote_seal", chain, e_hash, caller] -> API.Bridge.remote_seal(chain, e_hash, caller)
                   _ -> %{error: :not_found}
                 end
                 quick_reply(state, result)

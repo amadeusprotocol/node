@@ -157,7 +157,19 @@ impl Chain {
     }
 
     pub fn call_as(&self, signer: &[u8], contract: &[u8], function: &[u8], args: &[&[u8]]) -> Result<(), String> {
-        let mut env = self.make_env(signer);
+        self.run(self.make_env(signer), contract, function, args)
+    }
+
+    /// like `call`, under a real tx's exec cap (protocol::TX_EXEC_LOCK), with storage to spare
+    pub fn call_metered(&self, signer: &Wallet, contract: &[u8], function: &[u8], args: &[&[u8]]) -> Result<(), String> {
+        let mut env = self.make_env(&signer.pk);
+        let lock = crate::consensus::bic::protocol::TX_EXEC_LOCK;
+        (env.exec_track, env.exec_left, env.exec_max) = (true, lock, lock);
+        (env.storage_left, env.storage_max) = (crate::consensus::bic::protocol::AMA_1_DOLLAR, crate::consensus::bic::protocol::AMA_1_DOLLAR);
+        self.run(env, contract, function, args)
+    }
+
+    fn run(&self, mut env: ApplyEnv<'static>, contract: &[u8], function: &[u8], args: &[&[u8]]) -> Result<(), String> {
         let args: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
         let result = catch_unwind(AssertUnwindSafe(|| {
             call_bic(&mut env, contract.to_vec(), function.to_vec(), args, None, None);

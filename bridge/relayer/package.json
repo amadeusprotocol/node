@@ -1,0 +1,23 @@
+{
+  "name": "ama-bsc-relayer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "init-trust": "node --env-file-if-exists=../.env src/init.js",
+    "relay": "node --env-file=../.env src/relay.js",
+    "test": "node --test test/*.test.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@amadeus-protocol/sdk": "^1.6.0",
+    "@noble/curves": "^1.9.7",
+    "ethers": "^6.17.0"
+  },
+  "devDependencies": {
+    "vite": "^7.3.7",
+    "wrangler": "^4.152.0"
+  }
+}

@@ -9,7 +9,7 @@
 //! - receive: proves the remote contract's `orders[nonce] == keccak(order)` against a
 //!   stored root, then releases (native) or mints (wrapped) on Amadeus. Once per nonce.
 //!   Anyone may deliver: the caller gets the order's gas_drop_fee and pays its gas_drop
-//!   (AMA) to the recipient (consensus/bridge/order.rs).
+//!   (AMA) to the recipient, unless the caller is the recipient (consensus/bridge/order.rs).
 
 use crate::bcat;
 use crate::consensus::bic::{coin, protocol};
@@ -31,8 +31,22 @@ pub const ADMIN: [u8; 48] = [0u8; 48];
 pub const FEE_DIVISOR: u128 = 100_000;
 
 pub const COST_BLS_VERIFY: i128 = 500_000;
-/// skipping epochs is only trusted this many BSC blocks past the trusted set (~2 weeks)
-pub const BSC_TRUST_PERIOD_BLOCKS: u64 = 3_000_000;
+/// subgroup check of one vote key in a caller-supplied signing header
+pub const COST_VOTE_KEY_CHECK: i128 = 20_000;
+/// parsing and hashing one header (a tx may spend at most protocol::TX_EXEC_LOCK)
+pub const COST_HEADER: i128 = 2_000;
+/// headers in one source ancestry
+pub const BSC_MAX_ANCESTRY: usize = 256;
+/// recovering one header's seal: ~30 headers fit one tx, so seal_update spans several
+pub const COST_SEAL_RECOVER: i128 = 50_000;
+const BSC_CHAIN_ID: u64 = 56;
+const BSC_TESTNET_CHAIN_ID: u64 = 97;
+/// a stored set vouches for votes on blocks from its epoch block to this many blocks past it.
+/// Bounds only how far one catch-up jumps: stepping one epoch past the stored set always fits,
+/// so no amount of time without updates stalls the light client. Votes Amadeus takes while it
+/// is current then stay inside BSC's slashing window (SlashIndicator 0x…1001 felonySlashScope
+/// 192_000, ~1 day at 0.45 s; a governance value, recheck before mainnet)
+pub const BSC_TRUST_PERIOD_BLOCKS: u64 = 128_000;
 pub const COST_PROOF_NODE: i128 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,12 +88,12 @@ pub const ROUTES: &[Route] = &[
     Route { id: b"bsc-to-ama", outbound: false, remote_chain: b"bsc", local_coin: b"AMA", remote_coin: &BSC_WAMA, kind: Kind::Native, cap_per_epoch: CAP_10M_AMA },
 ];
 
-//BSC testnet (Chapel, chain id 97), see bridge/bsc
-//AmaBridge 0xfD0a63B491662ddd37c86D68948E6793300C3E8e
-pub const BSC_TESTNET: Remote = Remote { name: b"bsc", address_len: 20, contract: [0xfd, 0x0a, 0x63, 0xb4, 0x91, 0x66, 0x2d, 0xdd, 0x37, 0xc8, 0x6d, 0x68, 0x94, 0x8e, 0x67, 0x93, 0x30, 0x0c, 0x3e, 0x8e], orders_slot: 0 };
-//WAMA 0x989D3047bB7C9f4cdE03F579C1dA82a2e1AD8A9e
-pub const BSC_TESTNET_WAMA: [u8; 20] = [0x98, 0x9d, 0x30, 0x47, 0xbb, 0x7c, 0x9f, 0x4c, 0xde, 0x03, 0xf5, 0x79, 0xc1, 0xda, 0x82, 0xa2, 0xe1, 0xad, 0x8a, 0x9e];
-//finalized Chapel epoch header (bridge/bsc/relayer `init-trust`), re-baked before a deploy
+//BSC testnet (Chapel, chain id 97), contracts in bridge/evm
+//AmaBridge 0xbA586F932faD75fc788a86c0ae95eb7469217596
+pub const BSC_TESTNET: Remote = Remote { name: b"bsc", address_len: 20, contract: [0xba, 0x58, 0x6f, 0x93, 0x2f, 0xad, 0x75, 0xfc, 0x78, 0x8a, 0x86, 0xc0, 0xae, 0x95, 0xeb, 0x74, 0x69, 0x21, 0x75, 0x96], orders_slot: 0 };
+//WAMA 0x720b8e01a632678E66Cfc6C83C442A44247e2821
+pub const BSC_TESTNET_WAMA: [u8; 20] = [0x72, 0x0b, 0x8e, 0x01, 0xa6, 0x32, 0x67, 0x8e, 0x66, 0xcf, 0xc6, 0xc8, 0x3c, 0x44, 0x2a, 0x44, 0x24, 0x7e, 0x28, 0x21];
+//finalized Chapel epoch header (bridge/relayer `init-trust`), re-baked before a deploy
 const BSC_TESTNET_TRUST_EPOCH_HEADER: &[u8] = include_bytes!("bsc_testnet_trust_header.bin");
 pub const ROUTES_TESTNET: &[Route] = &[
     Route { id: b"ama-to-bsc", outbound: true, remote_chain: b"bsc", local_coin: b"AMA", remote_coin: &BSC_TESTNET_WAMA, kind: Kind::Native, cap_per_epoch: CAP_10M_AMA },
@@ -134,6 +148,17 @@ fn key_root(chain: &[u8], height: u64) -> Vec<u8> { bcat(&[b"bic:bridge:", chain
 const KEY_NONCE: &[u8] = b"bic:bridge:nonce";
 const KEY_BSC_SET: &[u8] = b"bic:bridge:bsc:set";
 const KEY_BSC_NEXT: &[u8] = b"bic:bridge:bsc:next";
+/// every vote key of a set adopted from a finalized epoch header: genuine BSC keys, registered
+/// there with a proof of possession, so an aggregate over them cannot hide a rogue key
+fn key_bsc_vote_key(k: &[u8; 48]) -> Vec<u8> { bcat(&[b"bic:bridge:bsc:vote_key:", k]) }
+/// a seal_update in progress, by its epoch block's hash and who submits it: a fabricated header
+/// someone appends only spoils their own candidate
+fn key_bsc_seal(e_hash: &[u8; 32], caller: &[u8]) -> Vec<u8> { bcat(&[b"bic:bridge:bsc:seal:", e_hash, b":", caller]) }
+
+/// BSC StakeHub: `mapping(bytes => address) voteToOperator` (slot 69), written only once the
+/// owner proved possession of the key's BLS secret
+const BSC_STAKE_HUB: [u8; 20] = { let mut a = [0u8; 20]; a[18] = 0x20; a[19] = 0x02; a };
+const BSC_VOTE_TO_OPERATOR_SLOT: u64 = 69;
 
 fn balance_key(addr: &[u8], symbol: &[u8]) -> Vec<u8> { bcat(&[b"account:", addr, b":balance:", symbol]) }
 
@@ -233,9 +258,6 @@ pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let r = route(env, false, &src_chain, &order.dst_coin, &order.src_coin);
     if order.output_amount.checked_add(order.gas_drop_fee) != Some(order.amount) { panic_any("bridge_invalid_output_amount") }
     if !(order.exclusive_filler.is_empty() && order.message.is_empty()) { panic_any("bridge_unsupported_order") }
-    if order.recipient.len() != 48 || !crate::consensus::bls12_381::validate_public_key(&order.recipient) {
-        panic_any("bridge_invalid_recipient")
-    }
     let received = key_received(&src_chain, order.nonce);
     if kv_exists(env, &received) { panic_any("bridge_already_received") }
 
@@ -254,6 +276,14 @@ pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if word != keccak256(&packed) { panic_any("bridge_order_not_found") }
 
     check_open(env, r, order.amount);
+    //the remote chain cannot check that the recipient is a valid key: the coins go back instead of sticking
+    let valid = order.recipient.len() == 48 && crate::consensus::bls12_381::validate_public_key(&order.recipient);
+    if !valid && r.kind == Kind::Native {
+        refund(env, r, &order, &src_chain);
+        kv_put(env, &received, b"");
+        return;
+    }
+    if !valid { panic_any("bridge_invalid_recipient") }
     let (out, tip, total) = (to_i128(order.output_amount), to_i128(order.gas_drop_fee), to_i128(order.amount));
     match r.kind {
         Kind::Native => {
@@ -268,7 +298,8 @@ pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if out > 0 { kv_increment(env, &balance_key(&order.recipient, r.local_coin), out); }
     let caller = env.caller_env.account_caller.clone();
     if tip > 0 { kv_increment(env, &balance_key(&caller, r.local_coin), tip); }
-    if order.gas_drop > 0 {
+    //a recipient claiming its own order owes itself no gas drop, so no gas_drop can lock an order
+    if order.gas_drop > 0 && caller != order.recipient {
         let drop = to_i128(order.gas_drop);
         if coin::balance(env, &caller, b"AMA") < drop { panic_any("bridge_gas_drop_insufficient_funds") }
         kv_increment(env, &balance_key(&caller, b"AMA"), -drop);
@@ -277,7 +308,133 @@ pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     kv_put(env, &received, b"");
 }
 
-/// update(chain, ...): BSC takes (attesting_header, finalized_source_header)
+/// vote_key(chain, height, vote_key, account_proof, storage_proof): learn a BSC vote key from
+/// StakeHub's registry at a stored state root, so a set bringing it can be caught up to even if
+/// no epoch block announcing it was ever finalized on its own
+pub fn call_vote_key(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    check_active(env);
+    let [chain, height, key, account_proof, storage_proof] =
+        <[Vec<u8>; 5]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
+    if chain != network_name(env, b"bsc") { panic_any("invalid_args") }
+    let key: [u8; 48] = key.try_into().unwrap_or_else(|_| panic_any("bridge_invalid_vote_key"));
+    let root: [u8; 32] = kv_get(env, &key_root(&chain, parse_u64(&height)))
+        .and_then(|v| v.try_into().ok())
+        .unwrap_or_else(|| panic_any("bridge_unknown_root"));
+    let (account_proof, storage_proof) = (proof_list(&account_proof), proof_list(&storage_proof));
+    exec_budget_decr(env, COST_PROOF_NODE * (account_proof.len() + storage_proof.len()) as i128);
+    let account = mpt::verify_account(&root, &BSC_STAKE_HUB, &refs(&account_proof))
+        .ok().flatten().unwrap_or_else(|| panic_any("bridge_invalid_account_proof"));
+    let mut preimage = key.to_vec();
+    preimage.extend_from_slice(&[0u8; 24]);
+    preimage.extend_from_slice(&BSC_VOTE_TO_OPERATOR_SLOT.to_be_bytes());
+    let word = mpt::verify_storage(&account.storage_root, &keccak256(&preimage), &refs(&storage_proof))
+        .unwrap_or_else(|_| panic_any("bridge_invalid_storage_proof"));
+    if word == [0u8; 32] { panic_any("bridge_vote_key_not_registered") }
+    let k = key_bsc_vote_key(&key);
+    if !kv_exists(env, &k) { kv_put(env, &k, b""); }
+}
+
+/// an inbound native order whose recipient can hold nothing on Amadeus: the deliverer still gets
+/// the tip, the rest goes back to the remote chain (refund_to, else the sender) as an outbound
+/// order paying the usual fee. The coins never leave ESCROW, so it still backs what the remote
+/// chain mints for the refund
+fn refund(env: &mut ApplyEnv, inbound: &Route, order: &Order, src_chain: &[u8]) {
+    let back = route(env, true, src_chain, inbound.local_coin, inbound.remote_coin);
+    let len = remote(env, src_chain).address_len;
+    let to = if order.refund_to.len() == len { order.refund_to.clone() } else { order.sender.clone() };
+    if to.len() != len { panic_any("bridge_invalid_refund_address") }
+    let tip = order.gas_drop_fee;
+    let amount = order.amount - tip;
+    let (tip_i, fee_i) = (to_i128(tip), to_i128(fee(amount)));
+    if coin::balance(env, &ESCROW, inbound.local_coin) < tip_i + fee_i { panic_any("bridge_escrow_insufficient") }
+    let caller = env.caller_env.account_caller.clone();
+    kv_increment(env, &balance_key(&ESCROW, inbound.local_coin), -(tip_i + fee_i));
+    if tip > 0 { kv_increment(env, &balance_key(&caller, inbound.local_coin), tip_i); }
+    kv_increment(env, &balance_key(&coin::BURN_ADDRESS, inbound.local_coin), fee_i);
+    if amount == 0 { return; }
+    let nonce = kv_increment(env, KEY_NONCE, 1) as u64;
+    let out = Order {
+        src_chain: local_chain(env),
+        nonce,
+        sender: ESCROW.to_vec(),
+        refund_to: ESCROW.to_vec(),
+        src_coin: inbound.local_coin.to_vec(),
+        amount,
+        dst_chain: order.src_chain,
+        dst_coin: back.remote_coin.to_vec(),
+        recipient: to,
+        output_amount: amount - fee(amount),
+        ..Default::default()
+    };
+    kv_put(env, &key_order(nonce), &out.pack());
+}
+
+/// seal_update(chain, candidate, headers): the fallback for when fast finality cannot vouch
+/// for a set any more (over 1/3 of the stored set stopped voting, then BSC replaced them).
+/// Adopts the set an epoch block E announces once headers from E on, parent-linked, were sealed
+/// by more than half of the trusted set (pending if any, else current): the rule BSC itself
+/// relies on without fast finality. Seals cost too much for one tx, so headers come in parts:
+/// candidate "" starts one with headers[0] = E, candidate = E's hash continues it from its last
+/// header (GET /api/bridge/remote_seal/<chain>/<E hash>/<caller>). Each caller has its own. Adopts the set only: roots still
+/// come only from finality votes, which that set then signs
+pub fn call_seal_update(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    check_active(env);
+    let [chain, candidate, list] = <[Vec<u8>; 3]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
+    if chain != network_name(env, b"bsc") { panic_any("invalid_args") }
+    let raw = proof_list(&list);
+    if raw.is_empty() || raw.len() > BSC_MAX_ANCESTRY { panic_any("bridge_invalid_ancestry") }
+    exec_budget_decr(env, (COST_HEADER + COST_SEAL_RECOVER) * raw.len() as i128);
+    if init_once(env) { return; }
+    let caller = env.caller_env.account_caller.clone();
+    let headers: Vec<header::Header> = raw.iter().map(|r| header::parse(r).unwrap_or_else(|_| panic_any("bridge_invalid_header"))).collect();
+    let last = headers.last().unwrap();
+    if finality::verify_ancestry(&headers, &last.hash).is_err() { panic_any("bridge_invalid_ancestry") }
+
+    let current = kv_get(env, KEY_BSC_SET).unwrap_or_else(|| panic_any("bridge_not_initialized"));
+    let (epoch, set) = decode_set(&current);
+    let next = kv_get(env, KEY_BSC_NEXT).map(|n| decode_set(&n));
+    let (trusted_epoch, trusted) = next.as_ref().map(|(e, s)| (*e, s)).unwrap_or((epoch, &set));
+
+    //candidate: trusted epoch u64 | E number u64 | last hash 32 | last number u64 | len u32 | E's set (encode_set) | sealers 20 each
+    let (e_hash, e_number, e_set, mut sealers) = if candidate.is_empty() {
+        let e = &headers[0];
+        if !header::is_epoch_block(e) || e.number <= trusted_epoch { panic_any("bridge_no_epoch_block") }
+        check_vouches(trusted_epoch, e.number);
+        let (validators, turn) = header::epoch_validators(e).unwrap_or_else(|_| panic_any("bridge_invalid_epoch_header"));
+        let adopted = finality::ValidatorSet::new(validators, turn).unwrap_or_else(|_| panic_any("bridge_invalid_validator_set"));
+        (e.hash, e.number, encode_set(e.number, &adopted), Vec::<[u8; 20]>::new())
+    } else {
+        let e_hash: [u8; 32] = candidate.try_into().unwrap_or_else(|_| panic_any("invalid_args"));
+        let c = kv_get(env, &key_bsc_seal(&e_hash, &caller)).unwrap_or_else(|| panic_any("bridge_no_seal_candidate"));
+        if u64::from_be_bytes(c[..8].try_into().unwrap()) != trusted_epoch { panic_any("bridge_seal_candidate_stale") }
+        if headers[0].parent_hash != c[16..48] { panic_any("bridge_invalid_ancestry") }
+        let n = u32::from_be_bytes(c[56..60].try_into().unwrap()) as usize;
+        let sealers = c[60 + n..].chunks_exact(20).map(|a| a.try_into().unwrap()).collect();
+        (e_hash, u64::from_be_bytes(c[8..16].try_into().unwrap()), c[60..60 + n].to_vec(), sealers)
+    };
+
+    let chain_id = if env.testnet { BSC_TESTNET_CHAIN_ID } else { BSC_CHAIN_ID };
+    for r in &raw {
+        let a = header::sealer(r, chain_id).unwrap_or_else(|_| panic_any("bridge_invalid_seal"));
+        if trusted.validators.iter().any(|v| v.address == a) && !sealers.contains(&a) { sealers.push(a); }
+    }
+    if sealers.len() > trusted.validators.len() / 2 {
+        kv_delete(env, &key_bsc_seal(&e_hash, &caller));
+        let (_, adopted) = decode_set(&e_set);
+        kv_put(env, KEY_BSC_NEXT, &e_set);
+        remember_vote_keys(env, &adopted);
+        return;
+    }
+    let mut c = trusted_epoch.to_be_bytes().to_vec();
+    c.extend_from_slice(&e_number.to_be_bytes());
+    c.extend_from_slice(&last.hash);
+    c.extend_from_slice(&last.number.to_be_bytes());
+    c.extend_from_slice(&(e_set.len() as u32).to_be_bytes());
+    c.extend_from_slice(&e_set);
+    for a in &sealers { c.extend_from_slice(a); }
+    kv_put(env, &key_bsc_seal(&e_hash, &caller), &c);
+}
+
 pub fn call_update(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     check_active(env);
     match args.first() {
@@ -313,30 +470,66 @@ pub fn init_bsc(env: &mut ApplyEnv, epoch_header: &[u8]) {
     let (validators, turn) = header::epoch_validators(&h).unwrap_or_else(|_| panic_any("bridge_invalid_epoch_header"));
     let set = finality::ValidatorSet::new(validators, turn).unwrap_or_else(|_| panic_any("bridge_invalid_validator_set"));
     kv_put(env, KEY_BSC_SET, &encode_set(h.number, &set));
+    remember_vote_keys(env, &set);
     kv_put(env, &key_root(&network_name(env, b"bsc"), h.number), &h.state_root);
 }
 
-/// update(chain, attesting_header, source_header[, signing_epoch_header]).
-/// Without the 4th arg the vote must come from the stored set. With it (skipping any number
-/// of epochs): the vote is checked against the set that epoch header announces, which is
-/// NOT trusted, and >= 2/3 of the trusted set (pending if any, else current) must be among
-/// its signers, within BSC_TRUST_PERIOD_BLOCKS of the trusted set. Sets are only ever
-/// adopted from the finalized source header, never from the signing header.
+/// the first light-client call only plants the baked trust anchor: together with the work it
+/// was sent for it could pass a tx's exec cap, so that call is repeated (true: it did so)
+fn init_once(env: &mut ApplyEnv) -> bool {
+    if kv_exists(env, KEY_BSC_SET) { return false }
+    let trust = bsc_trust_epoch_header(env);
+    if trust.is_empty() { panic_any("bridge_not_initialized") }
+    init_bsc(env, trust);
+    true
+}
+
+fn remember_vote_keys(env: &mut ApplyEnv, set: &finality::ValidatorSet) {
+    for v in &set.validators {
+        let k = key_bsc_vote_key(&v.vote_key);
+        if !kv_exists(env, &k) { kv_put(env, &k, b""); }
+    }
+}
+
+/// update(chain, attesting_header, source[, signing_epoch_header]); source is the finalized
+/// header, or a vecpak list of parent-linked headers ending at it.
+/// Without the 4th arg the vote must come from the stored set. With it (a catch-up over any
+/// number of epochs) the vote is checked against the set that epoch header announces, which is
+/// NOT trusted: every signer's vote key must already be known (adopted from an earlier set, so
+/// none is a rogue key) and >= 2/3 of the trusted set (pending if any, else current) must have
+/// signed. Either way the target lies between the epoch block of the set vouching for it and
+/// BSC_TRUST_PERIOD_BLOCKS past it, never at block numbers that set was not around for. Sets are
+/// only ever adopted from the finalized source header, never from the signing header.
 fn update_bsc(env: &mut ApplyEnv, attesting: &[u8], source: &[u8], signing_epoch: Option<&[u8]>) {
     let attesting = header::parse(attesting).unwrap_or_else(|_| panic_any("bridge_invalid_header"));
     let att = header::attestation(&attesting).ok().flatten().unwrap_or_else(|| panic_any("bridge_no_attestation"));
     let (number, hash) = finality::finalized(&att).unwrap_or_else(|| panic_any("bridge_not_finalizing"));
-    let source = header::parse(source).unwrap_or_else(|_| panic_any("bridge_invalid_header"));
+    //the source: one header, or a vecpak list of parent-linked headers ending at it, all final
+    //with it (BSC finalizes some blocks only through a descendant, epoch blocks included)
+    let raw_headers = match vecpak::decode(source) {
+        Ok(vecpak::Term::List(items)) => items.into_iter().map(|t| match t {
+            vecpak::Term::Binary(b) => b,
+            _ => panic_any("bridge_invalid_header"),
+        }).collect(),
+        _ => vec![source.to_vec()],
+    };
+    if raw_headers.is_empty() || raw_headers.len() > BSC_MAX_ANCESTRY { panic_any("bridge_invalid_ancestry") }
+    exec_budget_decr(env, COST_HEADER * raw_headers.len() as i128);
+    let headers: Vec<header::Header> = raw_headers.iter()
+        .map(|r| header::parse(r).unwrap_or_else(|_| panic_any("bridge_invalid_header")))
+        .collect();
+    let source = headers.last().unwrap();
     if source.number != number || source.hash != hash { panic_any("bridge_wrong_source_header") }
+    if finality::verify_ancestry(&headers, &hash).is_err() { panic_any("bridge_invalid_ancestry") }
+    let target = att.data.target_number;
 
-    let trust = bsc_trust_epoch_header(env);
-    if !kv_exists(env, KEY_BSC_SET) && !trust.is_empty() { init_bsc(env, trust); }
+    if init_once(env) { return; }
     let current = kv_get(env, KEY_BSC_SET).unwrap_or_else(|| panic_any("bridge_not_initialized"));
     let (mut epoch, mut set) = decode_set(&current);
     let mut next = kv_get(env, KEY_BSC_NEXT).map(|n| decode_set(&n));
     //a set announced at an epoch block signs from (epoch block + old set's switch offset)
     if let Some((next_epoch, next_set)) = next.take() {
-        if finality::uses_announced_set(att.data.target_number, next_epoch, &set) {
+        if finality::uses_announced_set(target, next_epoch, &set) {
             kv_put(env, KEY_BSC_SET, &encode_set(next_epoch, &next_set));
             kv_delete(env, KEY_BSC_NEXT);
             (epoch, set) = (next_epoch, next_set);
@@ -347,27 +540,43 @@ fn update_bsc(env: &mut ApplyEnv, attesting: &[u8], source: &[u8], signing_epoch
     exec_budget_decr(env, COST_BLS_VERIFY);
     match signing_epoch {
         None => {
+            check_vouches(epoch, target);
             if finality::verify_attestation(&att, &set).is_err() { panic_any("bridge_invalid_attestation") }
         }
         Some(raw) => {
             let h = header::parse(raw).unwrap_or_else(|_| panic_any("bridge_invalid_header"));
             let (validators, turn) = header::epoch_validators(&h).unwrap_or_else(|_| panic_any("bridge_invalid_epoch_header"));
+            //the caller picks this header: its keys are checked at the caller's expense
+            exec_budget_decr(env, COST_VOTE_KEY_CHECK * validators.len() as i128);
             let signing = finality::ValidatorSet::new(validators, turn).unwrap_or_else(|_| panic_any("bridge_invalid_validator_set"));
             let (trusted_epoch, trusted) = next.as_ref().map(|(e, s)| (*e, s)).unwrap_or((epoch, &set));
-            if att.data.target_number > trusted_epoch + BSC_TRUST_PERIOD_BLOCKS { panic_any("bridge_trust_period_expired") }
-            if finality::verify_attestation(&att, &signing).is_err() { panic_any("bridge_invalid_attestation") }
+            check_vouches(trusted_epoch, target);
+            for v in finality::signers(&att, &signing) {
+                if !kv_exists(env, &key_bsc_vote_key(&v.vote_key)) { panic_any("bridge_unknown_vote_key") }
+            }
             if finality::trusted_signers(&att, &signing, trusted) < trusted.quorum() { panic_any("bridge_not_enough_trusted_signers") }
+            if finality::verify_attestation(&att, &signing).is_err() { panic_any("bridge_invalid_attestation") }
         }
     }
 
-    let root = key_root(&network_name(env, b"bsc"), source.number);
-    if !kv_exists(env, &root) { kv_put(env, &root, &source.state_root); }
-    let pending = next.map(|(e, _)| e).unwrap_or(0);
-    if source.number % header::EPOCH_LENGTH == 0 && source.number > epoch && source.number > pending {
-        let (validators, turn) = header::epoch_validators(&source).unwrap_or_else(|_| panic_any("bridge_invalid_epoch_header"));
-        let next = finality::ValidatorSet::new(validators, turn).unwrap_or_else(|_| panic_any("bridge_invalid_validator_set"));
-        kv_put(env, KEY_BSC_NEXT, &encode_set(source.number, &next));
+    //the first header is the block wanted, the last the one finalized: their roots are stored
+    let chain = network_name(env, b"bsc");
+    for h in [&headers[0], source] {
+        let root = key_root(&chain, h.number);
+        if !kv_exists(env, &root) { kv_put(env, &root, &h.state_root); }
     }
+    let pending = next.map(|(e, _)| e).unwrap_or(0);
+    if let Some(e) = headers.iter().rev().find(|h| header::is_epoch_block(h) && h.number > epoch && h.number > pending) {
+        let (validators, turn) = header::epoch_validators(e).unwrap_or_else(|_| panic_any("bridge_invalid_epoch_header"));
+        let next = finality::ValidatorSet::new(validators, turn).unwrap_or_else(|_| panic_any("bridge_invalid_validator_set"));
+        kv_put(env, KEY_BSC_NEXT, &encode_set(e.number, &next));
+        remember_vote_keys(env, &next);
+    }
+}
+
+fn check_vouches(set_epoch: u64, target: u64) {
+    if target <= set_epoch { panic_any("bridge_target_before_set") }
+    if target > set_epoch + BSC_TRUST_PERIOD_BLOCKS { panic_any("bridge_trust_period_expired") }
 }
 
 /// pause(route_id, "true" | "false"): ADMIN only

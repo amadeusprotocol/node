@@ -36,4 +36,22 @@ defmodule API.Bridge do
     epoch = fn b -> b && :binary.decode_unsigned(binary_part(b, 0, 8)) end
     %{error: :ok, epoch: epoch.(set), next_epoch: epoch.(next)}
   end
+
+  #a caller's seal_update in progress, by its epoch block's hash (hex): where to continue it
+  def remote_seal(chain, e_hash_hex, caller_b58) do
+    chain = String.replace_suffix(chain, "-testnet", "")
+    {:ok, e_hash} = Base.decode16(String.replace_prefix(e_hash_hex, "0x", ""), case: :mixed)
+    case get("bic:bridge:#{chain}:seal:" <> e_hash <> ":" <> Base58.decode(caller_b58)) do
+      nil -> %{error: :not_found}
+      <<trusted::64, e::64, last_hash::binary-size(32), last::64, n::32, _set::binary-size(n), sealers::binary>> ->
+        %{error: :ok, trusted_epoch: trusted, epoch: e, last: last, last_hash: "0x" <> Base.encode16(last_hash, case: :lower), sealers: div(byte_size(sealers), 20)}
+    end
+  end
+
+  #vote keys the light client knows (hex): a catch-up vote may only have signers among them
+  def remote_keys(chain) do
+    chain = String.replace_suffix(chain, "-testnet", "")
+    keys = RocksDB.get_prefix("bic:bridge:#{chain}:vote_key:", DB.API.db_handle(%{}, :contractstate, %{}))
+    %{error: :ok, keys: Enum.map(keys, fn {k, _} -> "0x" <> Base.encode16(k, case: :lower) end)}
+  end
 end

@@ -1,6 +1,6 @@
 //! Writes Amadeus-side vectors for the BSC contracts' forge tests:
 //!   cargo test --release bridge_vectors_gen -- --ignored
-//! -> ../../../bridge/bsc/test/vectors/amadeus.json
+//! -> ../../../bridge/evm/test/vectors/amadeus.json
 
 use crate::consensus::aggsig::DST_ATT;
 use crate::consensus::bls12_381;
@@ -126,7 +126,7 @@ fn bridge_vectors_gen() {
         hex(&order.pack()), hex(&order_key), proof_json(&mut tree, &order_key), hex(&tipped.pack()), proof_json(&mut tree, &tipped_key),
         hex(&record_b), hex(&record_key), proof_json(&mut tree, &record_key), keys_json(&roster_b), compressed.join(","),
         hex(&claim_b), hex(&mask(&[0, 1, 2, 4, 5], 6)), hex(&sig_b), hex(&WAMA), hex(&BSC_RECIPIENT));
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../bridge/bsc/test/vectors");
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../bridge/evm/test/vectors");
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(format!("{dir}/amadeus.json"), json).unwrap();
 }

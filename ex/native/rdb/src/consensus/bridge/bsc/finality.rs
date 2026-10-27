@@ -66,12 +66,14 @@ pub fn verify_attestation(att: &Attestation, set: &ValidatorSet) -> Result<(), E
     }
 }
 
-/// signers of `att` (bits over `signing`) whose vote key is in `trusted`: skipping epochs is
-/// sound when >= 2/3 of a trusted set signed, whatever keys the rest of `signing` holds
+/// validators of `signing` whose bit is set in `att`
+pub fn signers<'a>(att: &'a Attestation, signing: &'a ValidatorSet) -> impl Iterator<Item = &'a Validator> + 'a {
+    signing.validators.iter().enumerate().filter(|(i, _)| *i < 64 && att.vote_set >> i & 1 == 1).map(|(_, v)| v)
+}
+
+/// members of `trusted` whose vote key signed `att` (bits over `signing`), each counted once
 pub fn trusted_signers(att: &Attestation, signing: &ValidatorSet, trusted: &ValidatorSet) -> usize {
-    signing.validators.iter().enumerate()
-        .filter(|(i, v)| *i < 64 && att.vote_set >> i & 1 == 1 && trusted.validators.iter().any(|t| t.vote_key == v.vote_key))
-        .count()
+    trusted.validators.iter().filter(|t| signers(att, signing).any(|v| v.vote_key == t.vote_key)).count()
 }
 
 /// (number, hash) an attestation finalizes: its source when the target is the direct child
