@@ -7,7 +7,7 @@
     "init-trust": "node --env-file-if-exists=../.env src/init.js",
     "relay": "node --env-file=../.env src/relay.js",
     "test": "node --test test/*.test.js",
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --local-upstream localhost",
     "deploy": "wrangler deploy",
     "build": "vite build"
   },

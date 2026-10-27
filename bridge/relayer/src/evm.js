@@ -26,6 +26,8 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
   const rpc = (method, params) => retryRateLimited(() => provider.send(method, params))
   const block = n => rpc('eth_getBlockByNumber', [typeof n === 'number' ? `0x${n.toString(16)}` : n, false])
   const head = () => retryRateLimited(() => provider.getBlockNumber())
+  //what deliveries are priced at (src/tips.js) and sent with
+  const gasPrice = async () => BigInt(await rpc('eth_gasPrice', []))
   //orders are scanned only up to here, so a reorg cannot drop one after it was seen
   const finalizedHead = async () => Number((await block('finalized')).number)
   const finality = finalities[chain.finality]({ ama, chain, block, rpc, log, sleep })
@@ -77,7 +79,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     await adoptValidatorRecordsUpTo(h)
     const c = await ama.consensus(h)
     const tx = await bridge.receiveOrderWithConsensus(fromBase58(c.claim), fromBase58(c.aggsig.mask), g2Eip(fromBase58(c.aggsig.aggsig)), await eipRosterAt(h),
-                                                      packed, toSolidityProof(sp.proofs[0].proof), { value: o.gasDrop })
+                                                      packed, toSolidityProof(sp.proofs[0].proof), { value: o.gasDrop, gasPrice: await gasPrice() })
     const receipt = await tx.wait()
     for (let i = 0; (await finalizedHead()) < receipt.blockNumber; i++) {
       if (i > 60) throw new Error(`amadeus order ${n} delivery ${tx.hash} not final yet`)
@@ -160,6 +162,6 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     return failed
   }
 
-  return { key, name: chain.name, head, finalizedHead, adoptNewAmadeusValidatorRecord, syncAmadeusLightClient: () => (finality.keepCurrent ?? finality.sync)(), lightClientTrust: () => finality.trust(),
+  return { key, name: chain.name, head, finalizedHead, gasPrice, adoptNewAmadeusValidatorRecord, syncAmadeusLightClient: () => (finality.keepCurrent ?? finality.sync)(), lightClientTrust: () => finality.trust(),
            deliverAmadeusOrder, findTippedOrders, orderCreatedBy, deliverToAmadeus }
 }

@@ -3,66 +3,116 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Amadeus bridge</title>
+<title>Amadeus TRUSTLESS Bridge</title>
+<link rel="icon" href="./logos/ama.svg">
 <style>
-  body { font: 15px/1.45 system-ui, sans-serif; max-width: 760px; margin: 32px auto; padding: 0 16px; color: #1b1b1f; }
-  h1 { font-size: 20px; } h2 { font-size: 16px; margin-top: 28px; }
-  section { border: 1px solid #ddd; border-radius: 10px; padding: 14px 16px; margin: 14px 0; }
-  label { display: block; margin: 8px 0 2px; font-size: 13px; color: #555; }
-  label.check { display: flex; gap: 8px; align-items: center; color: #1b1b1f; }
-  input:not([type=checkbox]) { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font: inherit; }
-  button { margin-top: 10px; padding: 8px 14px; border: 0; border-radius: 6px; background: #2b59c3; color: white; font: inherit; cursor: pointer; }
-  button.small { margin: 0; padding: 3px 9px; font-size: 13px; }
-  button:disabled { background: #999; cursor: default; }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .muted { color: #666; font-size: 13px; } code { font-size: 12px; word-break: break-all; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; } td, th { padding: 4px 6px; border-bottom: 1px solid #eee; text-align: left; }
-  #log { white-space: pre-wrap; font: 12px ui-monospace, monospace; color: #444; }
+  :root { --bg: #f4f5f7; --card: #fff; --line: #e3e5ea; --text: #15171c; --muted: #6b7180; --accent: #1f6feb; --ok: #1a7f37; --warn: #b26b00; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  header img { width: 32px; height: 32px; }
+  header h1 { font-size: 20px; margin: 0; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: #fff3cd; color: #7a5600; border: 1px solid #f1d78a; }
+  .badge.mainnet { background: #e6f4ea; color: var(--ok); border-color: #b7dfc2; }
+  .tl { color: #00b8a9; letter-spacing: .5px; }
+  .note { font-size: 12px; color: var(--muted); margin: -6px 0 14px; }
+  .note a { color: var(--muted); }
+  .wallets { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  .wallet { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; cursor: pointer; font: inherit; text-align: left; color: var(--text); }
+  .wallet:hover { border-color: #c6cbd5; }
+  .wallet img { width: 28px; height: 28px; border-radius: 6px; flex: none; }
+  .wallet .name { font-weight: 600; font-size: 14px; }
+  .wallet .who { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
+  .wallet.on .who { color: var(--ok); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
+  .side { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fafbfc; }
+  .side .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 8px; }
+  .pick { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .chainbig { display: inline-flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 700; }
+  .chainbig img { width: 40px; height: 40px; border-radius: 50%; }
+  .chainbig .k { display: block; font-size: 11px; font-weight: 400; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .chainbig select { border: 0; background: transparent; font: inherit; padding: 0; cursor: pointer; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px 5px 6px; border-radius: 99px; background: #fff; border: 1px solid var(--line); font-size: 14px; font-weight: 600; }
+  .pill img { width: 22px; height: 22px; border-radius: 50%; }
+  .pill .k { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .pill select { border: 0; background: transparent; font: inherit; font-weight: 600; padding: 0; cursor: pointer; }
+  .coin { position: relative; width: 22px; height: 22px; }
+  .coin img.small { position: absolute; right: -4px; bottom: -4px; width: 12px; height: 12px; border-radius: 3px; border: 1px solid #fff; }
+  .amount { display: flex; align-items: center; gap: 8px; }
+  .amount input { flex: 1; min-width: 0; border: 0; background: transparent; font: 600 26px system-ui, sans-serif; color: var(--text); outline: none; padding: 2px 0; }
+  .amount .out { flex: 1; font: 600 26px system-ui, sans-serif; color: var(--text); }
+  .bal { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; margin-top: 4px; }
+  .bal button { border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0; }
+  .flip { display: flex; justify-content: center; margin: -6px 0; position: relative; z-index: 1; }
+  .flip button { width: 38px; height: 38px; border-radius: 10px; border: 4px solid var(--card); background: #e9edf5; font-size: 18px; cursor: pointer; }
+  .flip button:hover { background: #dbe3f1; }
+  .recipient { width: 100%; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: 13px ui-monospace, monospace; background: #fff; }
+  .delivery { margin: 12px 0 4px; display: grid; gap: 6px; }
+  .drop { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 14px; cursor: pointer; }
+  .drop small { color: var(--muted); font-size: 12px; }
+  .summary { font-size: 13px; color: var(--muted); margin: 10px 2px 0; display: grid; gap: 2px; }
+  .summary div { display: flex; justify-content: space-between; }
+  .summary .total { color: var(--text); font-weight: 600; }
+  .go { width: 100%; margin-top: 12px; padding: 13px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font: 600 16px system-ui, sans-serif; cursor: pointer; }
+  .go:disabled { background: #aab3c5; cursor: default; }
+  h2 { font-size: 15px; margin: 22px 0 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  td, th { padding: 7px 8px; border-bottom: 1px solid #eef0f3; text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td img { width: 16px; height: 16px; vertical-align: -3px; border-radius: 50%; }
+  .st { font-size: 12px; padding: 1px 7px; border-radius: 99px; }
+  .st.done { background: #e6f4ea; color: var(--ok); } .st.wait { background: #fff3cd; color: var(--warn); }
+  td button { border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; padding: 3px 9px; cursor: pointer; }
+  .relay { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  details { margin-top: 18px; font-size: 13px; color: var(--muted); }
+  #log { white-space: pre-wrap; font: 12px ui-monospace, monospace; color: #444; margin-top: 6px; }
+  @media (max-width: 480px) { .wallets { grid-template-columns: 1fr; } }
 </style>
 <!-- filled in by the worker for this network (worker/index.js) -->
 <script id="config" type="application/json">{}</script>
 </head>
 <body>
-<h1>Amadeus bridge <span class="muted" id="network"></span></h1>
-<p class="muted">Trustless: each chain verifies Amadeus consensus, Amadeus verifies each chain's finality. Fee 0.1 bp (burned, Amadeus side only).
-Claim yourself, or pay a small tip and a relay delivers it (and funds gas on arrival).</p>
+<main>
+  <header>
+    <img src="./logos/ama.svg" alt="">
+    <h1>Amadeus <span class="tl">TRUSTLESS</span> Bridge</h1>
+    <span class="badge" id="network"></span>
+  </header>
 
-<section>
-  <div class="row"><label for="chain">Chain</label> <select id="chain"></select></div>
-  <div class="row">
-    <button id="connect-evm">Connect MetaMask</button> <span id="evm-account" class="muted">not connected</span>
+  <p class="note">Verified on-chain by light clients on both sides (<a id="lc-link" target="_blank" rel="noopener">contracts</a>) · relay optional: delivery + gas drop</p>
+
+  <div class="wallets">
+    <button class="wallet" id="connect-ama"><img src="./logos/ama-wallet.png" alt=""><span><div class="name">Amadeus wallet</div><div class="who" id="ama-account">Connect</div></span></button>
+    <button class="wallet" id="connect-evm"><img src="./logos/metamask.svg" alt=""><span><div class="name">MetaMask</div><div class="who" id="evm-account">Connect</div></span></button>
   </div>
-  <div class="row">
-    <button id="connect-ama">Connect Amadeus wallet</button> <span id="ama-account" class="muted">not connected</span>
+
+  <div class="card">
+    <div class="side">
+      <div class="label">From</div>
+      <div class="pick" id="from-pick"></div>
+      <div class="amount"><input id="amount" inputmode="decimal" placeholder="0.0" autocomplete="off"></div>
+      <div class="bal"><span id="from-balance">&nbsp;</span><button id="max">Max</button></div>
+    </div>
+    <div class="flip"><button id="flip" title="Switch direction">⇅</button></div>
+    <div class="side">
+      <div class="label">To</div>
+      <div class="pick" id="to-pick"></div>
+      <div class="amount"><div class="out" id="receive">0.0</div></div>
+      <input class="recipient" id="recipient" autocomplete="off">
+    </div>
+
+    <div class="delivery" id="delivery"></div>
+    <div class="summary" id="summary"></div>
+    <button class="go" id="go" disabled>Connect a wallet</button>
+    <div class="relay" id="relay-status"></div>
   </div>
-  <p class="muted">AMA: <b id="ama-balance">–</b> · wAMA on <span class="chain"></span>: <b id="wama-balance">–</b> · <span class="gas"></span>: <b id="gas-balance">–</b></p>
-  <p class="muted" id="relay-status"></p>
-</section>
 
-<section>
-  <h2>AMA → <span class="chain"></span> (receive wAMA)</h2>
-  <label>Amount (AMA)</label><input id="out-amount" placeholder="10">
-  <label><span class="chain"></span> recipient</label><input id="out-recipient" placeholder="0x… (defaults to your MetaMask address)">
-  <label class="check"><input type="checkbox" id="out-relay"> <span id="out-relay-text"></span></label>
-  <p class="muted">Unticked: claim it below with MetaMask (~750k gas) once Amadeus finalizes it.</p>
-  <button id="send-out" disabled>Send with Amadeus wallet</button>
-</section>
-
-<section>
-  <h2><span class="chain"></span> → AMA (burn wAMA)</h2>
-  <label>Amount (wAMA)</label><input id="in-amount" placeholder="10">
-  <label>Amadeus recipient</label><input id="in-recipient" placeholder="Base58 address (defaults to your Amadeus wallet)">
-  <p class="muted" id="in-relay-text"></p>
-  <button id="send-in" disabled>Send with MetaMask</button>
-</section>
-
-<section>
   <h2>Recent orders</h2>
-  <table><thead><tr><th>From</th><th>Nonce</th><th>Amount</th><th>To</th><th>Delivery</th><th>Status</th></tr></thead><tbody id="orders"></tbody></table>
-</section>
+  <table><thead><tr><th>Route</th><th>#</th><th>Amount</th><th>To</th><th>Delivery</th><th>Status</th></tr></thead><tbody id="orders"></tbody></table>
 
-<div id="log"></div>
-
+  <details><summary>Activity</summary><div id="log"></div></details>
+</main>
 <script type="module" src="./app.js"></script>
 </body>
 </html>

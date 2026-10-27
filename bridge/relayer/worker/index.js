@@ -183,11 +183,11 @@ const json = (body, status = 200) => new Response(JSON.stringify(body, (_, v) =>
 function pageSettings(net) {
   const n = networks[net]
   const chains = Object.entries(n.chains).filter(([, c]) => live(c)).map(([key, c]) => ({
-    key, name: c.name, label: c.label, chainId: c.chainId, rpc: c.rpc, gasSymbol: c.gasSymbol,
+    key, name: c.name, label: c.label, chainId: c.chainId, rpc: c.rpc, explorer: c.explorer, gasSymbol: c.gasSymbol,
     bridge: c.bridge, lightClient: c.lightClient, wama: c.wama, from: Number(c.from || 0),
-    tipOut: c.tipOut, gasDrop: c.gasDrop, tipIn: c.tipIn, amaPerGasCoin: c.amaPerGasCoin,
+    amaPerGasCoin: c.amaPerGasCoin, deliveryGas: c.deliveryGas, gasDrop: c.gasDrop, maxGasDrop: c.maxGasDrop,
   }))
-  return { network: net, amadeusApi: n.amadeus.url, amaChain: n.amadeus.chain, minTip: n.minTip, chains }
+  return { network: net, amadeusApi: n.amadeus.url, amaChain: n.amadeus.chain, amadeusCost: n.amadeusCost, gasDropAma: n.gasDropAma, maxGasDropAma: n.maxGasDropAma, chains }
 }
 
 async function pageWithSettings(req, env, net) {

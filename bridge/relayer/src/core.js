@@ -6,7 +6,7 @@ import { Amadeus } from './amadeus.js'
 import { unpackOrder } from './codec.js'
 import { live } from './networks.js'
 import { createEvmChain } from './evm.js'
-import { tipCoversDelivery } from './tips.js'
+import { paysToChain, paysToAmadeus } from './tips.js'
 
 export const amadeusSeedFromRelayKey = privateKey => toBase58(getBytes(sha512(concat([toUtf8Bytes('amadeus'), getBytes(privateKey)]))))
 
@@ -15,9 +15,7 @@ export function createRelay(net, privateKey, log = console.log) {
   const chainsLive = Object.entries(net.chains).filter(([, c]) => live(c))
   if (chainsLive.length === 0) throw new Error('no chain is deployed on this network yet')
   const ama = new Amadeus({ url: net.amadeus.url, seed: amadeusSeedFromRelayKey(privateKey), network: net.amadeus.network })
-  const minTip = BigInt(net.minTip)
-  const paysForDeliveryToAmadeus = o => o.gasDrop <= BigInt(net.maxGasDropAma) && tipCoversDelivery(o, minTip, '1', 9)
-  const paysForDeliveryTo = (chain, o) => o.gasDrop <= BigInt(chain.maxGasDrop) && tipCoversDelivery(o, minTip, chain.amaPerGasCoin, 18)
+  const paysForDeliveryToAmadeus = o => paysToAmadeus(net, o)
   const chains = Object.fromEntries(chainsLive.map(([key, chain]) =>
     [key, createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToAmadeus, log })]))
   const byName = Object.fromEntries(chainsLive.map(([key, chain]) => [chain.name, { evm: chains[key], chain }]))
@@ -28,7 +26,7 @@ export function createRelay(net, privateKey, log = console.log) {
     if (!packed) throw new Error(`amadeus order ${n} not final yet`)
     const o = unpackOrder(packed)
     const dst = byName[o.dstChain]
-    return dst && paysForDeliveryTo(dst.chain, o) ? { evm: dst.evm, packed, o } : null
+    return dst && paysToChain(dst.chain, await dst.evm.gasPrice(), o) ? { evm: dst.evm, packed, o } : null
   }
 
   return {

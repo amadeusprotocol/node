@@ -33,15 +33,20 @@ test('tipped orders carry the tip and gas drop', () => {
   assert.equal(o.outputAmount + o.gasDropFee, o.amount - o.amount / 100_000n)
 })
 
-test('a gas drop must be paid for in the tip at the chain price', async () => {
-  const { requiredTip, tipCoversDelivery } = await import('../src/tips.js')
-  const minTip = 100_000_000n
-  assert.equal(requiredTip(minTip, 0n, '', 18), minTip)
-  assert.equal(requiredTip(minTip, 1n, '', 18), null) //no price set: no gas drops
-  assert.equal(requiredTip(minTip, 2_000_000_000_000_000n, '500', 18), minTip + 1_000_000_000n) //0.002 BNB at 500 AMA
-  assert.equal(tipCoversDelivery({ gasDrop: 2_000_000_000_000_000n, gasDropFee: 1_099_999_999n }, minTip, '500', 18), false)
-  assert.equal(tipCoversDelivery({ gasDrop: 2_000_000_000_000_000n, gasDropFee: 1_100_000_000n }, minTip, '500', 18), true)
-  assert.equal(tipCoversDelivery({ gasDrop: 50_000_000n, gasDropFee: 150_000_000n }, minTip, '1', 9), true) //AMA drop 1:1
+test('a delivery pays the relay its cost: gas at the current price plus the gas drop, no tip', async () => {
+  const { costToChain, costToAmadeus, paysToChain, paysToAmadeus } = await import('../src/tips.js')
+  const bsc = { amaPerGasCoin: '9360', deliveryGas: 700000, maxGasDrop: '1000000000000000' }
+  //700k gas at 0.05 gwei = 0.000035 BNB = 0.3276 AMA; plus a 0.0001 BNB drop = 0.936 AMA
+  assert.equal(costToChain(bsc, 50_000_000n, 0n), 327_600_000n)
+  assert.equal(costToChain(bsc, 50_000_000n, 100_000_000_000_000n), 327_600_000n + 936_000_000n)
+  assert.equal(costToChain({ ...bsc, amaPerGasCoin: '' }, 50_000_000n, 0n), null)
+  assert.equal(paysToChain(bsc, 50_000_000n, { gasDrop: 0n, gasDropFee: 327_599_999n }), false)
+  assert.equal(paysToChain(bsc, 50_000_000n, { gasDrop: 0n, gasDropFee: 327_600_000n }), true)
+  assert.equal(paysToChain(bsc, 50_000_000n, { gasDrop: 2_000_000_000_000_000n, gasDropFee: 10n ** 12n }), false) //over maxGasDrop
+  const net = { amadeusCost: '20000000', maxGasDropAma: '100000000' }
+  assert.equal(costToAmadeus(net, 50_000_000n), 70_000_000n)
+  assert.equal(paysToAmadeus(net, { gasDrop: 0n, gasDropFee: 20_000_000n }), true)
+  assert.equal(paysToAmadeus(net, { gasDrop: 50_000_000n, gasDropFee: 69_999_999n }), false)
 })
 
 test('a catch-up counts each trusted member among the signers once, like finality.rs', () => {
