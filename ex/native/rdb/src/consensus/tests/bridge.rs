@@ -362,8 +362,15 @@ fn bridge_receive_refunds_an_order_whose_recipient_is_not_a_key() {
     let (root, account_proof, storage_proof) = bsc_state_with_order(9, &o.pack());
     chain.put(&bcat(&[b"bic:bridge:bsc-testnet:root:", format!("{:020}", 100).as_bytes()]), &root);
     let relay_before = chain.balance(&relay.pk);
+    //the refund is an outbound order: it waits while that route is paused
+    chain.call_as(&bridge::ADMIN, b"Bridge", b"pause", &[b"ama-to-bsc", b"true"]).unwrap();
+    assert_eq!(chain.call(&relay, b"Bridge", b"receive", &[b"bsc-testnet", b"100", &o.pack(), &account_proof, &storage_proof]), Err("bridge_route_paused".into()));
+    chain.call_as(&bridge::ADMIN, b"Bridge", b"pause", &[b"ama-to-bsc", b"false"]).unwrap();
     chain.call(&relay, b"Bridge", b"receive", &[b"bsc-testnet", b"100", &o.pack(), &account_proof, &storage_proof]).unwrap();
     assert_eq!(chain.balance(&relay.pk) - relay_before, AMA); //the deliverer still earns the tip
+    //received per bridge contract
+    let contract: String = bridge::BSC_TESTNET.contract.iter().map(|b| format!("{:02x}", b)).collect();
+    assert!(chain.get(format!("bic:bridge:received:bsc-testnet:{contract}:{:020}", 9).as_bytes()).is_some());
 
     let back_amount = amount - tip;
     let fee = back_amount / 100_000;

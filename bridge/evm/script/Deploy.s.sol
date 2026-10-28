@@ -8,7 +8,8 @@ import {WAMA} from "../src/WAMA.sol";
 
 /// forge script script/Deploy.s.sol --rpc-url bsc_testnet --broadcast
 /// env: PRIVATE_KEY, BRIDGE_ADMIN, TRUST (path to the Amadeus trust point json from relayer `init`),
-///      optional LIGHT_CLIENT (keep a deployed one), LAST_NONCE (orders Amadeus already received)
+///      optional LIGHT_CLIENT (keep a deployed one), LAST_NONCE (first order nonce - 1; not needed:
+///      Amadeus keeps received markers per bridge contract)
 /// trust json: { "roster": ["0x<EIP-2537 G1>", ...], "mask_active": "0x..", "set_height": n,
 ///               "local_chain": "bsc-testnet", "amadeus_chain": "amadeus-testnet" }
 contract Deploy is Script {

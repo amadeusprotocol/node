@@ -56,8 +56,9 @@ forge script script/Deploy.s.sol --rpc-url bsc_testnet --broadcast --with-gas-pr
 ```
 (BSC's base fee is 0, so without a gas price forge offers 1 wei and the deploy never mines.)
 Then put the addresses in `relayer/src/networks.js`, and the trust epoch header and addresses in
-the Amadeus BIC (`bridge.rs`). Replacing only wAMA + bridge: `LIGHT_CLIENT=<lc> LAST_NONCE=<old bridge nonce>`
-(Amadeus already marked those nonces received). Trust points: `cd relayer && npm run init-trust`.
+the Amadeus BIC (`bridge.rs`). Replacing only wAMA + bridge: `LIGHT_CLIENT=<lc>` (Amadeus keeps received
+markers per bridge contract, so a new contract starts its nonces fresh; retire the old one first:
+pause it once no wAMA of it is left and no order is in flight). Trust points: `cd relayer && npm run init-trust`.
 
 ## Relay (`relayer/`)
 Idle unless needed: delivers tipped orders (`minTip`), adopts new Amadeus validator records on

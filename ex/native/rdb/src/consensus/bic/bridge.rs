@@ -89,10 +89,10 @@ pub const ROUTES: &[Route] = &[
 ];
 
 //BSC testnet (Chapel, chain id 97), contracts in bridge/evm
-//AmaBridge 0xbA586F932faD75fc788a86c0ae95eb7469217596
-pub const BSC_TESTNET: Remote = Remote { name: b"bsc", address_len: 20, contract: [0xba, 0x58, 0x6f, 0x93, 0x2f, 0xad, 0x75, 0xfc, 0x78, 0x8a, 0x86, 0xc0, 0xae, 0x95, 0xeb, 0x74, 0x69, 0x21, 0x75, 0x96], orders_slot: 0 };
-//WAMA 0x720b8e01a632678E66Cfc6C83C442A44247e2821
-pub const BSC_TESTNET_WAMA: [u8; 20] = [0x72, 0x0b, 0x8e, 0x01, 0xa6, 0x32, 0x67, 0x8e, 0x66, 0xcf, 0xc6, 0xc8, 0x3c, 0x44, 0x2a, 0x44, 0x24, 0x7e, 0x28, 0x21];
+//AmaBridge 0xbA423F25aa91301761d7cb4C0f63eE769047B884
+pub const BSC_TESTNET: Remote = Remote { name: b"bsc", address_len: 20, contract: [0xba, 0x42, 0x3f, 0x25, 0xaa, 0x91, 0x30, 0x17, 0x61, 0xd7, 0xcb, 0x4c, 0x0f, 0x63, 0xee, 0x76, 0x90, 0x47, 0xb8, 0x84], orders_slot: 0 };
+//WAMA 0x751D543E23E02BE2b40A0FB1dD36868746d4742e
+pub const BSC_TESTNET_WAMA: [u8; 20] = [0x75, 0x1d, 0x54, 0x3e, 0x23, 0xe0, 0x2b, 0xe2, 0xb4, 0x0a, 0x0f, 0xb1, 0xdd, 0x36, 0x86, 0x87, 0x46, 0xd4, 0x74, 0x2e];
 //finalized Chapel epoch header (bridge/relayer `init-trust`), re-baked before a deploy
 const BSC_TESTNET_TRUST_EPOCH_HEADER: &[u8] = include_bytes!("bsc_testnet_trust_header.bin");
 pub const ROUTES_TESTNET: &[Route] = &[
@@ -143,7 +143,11 @@ pub fn fee(amount: u128) -> u128 {
 
 fn key_paused(r: &Route) -> Vec<u8> { bcat(&[b"bic:bridge:paused:", r.id]) }
 fn key_order(nonce: u64) -> Vec<u8> { bcat(&[b"bic:bridge:order:", format!("{:020}", nonce).as_bytes()]) }
-fn key_received(chain: &[u8], nonce: u64) -> Vec<u8> { bcat(&[b"bic:bridge:received:", chain, b":", format!("{:020}", nonce).as_bytes()]) }
+/// per bridge contract: a redeployed remote contract starts its own nonces, no LAST_NONCE needed
+fn key_received(chain: &[u8], contract: &[u8], nonce: u64) -> Vec<u8> {
+    let hex: String = contract.iter().map(|b| format!("{:02x}", b)).collect();
+    bcat(&[b"bic:bridge:received:", chain, b":", hex.as_bytes(), b":", format!("{:020}", nonce).as_bytes()])
+}
 fn key_root(chain: &[u8], height: u64) -> Vec<u8> { bcat(&[b"bic:bridge:", chain, b":root:", format!("{:020}", height).as_bytes()]) }
 const KEY_NONCE: &[u8] = b"bic:bridge:nonce";
 const KEY_BSC_SET: &[u8] = b"bic:bridge:bsc:set";
@@ -258,7 +262,7 @@ pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let r = route(env, false, &src_chain, &order.dst_coin, &order.src_coin);
     if order.output_amount.checked_add(order.gas_drop_fee) != Some(order.amount) { panic_any("bridge_invalid_output_amount") }
     if !(order.exclusive_filler.is_empty() && order.message.is_empty()) { panic_any("bridge_unsupported_order") }
-    let received = key_received(&src_chain, order.nonce);
+    let received = key_received(&src_chain, &remote.contract, order.nonce);
     if kv_exists(env, &received) { panic_any("bridge_already_received") }
 
     let root: [u8; 32] = kv_get(env, &key_root(&src_chain, parse_u64(&height)))
@@ -340,6 +344,8 @@ pub fn call_vote_key(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
 /// chain mints for the refund
 fn refund(env: &mut ApplyEnv, inbound: &Route, order: &Order, src_chain: &[u8]) {
     let back = route(env, true, src_chain, inbound.local_coin, inbound.remote_coin);
+    //a refund is an outbound order like any other: it waits while that route is paused or capped
+    check_open(env, back, order.amount - order.gas_drop_fee);
     let len = remote(env, src_chain).address_len;
     let to = if order.refund_to.len() == len { order.refund_to.clone() } else { order.sender.clone() };
     if to.len() != len { panic_any("bridge_invalid_refund_address") }

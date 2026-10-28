@@ -524,7 +524,7 @@ defmodule Ama.MultiServer do
                 result = case String.split(String.replace(r.path, "/api/bridge/", ""), "/") do
                   ["nonce"] -> API.Bridge.nonce()
                   ["order", n] -> API.Bridge.order(:erlang.binary_to_integer(n))
-                  ["received", chain, n] -> API.Bridge.received(chain, :erlang.binary_to_integer(n))
+                  ["received", chain, contract, n] -> API.Bridge.received(chain, contract, :erlang.binary_to_integer(n))
                   ["validator_set", h] -> API.Bridge.validator_set(:erlang.binary_to_integer(h))
                   ["remote_root", chain, h] -> API.Bridge.remote_root(chain, :erlang.binary_to_integer(h))
                   ["remote_set", chain] -> API.Bridge.remote_set(chain)

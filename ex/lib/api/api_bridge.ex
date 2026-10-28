@@ -13,7 +13,11 @@ defmodule API.Bridge do
 
   def nonce(), do: %{error: :ok, nonce: :erlang.binary_to_integer(get("bic:bridge:nonce") || "0")}
 
-  def received(chain, nonce), do: %{error: :ok, received: !!get("bic:bridge:received:#{chain}:#{pad20(nonce)}")}
+  #per remote bridge contract (hex), so a redeployed contract has its own nonces
+  def received(chain, contract_hex, nonce) do
+    contract = String.downcase(String.replace_prefix(contract_hex, "0x", ""))
+    %{error: :ok, received: !!get("bic:bridge:received:#{chain}:#{contract}:#{pad20(nonce)}")}
+  end
 
   #the validator record in force at `height` and the height it was written for
   def validator_set(height) do
@@ -40,8 +44,15 @@ defmodule API.Bridge do
   #a caller's seal_update in progress, by its epoch block's hash (hex): where to continue it
   def remote_seal(chain, e_hash_hex, caller_b58) do
     chain = String.replace_suffix(chain, "-testnet", "")
-    {:ok, e_hash} = Base.decode16(String.replace_prefix(e_hash_hex, "0x", ""), case: :mixed)
-    case get("bic:bridge:#{chain}:seal:" <> e_hash <> ":" <> Base58.decode(caller_b58)) do
+    caller = try do Base58.decode(caller_b58) rescue _ -> nil end
+    case {Base.decode16(String.replace_prefix(e_hash_hex, "0x", ""), case: :mixed), caller} do
+      {{:ok, e_hash}, caller} when byte_size(e_hash) == 32 and byte_size(caller) == 48 -> remote_seal_1(chain, e_hash, caller)
+      _ -> %{error: :invalid_args}
+    end
+  end
+
+  defp remote_seal_1(chain, e_hash, caller) do
+    case get("bic:bridge:#{chain}:seal:" <> e_hash <> ":" <> caller) do
       nil -> %{error: :not_found}
       <<trusted::64, e::64, last_hash::binary-size(32), last::64, n::32, _set::binary-size(n), sealers::binary>> ->
         %{error: :ok, trusted_epoch: trusted, epoch: e, last: last, last_hash: "0x" <> Base.encode16(last_hash, case: :lower), sealers: div(byte_size(sealers), 20)}

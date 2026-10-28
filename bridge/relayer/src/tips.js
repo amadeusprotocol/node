@@ -17,6 +17,10 @@ export function costToChain(chain, gasPrice, gasDrop) {
 /// AMA base units for a delivery to Amadeus: the relay's Amadeus fees plus the gas drop (AMA)
 export const costToAmadeus = (net, gasDrop) => BigInt(net.amadeusCost) + gasDrop
 
+/// an order that asks a relay to deliver it to an EVM chain: it pays something, and its gas drop is
+/// one the relay funds. Whether it pays enough depends on the gas price at delivery (paysToChain)
+export const forRelay = (chain, o) => Boolean(chain.amaPerGasCoin) && o.gasDropFee > 0n && o.gasDrop <= BigInt(chain.maxGasDrop)
+
 export const paysToChain = (chain, gasPrice, o) => {
   const cost = costToChain(chain, gasPrice, o.gasDrop)
   return cost !== null && o.gasDrop <= BigInt(chain.maxGasDrop) && o.gasDropFee >= cost

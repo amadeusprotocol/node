@@ -88,6 +88,7 @@ function render() {
   $('receive').textContent = receive === null ? '0.0' : receive > 0n ? fmt(receive) : '–'
   $('summary').innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('')
     + (receive !== null ? `<div class="total"><span>You receive</span><span>${receive > 0n ? `${fmt(receive)} ${to.coin}` : 'amount too small'}</span></div>` : '')
+    + (receive !== null && dir === 'out' ? `<div><span>Priced at today's ${chain.label} gas; if it rises the delivery waits (you can claim it any time)</span></div>` : '')
     + (dir === 'out' && cost === null && chain.amaPerGasCoin ? '<div><span>Relay delivery</span><span>reading gas price…</span></div>' : '')
 
   const go = $('go')
@@ -131,9 +132,9 @@ async function checkRecipientGas() {
       if (!to) { recipientGas = null; return }
       const b = await amaGet(`/wallet/balance_all/${to}`)
       recipientGas = parseUnits(String(b.balances?.find(x => x.symbol === 'AMA')?.float ?? 0), 9)
-      //what arrives is AMA itself, which pays Amadeus fees
-      const arriving = amount() ?? 0n
-      if (!dropTouched) drop = recipientGas + arriving < AMA_FOR_TWO_TXS
+      //what arrives is AMA itself, which pays Amadeus fees: count it net of the relay's cost
+      const arriving = (amount() ?? 0n) - costToAmadeus(settings, 0n)
+      if (!dropTouched) drop = recipientGas + (arriving > 0n ? arriving : 0n) < AMA_FOR_TWO_TXS
     }
   } catch { recipientGas = null }
   render()
@@ -178,7 +179,7 @@ async function showOrders() {
   const events = await bridge.queryFilter(bridge.filters.OrderCreated(), Math.max(0, head - 5000), head)
   for (const ev of events.slice(-5).reverse()) {
     const o = unpackOrder(ev.args.order)
-    const { received } = await amaGet(`/bridge/received/${chain.name}/${o.nonce}`)
+    const { received } = await amaGet(`/bridge/received/${chain.name}/${chain.bridge}/${o.nonce}`)
     rows.push([route(logo, amaLogo), o.nonce, `${fmt(o.outputAmount)} AMA`, short(toBase58(o.recipient)), delivery(o), status(received)])
   }
   $('orders').innerHTML = rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('') || '<tr><td colspan="6">No recent orders</td></tr>'
@@ -226,10 +227,16 @@ $('connect-ama').onclick = async () => {
 
 $('flip').onclick = () => { dir = dir === 'out' ? 'in' : 'out'; $('recipient').value = ''; dropTouched = false; recipientGas = null; render(); checkRecipientGas() }
 $('recipient').onchange = () => { dropTouched = false; checkRecipientGas() }
-$('amount').oninput = render
+let amountTimer
+$('amount').oninput = () => {
+  render()
+  //the Amadeus gas-drop default depends on how much arrives
+  if (dir === 'in') { clearTimeout(amountTimer); amountTimer = setTimeout(() => checkRecipientGas(), 400) }
+}
 $('max').onclick = () => {
-  const b = dir === 'out' ? balances.ama : balances.wama
-  if (b !== null) { $('amount').value = fmt(b); render() }
+  //an Amadeus send locks its tx budget from the same AMA balance: keep that back
+  const b = dir === 'out' ? (balances.ama === null ? null : balances.ama - AMA_FOR_TWO_TXS) : balances.wama
+  if (b !== null && b > 0n) { $('amount').value = fmt(b); $('amount').oninput() }
 }
 
 async function bridgeOut(a) {

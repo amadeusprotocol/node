@@ -5,6 +5,7 @@ import { encode as vecpak, fromBase58 } from '@amadeus-protocol/sdk'
 import { bridgeAbi, lightClientAbi } from './abi.js'
 import { decodeValidatorRecord, rosterEip, g2Eip, pad20, unpackOrder } from './codec.js'
 import { finalities } from './chains/index.js'
+import { paysToChain, costToChain } from './tips.js'
 
 const LOG_QUERY_BLOCKS = 1000
 //how far back a reorg could have moved an order's event
@@ -77,9 +78,17 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     const h = sp.entry_height
     await waitRooted(h)
     await adoptValidatorRecordsUpTo(h)
+    //the order pays for chain.deliveryGas at today's gas price: until it covers that, it waits (the
+    //recipient may claim it any time). The tx may never use more gas than was paid for: a recipient
+    //contract burning gas in its gas-drop callback costs the relay nothing beyond that
+    const price = await gasPrice()
+    if (!paysToChain(chain, price, o)) throw new Error(`amadeus order ${n} pays ${o.gasDropFee}, delivery costs ${costToChain(chain, price, o.gasDrop)} at ${price} wei gas: waiting`)
     const c = await ama.consensus(h)
-    const tx = await bridge.receiveOrderWithConsensus(fromBase58(c.claim), fromBase58(c.aggsig.mask), g2Eip(fromBase58(c.aggsig.aggsig)), await eipRosterAt(h),
-                                                      packed, toSolidityProof(sp.proofs[0].proof), { value: o.gasDrop, gasPrice: await gasPrice() })
+    const args = [fromBase58(c.claim), fromBase58(c.aggsig.mask), g2Eip(fromBase58(c.aggsig.aggsig)), await eipRosterAt(h), packed, toSolidityProof(sp.proofs[0].proof)]
+    const limit = BigInt(chain.deliveryGas)
+    const need = await bridge.receiveOrderWithConsensus.estimateGas(...args, { value: o.gasDrop, gasPrice: price })
+    if (need > limit) throw new Error(`amadeus order ${n} needs ${need} gas, priced for ${limit}: not for the relay (the recipient can claim it)`)
+    const tx = await bridge.receiveOrderWithConsensus(...args, { value: o.gasDrop, gasPrice: price, gasLimit: limit })
     const receipt = await tx.wait()
     for (let i = 0; (await finalizedHead()) < receipt.blockNumber; i++) {
       if (i > 60) throw new Error(`amadeus order ${n} delivery ${tx.hash} not final yet`)
@@ -131,7 +140,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
       it.block = ev.blockNumber
       const packed = getBytes(ev.args.order)
       if (!paysForDeliveryToAmadeus(unpackOrder(packed))) continue
-      const r = await ama.receivedFinal(chain.name, it.n, it.seen)
+      const r = await ama.receivedFinal(chain.name, chain.bridge, it.n, it.seen)
       if (r.final) continue
       if (r.received) { failed.push({ ...it, seen: r.seen, error: `order ${it.n} received, not final yet` }); continue }
       todo.push({ it: { ...it, seen: undefined }, packed })
@@ -155,7 +164,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
         log(key, 'delivered', p.it.n, 'at', h)
       } catch (e) {
         //received by someone else meanwhile: done once final, retried like any failure until then
-        const r = await ama.receivedFinal(chain.name, p.it.n)
+        const r = await ama.receivedFinal(chain.name, chain.bridge, p.it.n)
         failed.push({ ...p.it, seen: r.seen, error: r.received ? `order ${p.it.n} received, not final yet` : e.shortMessage ?? e.message })
       }
     }

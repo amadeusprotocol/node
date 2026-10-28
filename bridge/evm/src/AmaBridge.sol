@@ -26,6 +26,8 @@ contract AmaBridge {
     bool public receivePaused;
 
     uint256 public constant CAP_PER_DAY = 10_000_000 * 1e9;
+    /// gas a gas-drop transfer may use: an account or a wallet's receive, nothing more
+    uint256 public constant GAS_DROP_GAS = 30_000;
     bytes32 public immutable localChain;
     bytes32 public immutable amadeusChain;
     address public immutable admin;
@@ -127,11 +129,13 @@ contract AmaBridge {
         if ((receivedPerDay[block.timestamp / 1 days] += o.amount) > CAP_PER_DAY) revert CapReached();
         wama.mint(to, o.outputAmount);
         if (o.gasDropFee > 0) wama.mint(msg.sender, o.gasDropFee);
-        //a recipient that refuses the gas drop must not block the order: it goes back to the deliverer
+        //a recipient that refuses the gas drop must not block the order: it goes back to the deliverer.
+        //Both calls get GAS_DROP_GAS only, so a recipient contract cannot spend the deliverer's gas
+        //and a delivery always completes within the gas it was priced for
         if (msg.value > 0) {
-            (bool ok,) = to.call{value: msg.value}("");
+            (bool ok,) = to.call{value: msg.value, gas: GAS_DROP_GAS}("");
             if (!ok) {
-                (ok,) = msg.sender.call{value: msg.value}("");
+                (ok,) = msg.sender.call{value: msg.value, gas: GAS_DROP_GAS}("");
                 if (!ok) revert BadGasDrop();
             }
         }

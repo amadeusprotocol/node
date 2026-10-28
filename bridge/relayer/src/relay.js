@@ -14,7 +14,7 @@ const log = (...a) => console.log(new Date().toISOString(), ...a)
 const net = networks[NETWORK]
 const relay = createRelay(net, process.env.PRIVATE_KEY, log)
 const state = existsSync(STATE) ? JSON.parse(readFileSync(STATE)) : { amaNext: Number(net.amaNext || 1), from: {} }
-for (const [k, c] of Object.entries(relay.chains)) state.from[k] ??= Number(net.chains[k].from || 0) || (await c.finalizedHead())
+for (const k of Object.keys(relay.chains)) state.from[k] ??= Number(net.chains[k].from)
 const save = () => writeFileSync(STATE, JSON.stringify(state, null, 1))
 
 //an order that fails goes to a retry queue, so it never holds back the ones after it. It is
@@ -36,7 +36,11 @@ async function fromAmadeus() {
 
 const toAmadeus = c => async () => {
   const head = await c.finalizedHead()
-  for (const f of await c.deliverToAmadeus(await c.findTippedOrders(state.from[c.key], head))) retryLater({ ...f, from: c.key }, f)
+  const orders = await c.findTippedOrders(state.from[c.key], head)
+  //in batches: one proof request per batch stays within RPC limits
+  for (let i = 0; i < orders.length; i += 20) {
+    for (const f of await c.deliverToAmadeus(orders.slice(i, i + 20))) retryLater({ ...f, from: c.key }, f)
+  }
   state.from[c.key] = head + 1
   save()
 }

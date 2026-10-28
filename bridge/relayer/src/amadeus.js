@@ -22,7 +22,7 @@ export class Amadeus {
   //null only when the node says there is no such order: a failed lookup throws, so it is retried
   order = n => this.get(`/bridge/order/${n}`).then(j => fromBase58(j.order)).catch(e => { if (e.message.endsWith(': not_found')) return null; throw e })
   nonce = () => this.get('/bridge/nonce').then(j => j.nonce)
-  received = (chain, n) => this.get(`/bridge/received/${chain}/${n}`).then(j => j.received)
+  received = (chain, contract, n) => this.get(`/bridge/received/${chain}/${contract}/${n}`).then(j => j.received)
   validatorSet = h => this.get(`/bridge/validator_set/${h}`).then(j => ({ height: j.height, record: fromBase58(j.record) }))
   validatorRecord = h => this.get(`/proof/validator_record/${h}`)
   remoteRoot = (chain, h) => this.get(`/bridge/remote_root/${chain}/${h}`).then(j => j.root)
@@ -49,9 +49,9 @@ export class Amadeus {
   /// yet, so it takes two looks: `seen` is the entry an earlier look proved the marker at; once
   /// that entry is rooted and canonical the marker is final (markers are never removed). An
   /// entry that was rolled back is forgotten and the marker looked for afresh
-  async receivedFinal(chain, n, seen) {
+  async receivedFinal(chain, contract, n, seen) {
     if (await this.isFinal(seen)) return { received: true, final: true }
-    seen = await this.proveAtTip(new TextEncoder().encode(`bic:bridge:received:${chain}:${String(n).padStart(20, '0')}`), new Uint8Array())
+    seen = await this.proveAtTip(new TextEncoder().encode(`bic:bridge:received:${chain}:${contract.toLowerCase().replace(/^0x/, '')}:${String(n).padStart(20, '0')}`), new Uint8Array())
     return seen ? { received: true, final: false, seen } : { received: false, final: false }
   }
 

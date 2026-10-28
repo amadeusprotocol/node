@@ -6,7 +6,7 @@ import { Amadeus } from './amadeus.js'
 import { unpackOrder } from './codec.js'
 import { live } from './networks.js'
 import { createEvmChain } from './evm.js'
-import { paysToChain, paysToAmadeus } from './tips.js'
+import { paysToAmadeus, forRelay } from './tips.js'
 
 export const amadeusSeedFromRelayKey = privateKey => toBase58(getBytes(sha512(concat([toUtf8Bytes('amadeus'), getBytes(privateKey)]))))
 
@@ -26,7 +26,8 @@ export function createRelay(net, privateKey, log = console.log) {
     if (!packed) throw new Error(`amadeus order ${n} not final yet`)
     const o = unpackOrder(packed)
     const dst = byName[o.dstChain]
-    return dst && paysToChain(dst.chain, await dst.evm.gasPrice(), o) ? { evm: dst.evm, packed, o } : null
+    //meant for a relay: kept until delivered, whatever gas costs right now (deliverAmadeusOrder waits)
+    return dst && forRelay(dst.chain, o) ? { evm: dst.evm, packed, o } : null
   }
 
   return {

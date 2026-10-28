@@ -136,6 +136,25 @@ contract BridgeTest is Test {
         bridge.receiveOrderWithConsensus{value: 0.002 ether}(claim, mask, sig, roster, order, p);
     }
 
+    function test_a_recipient_burning_gas_cannot_spend_the_deliverers() public {
+        bytes memory order = vm.parseJsonBytes(json, ".tipped");
+        Hbsmt.Proof memory p = proof(".tipped_proof");
+        //the recipient is a contract whose receive burns every bit of gas it gets
+        vm.etch(recipient, address(new GasBurner()).code);
+        address relay = address(0x7e1a);
+        vm.deal(relay, 1 ether);
+        uint256 g = gasleft();
+        vm.prank(relay);
+        bridge.receiveOrderWithConsensus{value: 0.002 ether, gas: 720_000}(
+            vm.parseJsonBytes(json, ".claim"), vm.parseJsonBytes(json, ".mask"), vm.parseJsonBytes(json, ".sig"), roster, order, p);
+        uint256 used = g - gasleft();
+        emit log_named_uint("delivery gas with a gas-burning recipient", used);
+        assertLt(used, 720_000);
+        assertEq(wama.balanceOf(recipient), 250e9 - 250e9 / 100_000 - 5e9); //delivered
+        assertEq(recipient.balance, 0);
+        assertEq(relay.balance, 1 ether); //the refused drop came back
+    }
+
     function test_recipient_claims_its_own_order_without_the_gas_drop() public {
         finalize();
         bytes memory order = vm.parseJsonBytes(json, ".tipped");
@@ -216,5 +235,11 @@ contract BridgeTest is Test {
         assertEq(lc.latestHeight(), 5001);
         vm.expectRevert(AmadeusLightClient.StaleSet.selector);
         lc.submitValidatorSet(5000, record, p, rosterB);
+    }
+}
+
+contract GasBurner {
+    receive() external payable {
+        while (true) {}
     }
 }

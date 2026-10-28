@@ -14,6 +14,9 @@ import { createRelay } from '../src/core.js'
 const SWEEP_MS = 5 * 60_000
 const MAX_QUEUE = 500
 const RETRY_MAX_MS = 3_600_000
+//per chain and per alarm: a backlog drains over several alarms, each within an invocation's request budget
+const MAX_PER_ALARM = 20
+const AMA_SCAN = 50
 const SCAN_BLOCKS = 20_000
 const WAKE_MS = 10_000
 
@@ -108,18 +111,21 @@ export class Relay extends DurableObject {
     const s = this.ctx.storage
     const last = await this.relay.amaNonce()
     const start = networks[this.net].amaNext
-    const from = (await s.get('amaNext')) ?? (start ? Number(start) : last + 1)
-    const to = Math.min(last, from + 199)
+    //never from "now": orders created before the first scan would be skipped
+    const from = (await s.get('amaNext')) ?? (start ? Number(start) : 1)
+    const to = Math.min(last, from + AMA_SCAN - 1)
     const { tipped, next } = await this.relay.findTippedAmadeusOrders(from, to)
     for (const n of tipped) await this.enqueue(`q:amadeus:${n}`, { n })
     await s.put('amaNext', Math.max(from, next))
+    //caught up only past the latest nonce; otherwise the alarm comes back for the rest right away
+    return next > last
   }
 
   async scanChain(c) {
     const s = this.ctx.storage
     const head = await c.finalizedHead()
     const start = networks[this.net].chains[c.key].from
-    const from = (await s.get(`from:${c.key}`)) ?? (start ? Number(start) : head)
+    const from = (await s.get(`from:${c.key}`)) ?? Number(start) //live chains always have it
     const to = Math.min(head, from + SCAN_BLOCKS - 1)
     for (const o of await c.findTippedOrders(from, to)) await this.enqueue(`q:${c.key}:${o.n}`, o)
     await s.put(`from:${c.key}`, Math.max(from, to + 1))
@@ -136,14 +142,14 @@ export class Relay extends DurableObject {
   async work() {
     const now = Date.now()
     const due = [...(await this.ctx.storage.list({ prefix: 'q:' })).entries()].filter(([, v]) => v.due <= now)
-    for (const [key, item] of due.filter(([k]) => k.startsWith('q:amadeus:'))) {
+    for (const [key, item] of due.filter(([k]) => k.startsWith('q:amadeus:')).slice(0, MAX_PER_ALARM)) {
       try {
         if (!(await this.relay.deliverIfTipped(item.n))) this.note('amadeus order', item.n, 'not tipped for this relay')
         await this.ctx.storage.delete(key)
       } catch (e) { await this.retryLater(key, item, e) }
     }
     for (const c of Object.values(this.relay.chains)) {
-      const batch = due.filter(([k]) => k.startsWith(`q:${c.key}:`))
+      const batch = due.filter(([k]) => k.startsWith(`q:${c.key}:`)).slice(0, MAX_PER_ALARM)
       if (batch.length === 0) continue
       try {
         const failed = new Map((await c.deliverToAmadeus(batch.map(([, v]) => v))).map(f => [f.n, f]))
@@ -171,10 +177,15 @@ export class Relay extends DurableObject {
       sweepAt = Date.now() + SWEEP_MS
       await s.put('sweepAt', sweepAt)
     }
-    if ((await s.get('scanAma')) && (await this.step('amadeus scan', () => this.findTippedAmadeusOrders()))) await s.delete('scanAma')
+    if (await s.get('scanAma')) {
+      let caughtUp = false
+      await this.step('amadeus scan', async () => { caughtUp = await this.findTippedAmadeusOrders() })
+      if (caughtUp) await s.delete('scanAma')
+    }
     await this.work()
     const queued = [...(await s.list({ prefix: 'q:' })).values()].map(v => v.due)
-    await s.setAlarm(Math.max(Date.now() + 1000, Math.min(sweepAt, ...queued)))
+    const soon = (await s.get('scanAma')) ? [Date.now()] : []
+    await s.setAlarm(Math.max(Date.now() + 1000, Math.min(sweepAt, ...queued, ...soon)))
   }
 }
 

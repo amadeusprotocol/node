@@ -1,17 +1,18 @@
 // Every network the relay and site serve, and the chains bridged on each. Public values only:
 // the relay key is one secret per network (MAINNET_PRIVATE_KEY / TESTNET_PRIVATE_KEY).
-// A chain is live once its bridge, lightClient and wama are set; until then the relay skips it
+// A chain is live once its bridge, lightClient, wama and from are set; until then the relay skips it
 // and the site hides it. `finality` names its module in chains/.
-//   amaNext / from       first Amadeus order nonce / chain block the relay scans (empty: from its first run)
+//   amaNext / from       first Amadeus order nonce (empty: 1) / the bridge's deployment block on the chain
 //   No tips: an order pays the relay what delivering it costs, nothing more (src/tips.js).
 //   amadeusCost          AMA base units the relay spends on Amadeus to deliver there (root update +
 //                        receive: 0.011 AMA measured on testnet)
-//   deliveryGas          gas a delivery on the chain uses (667k-684k measured), paid at the chain's
+//   deliveryGas          gas a delivery may use and its tx gas limit: a ceiling (684k measured without a
+//                        gas drop, +~35k with one to a new account, proofs grow with state), at the chain's
 //                        current gas price, converted at amaPerGasCoin (whole AMA per whole gas coin;
 //                        '' = not priced, no relay delivery). 9360 = BNB $749 / AMA $0.08
 //   gasDrop(Ama)         the gas drop the site offers when the recipient could not pay for ~2 txs
 //   maxGasDrop(Ama)      largest gas drop the relay funds (chain wei / AMA base units)
-const chain = c => ({ bridge: '', lightClient: '', wama: '', from: '', trustEpoch: '', amaPerGasCoin: '', deliveryGas: 700000, maxGasDrop: '1000000000000000', gasDrop: '0.0001', ...c })
+const chain = c => ({ bridge: '', lightClient: '', wama: '', from: '', trustEpoch: '', amaPerGasCoin: '', deliveryGas: 800000, maxGasDrop: '1000000000000000', gasDrop: '0.0001', ...c })
 
 export default {
   mainnet: {
@@ -35,8 +36,8 @@ export default {
     chains: {
       bsc: chain({
         name: 'bsc-testnet', label: 'BSC Testnet', chainId: 97, rpc: 'https://bsc-testnet-rpc.publicnode.com', explorer: 'https://testnet.bscscan.com', gasSymbol: 'tBNB', finality: 'bsc',
-        bridge: '0xbA586F932faD75fc788a86c0ae95eb7469217596', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
-        wama: '0x720b8e01a632678E66Cfc6C83C442A44247e2821', from: '139266000', trustEpoch: '138539000',
+        bridge: '0xbA423F25aa91301761d7cb4C0f63eE769047B884', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
+        wama: '0x751D543E23E02BE2b40A0FB1dD36868746d4742e', from: '139440000', trustEpoch: '138539000',
         amaPerGasCoin: '9360',
       }),
       eth: chain({ name: 'eth-testnet', label: 'Ethereum Sepolia', chainId: 11155111, rpc: 'https://ethereum-sepolia-rpc.publicnode.com', gasSymbol: 'SepoliaETH', finality: 'eth' }),
@@ -45,4 +46,6 @@ export default {
   },
 }
 
-export const live = c => Boolean(c.bridge && c.lightClient && c.wama)
+//live only with its deployment block: the relay scans orders from there, never from "now",
+//so a fresh start (or lost relay storage) cannot skip an order created before its first scan
+export const live = c => Boolean(c.bridge && c.lightClient && c.wama && c.from)
