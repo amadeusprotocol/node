@@ -105,6 +105,7 @@ pub struct ApplyEnv<'db> {
     pub testnet: bool,
     pub readonly: bool,
     pub call_depth: u32,
+    pub overlay: consensus_kv::Overlay,
 }
 
 impl<'db> ApplyEnv<'db> {
@@ -115,6 +116,11 @@ impl<'db> ApplyEnv<'db> {
     ) -> (Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32])
     {
         (self.txn, self.muts_final, self.muts_final_rev, self.receipts, root_receipts, root_contractstate)
+    }
+
+    pub fn into_txn(mut self) -> Transaction<'db, TransactionDB<MultiThreaded>> {
+        consensus_kv::overlay_flush(&mut self);
+        self.txn
     }
 }
 
@@ -161,6 +167,7 @@ pub fn make_apply_env<'db>(
         testnet: testnet,
         readonly: false,
         call_depth: 0,
+        overlay: consensus_kv::Overlay::default(),
     }
 }
 
@@ -290,6 +297,8 @@ pub fn apply_entry<'db, 'a>(
         let tx_nonce = txu.tx.nonce;
         let action = txu.tx.action;
 
+        consensus_kv::overlay_commit_tx(&mut applyenv);
+
         applyenv.caller_env.tx_index = i as u64;
         applyenv.caller_env.tx_hash = tx_hash;
         applyenv.caller_env.tx_signer = tx_signer;
@@ -363,7 +372,7 @@ pub fn apply_entry<'db, 'a>(
             }
             Err(payload) => {
                 //TODO: refund storage costs on revert?
-                consensus_kv::revert(&mut applyenv);
+                consensus_kv::overlay_discard_tx(&mut applyenv);
                 refund_exec_storage_deposit(&mut applyenv);
 
                 if let Some(&s) = payload.downcast_ref::<&'static str>() {
@@ -543,6 +552,8 @@ pub fn contract_validate<'db, 'a>(
 /// Computes the contractstate root. The HBSMT in `contractstate_tree_hbsmt` IS the
 /// consensus contractstate tree (the legacy Hubt over `contractstate_tree` is gone).
 fn update_and_root_contractstate(applyenv: &mut ApplyEnv) -> [u8; 32] {
+    consensus_kv::overlay_flush(applyenv);
+
     //Select only the last muts, rest are irrelevent for tree
     let mut map: HashMap<Vec<u8>, consensus_muts::Mutation> = HashMap::new();
     for m in applyenv.muts_final.clone() {

@@ -151,7 +151,7 @@ impl Chain {
     pub fn with_env<R>(&self, signer: &[u8], f: impl FnOnce(&mut ApplyEnv<'static>) -> R) -> R {
         let mut env = self.make_env(signer);
         let result = f(&mut env);
-        let ApplyEnv { txn, .. } = env;
+        let txn = env.into_txn();
         txn.commit().unwrap();
         result
     }
@@ -176,7 +176,7 @@ impl Chain {
         }));
         match result {
             Ok(()) => {
-                let ApplyEnv { txn, .. } = env;
+                let txn = env.into_txn();
                 txn.commit().unwrap();
                 Ok(())
             }

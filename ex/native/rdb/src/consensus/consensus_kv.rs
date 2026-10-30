@@ -5,6 +5,140 @@ use consensus_apply::ApplyEnv;
 
 use crate::consensus::consensus_muts;
 use consensus_muts::Mutation;
+use std::collections::BTreeMap;
+use std::ops::Bound;
+
+#[derive(Default)]
+pub struct Overlay {
+    pub block: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub tx: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+}
+
+fn overlay_active(env: &ApplyEnv) -> bool {
+    env.cf_name.as_slice() == b"contractstate"
+}
+
+fn raw_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
+    if overlay_active(env) {
+        if let Some(v) = env.overlay.tx.get(key) {
+            return v.clone();
+        }
+        if let Some(v) = env.overlay.block.get(key) {
+            return v.clone();
+        }
+    }
+    env.txn.get_cf(&env.cf, key).unwrap()
+}
+
+fn raw_put(env: &mut ApplyEnv, key: &[u8], value: &[u8], err: &'static str) {
+    if overlay_active(env) {
+        env.overlay.tx.insert(key.to_vec(), Some(value.to_vec()));
+    } else {
+        env.txn.put_cf(&env.cf, key, value).unwrap_or_else(|_| panic_any(err));
+    }
+}
+
+fn raw_delete(env: &mut ApplyEnv, key: &[u8]) {
+    if overlay_active(env) {
+        env.overlay.tx.insert(key.to_vec(), None);
+    } else {
+        env.txn.delete_cf(&env.cf, key).unwrap_or_else(|_| panic_any("exec_kv_delete_failed"));
+    }
+}
+
+pub fn overlay_commit_tx(env: &mut ApplyEnv) {
+    let tx = std::mem::take(&mut env.overlay.tx);
+    env.overlay.block.extend(tx);
+}
+
+pub fn overlay_discard_tx(env: &mut ApplyEnv) {
+    env.overlay.tx.clear();
+}
+
+pub fn overlay_flush(env: &mut ApplyEnv) {
+    overlay_commit_tx(env);
+    let block = std::mem::take(&mut env.overlay.block);
+    for (key, value) in block {
+        match value {
+            Some(v) => env.txn.put_cf(&env.cf_contractstate, &key, &v).unwrap_or_else(|_| panic_any("exec_kv_flush_failed")),
+            None => env.txn.delete_cf(&env.cf_contractstate, &key).unwrap_or_else(|_| panic_any("exec_kv_flush_failed")),
+        }
+    }
+}
+
+fn overlay_next(env: &ApplyEnv, cursor: &[u8], inclusive: bool) -> Option<Vec<u8>> {
+    let lo = if inclusive { Bound::Included(cursor) } else { Bound::Excluded(cursor) };
+    let a = env.overlay.tx.range::<[u8], _>((lo, Bound::Unbounded)).next().map(|(k, _)| k.clone());
+    let b = env.overlay.block.range::<[u8], _>((lo, Bound::Unbounded)).next().map(|(k, _)| k.clone());
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+fn overlay_prev(env: &ApplyEnv, cursor: &[u8], inclusive: bool) -> Option<Vec<u8>> {
+    let hi = if inclusive { Bound::Included(cursor) } else { Bound::Excluded(cursor) };
+    let a = env.overlay.tx.range::<[u8], _>((Bound::Unbounded, hi)).next_back().map(|(k, _)| k.clone());
+    let b = env.overlay.block.range::<[u8], _>((Bound::Unbounded, hi)).next_back().map(|(k, _)| k.clone());
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+fn merged_next(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>, Vec<u8>)> {
+    let active = overlay_active(env);
+    let mut it = env.txn.raw_iterator_cf(&env.cf);
+    let mut cursor = seek.to_vec();
+    let mut inclusive = inclusive;
+    loop {
+        it.seek(&cursor);
+        if !inclusive && it.valid() && it.key() == Some(&cursor[..]) {
+            it.next();
+        }
+        let db_key = if it.valid() { it.key().map(|k| k.to_vec()) } else { None };
+        let ov_key = if active { overlay_next(env, &cursor, inclusive) } else { None };
+        let key = match (db_key, ov_key) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => return None,
+        };
+        match raw_get(env, &key) {
+            Some(v) => return Some((key, v)),
+            None => {
+                cursor = key;
+                inclusive = false;
+            }
+        }
+    }
+}
+
+fn merged_prev(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>, Vec<u8>)> {
+    let active = overlay_active(env);
+    let mut it = env.txn.raw_iterator_cf(&env.cf);
+    let mut cursor = seek.to_vec();
+    let mut inclusive = inclusive;
+    loop {
+        it.seek_for_prev(&cursor);
+        if !inclusive && it.valid() && it.key() == Some(&cursor[..]) {
+            it.prev();
+        }
+        let db_key = if it.valid() { it.key().map(|k| k.to_vec()) } else { None };
+        let ov_key = if active { overlay_prev(env, &cursor, inclusive) } else { None };
+        let key = match (db_key, ov_key) {
+            (Some(a), Some(b)) => a.max(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => return None,
+        };
+        match raw_get(env, &key) {
+            Some(v) => return Some((key, v)),
+            None => {
+                cursor = key;
+                inclusive = false;
+            }
+        }
+    }
+}
 
 pub fn exec_budget_decr(env: &mut ApplyEnv, amount: i128) {
     if amount < 0 {
@@ -67,7 +201,7 @@ pub fn kv_put(env: &mut ApplyEnv, key: &[u8], value: &[u8]) {
     exec_kv_size(key, Some(value));
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len() + value.len()) as i128);
 
-    let old_value = env.txn.get_cf(&env.cf, key).unwrap();
+    let old_value = raw_get(env, key);
     match old_value {
         None => {
             storage_budget_decr(env, protocol::COST_PER_NEW_LEAF_MERKLE);
@@ -75,7 +209,7 @@ pub fn kv_put(env: &mut ApplyEnv, key: &[u8], value: &[u8]) {
             env.muts_rev.push(Mutation::Delete { op: b"delete".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec() });
 
             env.muts.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: value.to_vec() });
-            env.txn.put_cf(&env.cf, key, value).unwrap_or_else(|_| panic_any("exec_kv_put_failed"))
+            raw_put(env, key, value, "exec_kv_put_failed")
         }
         Some(old) => {
             //TODO: consider gas refund on delete? gas-token attack?
@@ -83,7 +217,7 @@ pub fn kv_put(env: &mut ApplyEnv, key: &[u8], value: &[u8]) {
             env.muts_rev.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: old.to_vec() });
 
             env.muts.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: value.to_vec() });
-            env.txn.put_cf(&env.cf, key, value).unwrap_or_else(|_| panic_any("exec_kv_put_failed"))
+            raw_put(env, key, value, "exec_kv_put_failed")
         }
     }
 }
@@ -96,14 +230,14 @@ pub fn kv_increment(env: &mut ApplyEnv, key: &[u8], value: i128) -> i128 {
     let value_str = value.to_string().into_bytes();
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len() + value_str.len()) as i128);
 
-    match env.txn.get_cf(&env.cf, key).unwrap() {
+    match raw_get(env, key) {
         None => {
             exec_kv_size(key, Some(&value_str));
             storage_budget_decr(env, protocol::COST_PER_NEW_LEAF_MERKLE);
             storage_budget_decr(env, protocol::COST_PER_BYTE_STATE * (key.len() + value_str.len()) as i128);
             env.muts.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: value.to_string().into_bytes() });
             env.muts_rev.push(Mutation::Delete { op: b"delete".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec() });
-            env.txn.put_cf(&env.cf, key, value_str).unwrap_or_else(|_| panic_any("exec_kv_increment_failed"));
+            raw_put(env, key, &value_str, "exec_kv_increment_failed");
             value
         }
         Some(old) => {
@@ -114,7 +248,7 @@ pub fn kv_increment(env: &mut ApplyEnv, key: &[u8], value: i128) -> i128 {
             storage_budget_decr(env, protocol::COST_PER_BYTE_STATE * new_value_str.len().saturating_sub(old.len()) as i128);
             env.muts.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: new_value.to_string().into_bytes() });
             env.muts_rev.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: old });
-            env.txn.put_cf(&env.cf, key, new_value.to_string().into_bytes()).unwrap_or_else(|_| panic_any("kv_put_failed"));
+            raw_put(env, key, &new_value_str, "kv_put_failed");
             new_value
         }
     }
@@ -127,14 +261,14 @@ pub fn kv_delete(env: &mut ApplyEnv, key: &[u8]) {
 
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len()) as i128);
 
-    match env.txn.get_cf(&env.cf, key).unwrap() {
+    match raw_get(env, key) {
         None => (),
         Some(old) => {
             env.muts.push(Mutation::Delete { op: b"delete".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec() });
             env.muts_rev.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: old.to_vec() })
         }
     }
-    env.txn.delete_cf(&env.cf, key).unwrap_or_else(|_| panic_any("exec_kv_delete_failed"));
+    raw_delete(env, key);
 }
 
 pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
@@ -144,7 +278,7 @@ pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
 
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len()) as i128);
 
-    let (mut old, exists) = match env.txn.get_cf(&env.cf, key).unwrap() {
+    let (mut old, exists) = match raw_get(env, key) {
         None => (vec![0u8; crate::consensus::bic::sol_bloom::PAGE_SIZE as usize], false),
         Some(value) => (value, true),
     };
@@ -168,7 +302,7 @@ pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
             false => env.muts_rev.push(Mutation::Delete { op: b"delete".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec() }),
         };
         old[byte_idx] |= mask;
-        env.txn.put_cf(&env.cf, key, &old).unwrap_or_else(|_| panic_any("exec_kv_set_bit_failed"));
+        raw_put(env, key, &old, "exec_kv_set_bit_failed");
         true
     }
 }
@@ -176,7 +310,7 @@ pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
 pub fn kv_exists(env: &mut ApplyEnv, key: &[u8]) -> bool {
     exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::COST_PER_DB_READ_BYTE * (key.len()) as i128);
 
-    match env.txn.get_cf(&env.cf, key).unwrap() {
+    match raw_get(env, key) {
         None => false,
         Some(v) => {
             charge_read_value(env, v.len());
@@ -188,7 +322,7 @@ pub fn kv_exists(env: &mut ApplyEnv, key: &[u8]) -> bool {
 pub fn kv_get(env: &mut ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
     exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::COST_PER_DB_READ_BYTE * (key.len()) as i128);
 
-    let v = env.txn.get_cf(&env.cf, key).unwrap();
+    let v = raw_get(env, key);
     if let Some(ref val) = v {
         charge_read_value(env, val.len());
     }
@@ -200,25 +334,9 @@ pub fn kv_get_next(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 
     let seek = [prefix, key].concat();
 
-    let result = {
-        let mut it = env.txn.raw_iterator_cf(&env.cf);
-        it.seek(&seek);
-        if !it.valid() {
-            None
-        } else {
-            if let Some(k) = it.key() {
-                if k == &seek {
-                    it.next();
-                }
-            }
-            match it.item() {
-                Some((k, v)) if k.starts_with(prefix) => {
-                    let next_key_wo_prefix = k[prefix.len()..].to_vec();
-                    Some((next_key_wo_prefix, v.to_vec()))
-                }
-                _ => None,
-            }
-        }
+    let result = match merged_next(env, &seek, false) {
+        Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
+        _ => None,
     };
 
     if let Some((_, ref v)) = result {
@@ -232,25 +350,9 @@ pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 
     let seek = [prefix, key].concat();
 
-    let result = {
-        let mut it = env.txn.raw_iterator_cf(&env.cf);
-        it.seek_for_prev(&seek);
-        if !it.valid() {
-            None
-        } else {
-            if let Some(k) = it.key() {
-                if k == &seek {
-                    it.prev();
-                }
-            }
-            match it.item() {
-                Some((k, v)) if k.starts_with(prefix) => {
-                    let next_key_wo_prefix = k[prefix.len()..].to_vec();
-                    Some((next_key_wo_prefix, v.to_vec()))
-                }
-                _ => None,
-            }
-        }
+    let result = match merged_prev(env, &seek, false) {
+        Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
+        _ => None,
     };
 
     if let Some((_, ref v)) = result {
@@ -264,16 +366,9 @@ pub fn kv_get_prev_or_first(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Op
 
     let seek = [prefix, key].concat();
 
-    let result = {
-        let mut it = env.txn.raw_iterator_cf(&env.cf);
-        it.seek_for_prev(&seek);
-        match it.item() {
-            Some((k, v)) if k.starts_with(prefix) => {
-                let next_key_wo_prefix = k[prefix.len()..].to_vec();
-                Some((next_key_wo_prefix, v.to_vec()))
-            }
-            _ => None,
-        }
+    let result = match merged_prev(env, &seek, true) {
+        Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
+        _ => None,
     };
 
     if let Some((_, ref v)) = result {
@@ -291,40 +386,5 @@ pub fn contractstate_namespace(key: &[u8]) -> Option<Vec<u8>> {
         Some(b"bic".to_vec())
     } else {
         None
-    }
-}
-
-pub fn revert(env: &mut ApplyEnv) {
-    for m in env.muts_rev.clone().iter().rev() {
-        match m {
-            Mutation::Put { op, table, key, value } => match table.as_slice() {
-                b"contractstate" => env.txn.put_cf(&env.cf_contractstate, key, value).unwrap(),
-                b"contractstate_tree_hbsmt" => env.txn.put_cf(&env.cf_contractstate_tree_hbsmt, key, value).unwrap(),
-                _ => panic!("Unknown table"),
-            },
-            Mutation::Delete { op, table, key } => match table.as_slice() {
-                b"contractstate" => env.txn.delete_cf(&env.cf_contractstate, key).unwrap(),
-                b"contractstate_tree_hbsmt" => env.txn.delete_cf(&env.cf_contractstate_tree_hbsmt, key).unwrap(),
-                _ => panic!("Unknown table"),
-            },
-            Mutation::SetBit { op, table, key, value, bloomsize } => {}
-            Mutation::ClearBit { op, table, key, value } => {
-                let bit_idx = value;
-                if let Some(mut old) = kv_get(env, key.as_slice()) {
-                    let byte_idx = (bit_idx / 8) as usize;
-                    let bit_in = (bit_idx % 8) as u8; // 0..=7, MSB-first
-                    if byte_idx < old.len() {
-                        let mask: u8 = 1u8 << (7 - bit_in);
-                        // Force bit to 0 (idempotent)
-                        old[byte_idx] &= !mask;
-                        match table.as_slice() {
-                            b"contractstate" => env.txn.put_cf(&env.cf_contractstate, key, &old).unwrap(),
-                            b"contractstate_tree_hbsmt" => env.txn.put_cf(&env.cf_contractstate_tree_hbsmt, key, &old).unwrap(),
-                            _ => panic!("Unknown table"),
-                        }
-                    }
-                }
-            }
-        }
     }
 }

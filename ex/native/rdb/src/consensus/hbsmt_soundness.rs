@@ -1374,6 +1374,7 @@ impl TestEnv {
             testnet: false,
             readonly: false,
             call_depth: 0,
+            overlay: Default::default(),
         }
     }
 }
