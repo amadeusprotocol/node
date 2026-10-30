@@ -150,6 +150,7 @@ defmodule Ama do
   end
 
   def run_node_services() do
+    ForkRepair.run()
     ensure_mmr_synced()
 
     #ReplicaGen first: until its init marks the replica not-ready, can_sign? is

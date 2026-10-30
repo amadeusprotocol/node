@@ -167,6 +167,7 @@ defmodule FabricGen do
     next_entries = height
     |> DB.Entry.by_height()
     |> Enum.filter(& &1.header.prev_hash == parent_hash)
+    |> Enum.filter(& &1.hash not in :persistent_term.get(SoftforkDenyHash, []))
     |> Enum.map(fn(entry)->
         {claim_hash, score} = DB.Attestation.best_consensus_by_entryhash(entry.hash)
         {entry, claim_hash, score}

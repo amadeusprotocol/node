@@ -70,6 +70,7 @@ defmodule FabricInbox do
       cond do
         !is_integer(height) -> {:error, :height_not_integer}
         height < chain_rooted_height() -> {:error, :below_rooted}
+        entry_hash in :persistent_term.get(SoftforkDenyHash, []) -> {:error, :denied}
         :ets.member(FabricInbox, key) or DB.Entry.in_chain(entry_hash) -> {:exists, peer_tip}
         true ->
           case Entry.unpack_and_validate_from_net(entry_packed) do
