@@ -327,8 +327,14 @@ fn split_key(path: &Path, depth: u16) -> [u8; 34] {
     k
 }
 
+enum Leaves<'a> {
+    Txn(DBRawIteratorWithThreadMode<'a, Transaction<'a, TransactionDB<MultiThreaded>>>),
+    Db(RawIter<'a>, &'a BTreeMap<Path, Option<Vec<u8>>>),
+}
+
 struct Ctx<'a> {
     txn: &'a Transaction<'a, TransactionDB<MultiThreaded>>,
+    leaves: Leaves<'a>,
     cf_leaves: &'a Arc<BoundColumnFamily<'a>>,
     cf_splits: &'a Arc<BoundColumnFamily<'a>>,
     empties: &'a [Hash; 257],
@@ -366,8 +372,11 @@ impl<'a> Ctx<'a> {
 
     /// Two leaves at or after `lo`, ≤ `hi`. Filters out 34-byte split keys
     /// that share the CF with 32-byte leaf keys.
-    fn first_two_leaves_in(&self, lo: &Path, hi: &Path) -> (Option<(Path, Hash, Hash)>, bool) {
-        let mut iter = self.txn.raw_iterator_cf(self.cf_leaves);
+    fn first_two_leaves_in(&mut self, lo: &Path, hi: &Path) -> (Option<(Path, Hash, Hash)>, bool) {
+        let iter = match &mut self.leaves {
+            Leaves::Txn(iter) => iter,
+            Leaves::Db(iter, pending) => return first_two_leaves_pending(iter, pending, lo, hi),
+        };
         iter.seek(lo);
         let mut first: Option<(Path, Hash, Hash)> = None;
         let mut more = false;
@@ -392,6 +401,35 @@ impl<'a> Ctx<'a> {
         }
         (first, more)
     }
+}
+
+fn first_two_leaves_pending(iter: &mut RawIter, pending: &BTreeMap<Path, Option<Vec<u8>>>, lo: &Path, hi: &Path) -> (Option<(Path, Hash, Hash)>, bool) {
+    let mut found: Vec<(Path, Hash, Hash)> = Vec::with_capacity(4);
+    iter.seek(lo);
+    let mut from_db = 0;
+    while from_db < 2 && iter.valid() {
+        let k = match iter.key() { Some(k) => k, None => break };
+        if k > hi.as_slice() { break; }
+        if k.len() == 32 {
+            let mut path = [0u8; 32];
+            path.copy_from_slice(k);
+            if !pending.contains_key(&path) {
+                if let Some((id, val)) = iter.value().and_then(decode_leaf) {
+                    found.push((path, id, val));
+                    from_db += 1;
+                }
+            }
+        }
+        iter.next();
+    }
+    found.extend(
+        pending.range(*lo..=*hi)
+            .filter_map(|(path, v)| v.as_deref().and_then(decode_leaf).map(|(id, val)| (*path, id, val)))
+            .take(2),
+    );
+    found.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let more = found.len() > 1;
+    (found.into_iter().next(), more)
 }
 
 /// Collapse a batch of ops to a sorted map of `path → Option<(id, val)>`
@@ -425,14 +463,16 @@ fn collapse_ops_to_latest(ops: Vec<Op>) -> BTreeMap<Path, Option<(Hash, Hash)>> 
 /// per-batch split writes/deletes WITHOUT flushing them. Callers flush either
 /// straight to the txn (`descend_and_flush`) or through `kv_put`/`kv_delete` so
 /// the writes are recorded as mutations (`hbsmt_batch_update_env_muts`).
-fn descend_and_collect_splits(
-    txn: &Transaction<TransactionDB<MultiThreaded>>,
-    cf: &Arc<BoundColumnFamily>,
-    empties: &[Hash; 257],
+fn descend_and_collect_splits<'a>(
+    txn: &'a Transaction<'a, TransactionDB<MultiThreaded>>,
+    cf: &'a Arc<BoundColumnFamily<'a>>,
+    empties: &'a [Hash; 257],
     dirty: &[Path],
+    leaves: Option<Leaves<'a>>,
 ) -> (FxHashMap<(Path, u16), Hash>, Vec<(Path, u16)>) {
     let mut ctx = Ctx {
         txn,
+        leaves: leaves.unwrap_or_else(|| Leaves::Txn(txn.raw_iterator_cf(cf))),
         cf_leaves: cf,
         cf_splits: cf,
         empties,
@@ -450,7 +490,7 @@ fn descend_and_flush(
     empties: &[Hash; 257],
     dirty: &[Path],
 ) {
-    let (split_writes, split_deletes) = descend_and_collect_splits(txn, cf, empties, dirty);
+    let (split_writes, split_deletes) = descend_and_collect_splits(txn, cf, empties, dirty, None);
     for ((path, depth), hash) in split_writes {
         txn.put_cf(cf, split_key(&path, depth), hash).unwrap();
     }
@@ -630,6 +670,7 @@ pub fn hbsmt_root_env(env: &mut ApplyEnv, cf_name: &str) -> [u8; 32] {
     let empties = make_empties();
     let mut ctx = Ctx {
         txn: &env.txn,
+        leaves: Leaves::Txn(env.txn.raw_iterator_cf(&cf)),
         cf_leaves: &cf,
         cf_splits: &cf,           // SAME CF — length filter disambiguates
         empties: &empties,
@@ -680,6 +721,7 @@ pub fn hbsmt_batch_update_db(db: &TransactionDB<MultiThreaded>, cf_name: &str, o
 
 pub fn hbsmt_batch_update_env(env: &mut ApplyEnv, cf_name: &str, ops: Vec<Op>) {
     if ops.is_empty() { return; }
+    env.tree_written = true;
     let cf = env.db.cf_handle(cf_name).unwrap();
     let latest = collapse_ops_to_latest(ops);
 
@@ -752,7 +794,10 @@ pub fn hbsmt_batch_update_env_muts(env: &mut ApplyEnv, cf_name: &str, ops: Vec<O
     // Split phase: compute touched internal nodes (descend reads env.txn, which
     // already reflects the leaf writes above), then record them as mutations too.
     let empties = make_empties();
-    let (split_writes, split_deletes) = descend_and_collect_splits(&env.txn, &cf, &empties, &dirty);
+    let pending: BTreeMap<Path, Option<Vec<u8>>> = latest.iter().map(|(path, val)| (*path, val.as_ref().map(|(id, v)| encode_leaf(id, v).to_vec()))).collect();
+    let leaves = (!env.tree_written).then(|| Leaves::Db(env.db.raw_iterator_cf(&cf), &pending));
+    env.tree_written = true;
+    let (split_writes, split_deletes) = descend_and_collect_splits(&env.txn, &cf, &empties, &dirty, leaves);
     for ((path, depth), hash) in split_writes {
         kv_put(env, &split_key(&path, depth), &hash);
     }

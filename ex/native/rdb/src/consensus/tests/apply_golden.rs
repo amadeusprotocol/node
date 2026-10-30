@@ -12,13 +12,13 @@ use crate::consensus::tests::chain_harness::{new_wallet, Chain, Wallet};
 use crate::model::entry::{Entry, Header};
 use crate::model::tx::{Action, TX, TXU};
 
-const HEIGHT: u64 = 90_000_123;
+pub(crate) const HEIGHT: u64 = 90_000_123;
 
-fn txu(signer: &Wallet, nonce: u64, contract: &[u8], function: &[u8], args: Vec<Vec<u8>>) -> TXU {
+pub(crate) fn txu(signer: &Wallet, nonce: u64, contract: &[u8], function: &[u8], args: Vec<Vec<u8>>) -> TXU {
     txu_attached(signer, nonce, contract, function, args, None)
 }
 
-fn txu_attached(signer: &Wallet, nonce: u64, contract: &[u8], function: &[u8], args: Vec<Vec<u8>>, attached: Option<(&[u8], i128)>) -> TXU {
+pub(crate) fn txu_attached(signer: &Wallet, nonce: u64, contract: &[u8], function: &[u8], args: Vec<Vec<u8>>, attached: Option<(&[u8], i128)>) -> TXU {
     let hash = blake3::hash(&bcat(&[&signer.pk, &nonce.to_be_bytes(), contract, function])).as_bytes().to_vec();
     TXU {
         hash,
@@ -39,7 +39,7 @@ fn txu_attached(signer: &Wallet, nonce: u64, contract: &[u8], function: &[u8], a
     }
 }
 
-fn entry(height: u64, signer: &Wallet, txs: Vec<TXU>) -> Entry {
+pub(crate) fn entry(height: u64, signer: &Wallet, txs: Vec<TXU>) -> Entry {
     Entry {
         hash: blake3::hash(&height.to_be_bytes()).as_bytes().to_vec(),
         signature: vec![0u8; 96],
@@ -59,7 +59,7 @@ fn entry(height: u64, signer: &Wallet, txs: Vec<TXU>) -> Entry {
     }
 }
 
-fn wallet_from(seed: u8) -> Wallet {
+pub(crate) fn wallet_from(seed: u8) -> Wallet {
     //deterministic keys: the digest covers balances keyed by pk
     let mut sk = [0u8; 64];
     sk[..32].copy_from_slice(blake3::hash(&[seed]).as_bytes());
@@ -67,21 +67,21 @@ fn wallet_from(seed: u8) -> Wallet {
     Wallet { sk, pk }
 }
 
-fn sol_bytes(epoch: u64, pk: &[u8; 48], salt: u8) -> Vec<u8> {
+pub(crate) fn sol_bytes(epoch: u64, pk: &[u8; 48], salt: u8) -> Vec<u8> {
     let mut sol = vec![salt; crate::consensus::bic::sol::SOL_SIZE];
     sol[0..4].copy_from_slice(&(epoch as u32).to_le_bytes());
     sol[36..84].copy_from_slice(pk);
     sol
 }
 
-fn hash_muts(h: &mut blake3::Hasher, muts: &[Mutation]) {
+pub(crate) fn hash_muts(h: &mut blake3::Hasher, muts: &[Mutation]) {
     h.update(&(muts.len() as u64).to_be_bytes());
     for m in muts {
         h.update(format!("{:?}", m).as_bytes());
     }
 }
 
-fn state_digest(chain: &Chain, cf: &str) -> [u8; 32] {
+pub(crate) fn state_digest(chain: &Chain, cf: &str) -> [u8; 32] {
     let cf = chain.db.cf_handle(cf).unwrap();
     let mut iter = chain.db.raw_iterator_cf(&cf);
     let mut h = blake3::Hasher::new();
@@ -116,7 +116,7 @@ fn apply_net(chain: &Chain, e: Entry, h: &mut blake3::Hasher, testnet: bool) {
 }
 
 //seed the tree with the genesis state so the root covers it
-fn seed_tree(chain: &Chain) {
+pub(crate) fn seed_tree(chain: &Chain) {
     let cf = chain.db.cf_handle("contractstate").unwrap();
     let mut ops = Vec::new();
     let mut iter = chain.db.raw_iterator_cf(&cf);
@@ -180,13 +180,13 @@ fn run_blocks() -> [u8; 32] {
 }
 
 //module exporting run() with an empty body
-const WASM_RUN_EMPTY: &[u8] = &[
+pub(crate) const WASM_RUN_EMPTY: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00,
     0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
 ];
 
 //module exporting run() that loops forever
-const WASM_RUN_LOOP: &[u8] = &[
+pub(crate) const WASM_RUN_LOOP: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00,
     0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
 ];
@@ -263,7 +263,7 @@ fn new_wallet_det(seed: u8) -> Wallet {
     wallet_from(seed)
 }
 
-fn hex(b: &[u8]) -> String {
+pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{:02x}", x)).collect()
 }
 

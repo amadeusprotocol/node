@@ -13,14 +13,15 @@ pub type BitWrites = BTreeMap<Vec<u8>, BTreeSet<u64>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
-    Key { key: Vec<u8>, value: Option<Vec<u8>> },
-    Next { seek: Vec<u8>, found: Option<(Vec<u8>, Vec<u8>)> },
-    Prev { seek: Vec<u8>, inclusive: bool, found: Option<(Vec<u8>, Vec<u8>)> },
+    Key { key: Vec<u8>, value: Option<[u8; 32]> },
+    Next { seek: Vec<u8>, found: Option<(Vec<u8>, [u8; 32])> },
+    Prev { seek: Vec<u8>, inclusive: bool, found: Option<(Vec<u8>, [u8; 32])> },
     Bit { key: Vec<u8>, bit: u64, exists: bool, set: bool },
 }
 
 #[derive(Default)]
 pub struct Overlay {
+    pub shared: std::sync::Arc<Writes>,
     pub block: Writes,
     pub tx: Writes,
     pub bits: BitWrites,
@@ -39,6 +40,9 @@ fn layered_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
         if let Some(v) = env.overlay.block.get(key) {
             return v.clone();
         }
+        if let Some(v) = env.overlay.shared.get(key) {
+            return v.clone();
+        }
     }
     env.txn.get_cf(&env.cf, key).unwrap()
 }
@@ -47,13 +51,21 @@ fn raw_get(env: &mut ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
     let value = layered_get(env, key);
     if overlay_active(env) {
         if !env.overlay.tx.contains_key(key) {
-            env.overlay.reads.push(Read::Key { key: key.to_vec(), value: value.clone() });
+            env.overlay.reads.push(Read::Key { key: key.to_vec(), value: digest(&value) });
         } else if env.overlay.bits.contains_key(key) {
             let outside = outside_get(env, key);
-            env.overlay.reads.push(Read::Key { key: key.to_vec(), value: outside });
+            env.overlay.reads.push(Read::Key { key: key.to_vec(), value: digest(&outside) });
         }
     }
     value
+}
+
+pub fn digest(value: &Option<Vec<u8>>) -> Option<[u8; 32]> {
+    value.as_ref().map(|v| *blake3::hash(v).as_bytes())
+}
+
+pub fn digest_found(found: &Option<(Vec<u8>, Vec<u8>)>) -> Option<(Vec<u8>, [u8; 32])> {
+    found.as_ref().map(|(k, v)| (k.clone(), *blake3::hash(v).as_bytes()))
 }
 
 fn record(env: &mut ApplyEnv, read: Read) {
@@ -101,11 +113,7 @@ pub fn overlay_take_tx(env: &mut ApplyEnv) -> (Writes, BitWrites, Vec<Read>) {
 pub fn overlay_apply(env: &mut ApplyEnv, writes: Writes, bits: BitWrites) {
     env.overlay.block.extend(writes);
     for (key, set) in bits {
-        let mut page = match env.overlay.block.get(&key) {
-            Some(v) => v.clone(),
-            None => env.txn.get_cf(&env.cf_contractstate, &key).unwrap(),
-        }
-        .unwrap_or_else(|| vec![0u8; crate::consensus::bic::sol_bloom::PAGE_SIZE as usize]);
+        let mut page = outside_get(env, &key).unwrap_or_else(|| vec![0u8; crate::consensus::bic::sol_bloom::PAGE_SIZE as usize]);
         for bit in set {
             page[(bit / 8) as usize] |= 1u8 << (7 - (bit % 8) as u8);
         }
@@ -114,10 +122,23 @@ pub fn overlay_apply(env: &mut ApplyEnv, writes: Writes, bits: BitWrites) {
 }
 
 fn outside_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
-    match env.overlay.block.get(key) {
+    match env.overlay.block.get(key).or_else(|| env.overlay.shared.get(key)) {
         Some(v) => v.clone(),
-        None => env.txn.get_cf(&env.cf, key).unwrap(),
+        None => env.txn.get_cf(&env.cf_contractstate, key).unwrap(),
     }
+}
+
+pub fn reads_valid(env: &ApplyEnv, reads: &[Read]) -> bool {
+    reads.iter().all(|read| match read {
+        Read::Key { key, value } => digest(&outside_get(env, key)) == *value,
+        Read::Bit { key, bit, exists, set } => {
+            let page = outside_get(env, key);
+            let byte = (*bit / 8) as usize;
+            page.is_some() == *exists && page.map_or(false, |p| p[byte] & (1u8 << (7 - (*bit % 8) as u8)) != 0) == *set
+        }
+        Read::Next { seek, found } => digest_found(&merged_next(env, seek, false)) == *found,
+        Read::Prev { seek, inclusive, found } => digest_found(&merged_prev(env, seek, *inclusive)) == *found,
+    })
 }
 
 pub fn overlay_flush(env: &mut ApplyEnv) {
@@ -133,22 +154,18 @@ pub fn overlay_flush(env: &mut ApplyEnv) {
 
 fn overlay_next(env: &ApplyEnv, cursor: &[u8], inclusive: bool) -> Option<Vec<u8>> {
     let lo = if inclusive { Bound::Included(cursor) } else { Bound::Excluded(cursor) };
-    let a = env.overlay.tx.range::<[u8], _>((lo, Bound::Unbounded)).next().map(|(k, _)| k.clone());
-    let b = env.overlay.block.range::<[u8], _>((lo, Bound::Unbounded)).next().map(|(k, _)| k.clone());
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
+    [&env.overlay.tx, &env.overlay.block, &*env.overlay.shared]
+        .iter()
+        .filter_map(|layer| layer.range::<[u8], _>((lo, Bound::Unbounded)).next().map(|(k, _)| k.clone()))
+        .min()
 }
 
 fn overlay_prev(env: &ApplyEnv, cursor: &[u8], inclusive: bool) -> Option<Vec<u8>> {
     let hi = if inclusive { Bound::Included(cursor) } else { Bound::Excluded(cursor) };
-    let a = env.overlay.tx.range::<[u8], _>((Bound::Unbounded, hi)).next_back().map(|(k, _)| k.clone());
-    let b = env.overlay.block.range::<[u8], _>((Bound::Unbounded, hi)).next_back().map(|(k, _)| k.clone());
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, b) => a.or(b),
-    }
+    [&env.overlay.tx, &env.overlay.block, &*env.overlay.shared]
+        .iter()
+        .filter_map(|layer| layer.range::<[u8], _>((Bound::Unbounded, hi)).next_back().map(|(k, _)| k.clone()))
+        .max()
 }
 
 fn merged_next(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -326,14 +343,11 @@ pub fn kv_delete(env: &mut ApplyEnv, key: &[u8]) {
 
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len()) as i128);
 
-    match raw_get(env, key) {
-        None => (),
-        Some(old) => {
-            env.muts.push(Mutation::Delete { op: b"delete".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec() });
-            env.muts_rev.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: old.to_vec() })
-        }
+    if let Some(old) = raw_get(env, key) {
+        env.muts.push(Mutation::Delete { op: b"delete".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec() });
+        env.muts_rev.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: old.to_vec() });
+        raw_delete(env, key);
     }
-    raw_delete(env, key);
 }
 
 pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
@@ -413,7 +427,7 @@ pub fn kv_get_next(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
     let seek = [prefix, key].concat();
 
     let found = merged_next(env, &seek, false);
-    record(env, Read::Next { seek: seek.clone(), found: found.clone() });
+    record(env, Read::Next { seek: seek.clone(), found: digest_found(&found) });
     let result = match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
@@ -431,7 +445,7 @@ pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
     let seek = [prefix, key].concat();
 
     let found = merged_prev(env, &seek, false);
-    record(env, Read::Prev { seek: seek.clone(), inclusive: false, found: found.clone() });
+    record(env, Read::Prev { seek: seek.clone(), inclusive: false, found: digest_found(&found) });
     let result = match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
@@ -449,7 +463,7 @@ pub fn kv_get_prev_or_first(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Op
     let seek = [prefix, key].concat();
 
     let found = merged_prev(env, &seek, true);
-    record(env, Read::Prev { seek: seek.clone(), inclusive: true, found: found.clone() });
+    record(env, Read::Prev { seek: seek.clone(), inclusive: true, found: digest_found(&found) });
     let result = match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,

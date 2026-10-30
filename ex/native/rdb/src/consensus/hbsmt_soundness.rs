@@ -1369,12 +1369,13 @@ impl TestEnv {
             receipts: Vec::new(),
             logs: Vec::new(),
             logs_size: 0,
-            preverified_sol_hashes: HashSet::new(),
+            sol_cache: Default::default(),
             tx_locks: Vec::new(),
             testnet: false,
             readonly: false,
             call_depth: 0,
             overlay: Default::default(),
+            tree_written: false,
         }
     }
 }

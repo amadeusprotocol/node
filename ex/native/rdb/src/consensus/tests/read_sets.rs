@@ -2,6 +2,7 @@
 
 use crate::consensus::consensus_apply::make_apply_env;
 use crate::consensus::consensus_kv::{kv_get, kv_get_next, kv_get_prev, kv_get_prev_or_first, kv_increment, kv_put, kv_set_bit, overlay_commit_tx, overlay_discard_tx, overlay_apply, overlay_take_tx, Read};
+use crate::consensus::consensus_kv::{digest, digest_found};
 use crate::consensus::tests::chain_harness::Chain;
 
 fn env(chain: &Chain) -> crate::consensus::consensus_apply::ApplyEnv<'static> {
@@ -13,7 +14,7 @@ fn env(chain: &Chain) -> crate::consensus::consensus_apply::ApplyEnv<'static> {
 }
 
 fn key(k: &[u8], v: Option<&[u8]>) -> Read {
-    Read::Key { key: k.to_vec(), value: v.map(|v| v.to_vec()) }
+    Read::Key { key: k.to_vec(), value: digest(&v.map(|v| v.to_vec())) }
 }
 
 #[test]
@@ -106,7 +107,7 @@ fn a_page_the_tx_put_whole_is_its_own() {
     let (writes, bits, reads) = overlay_take_tx(&mut env);
     assert!(bits.is_empty());
     assert_eq!(writes.get(b"page".as_slice()).cloned().flatten().unwrap()[0], 0b0000_0100);
-    assert_eq!(reads, vec![Read::Key { key: b"page".to_vec(), value: None }]);
+    assert_eq!(reads, vec![key(b"page", None)]);
 }
 
 #[test]
@@ -129,7 +130,7 @@ fn range_reads_record_seek_and_result() {
     kv_get_prev_or_first(&mut env, b"p:", b"3");
     kv_get_next(&mut env, b"p:", b"3");
 
-    let found = |k: &[u8], v: &[u8]| Some((k.to_vec(), v.to_vec()));
+    let found = |k: &[u8], v: &[u8]| digest_found(&Some((k.to_vec(), v.to_vec())));
     assert_eq!(overlay_take_tx(&mut env).2, vec![
         Read::Next { seek: b"p:1".to_vec(), found: found(b"p:3", b"y") },
         Read::Prev { seek: b"p:3".to_vec(), inclusive: false, found: found(b"p:1", b"x") },
@@ -161,6 +162,18 @@ fn a_whole_read_of_a_bit_written_page_depends_on_the_outside_page() {
 
     assert_eq!(overlay_take_tx(&mut env).2, vec![
         Read::Bit { key: b"page".to_vec(), bit: 1, exists: true, set: false },
-        Read::Key { key: b"page".to_vec(), value: Some(zero) },
+        key(b"page", Some(&zero)),
     ]);
+}
+
+#[test]
+fn a_large_value_read_records_only_its_digest() {
+    let chain = Chain::new();
+    let big = vec![7u8; 1 << 20];
+    chain.put(b"bytecode", &big);
+    let mut env = env(&chain);
+    assert_eq!(kv_get(&mut env, b"bytecode").map(|v| v.len()), Some(1 << 20));
+    let reads = overlay_take_tx(&mut env).2;
+    assert_eq!(reads, vec![key(b"bytecode", Some(&big))]);
+    assert!(std::mem::size_of_val(&reads[0]) < 128);
 }

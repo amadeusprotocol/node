@@ -110,9 +110,10 @@ lazy_static! {
 
 const ENGINE_VERSION_TAG: &[u8] = b"wasmer-7.1.0+singlepass+canonicalize_nans+metering+bulk_memory/v1";
 
-fn artifact_cache_key(wasm_bytes: &[u8]) -> Vec<u8> {
+fn artifact_cache_key(wasm_bytes: &[u8], points: u64) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(ENGINE_VERSION_TAG);
+    hasher.update(points.to_le_bytes());
     hasher.update(wasm_bytes);
     hasher.finalize().to_vec()
 }
@@ -945,11 +946,12 @@ fn inject_env_data(view: &MemoryView, env: &ApplyEnv) {
 pub fn call_contract(env: &mut ApplyEnv, wasm_bytes: &[u8], function_name: String, function_args: Vec<Vec<u8>>) -> Vec<u8> {
     env.caller_env.call_return_value = Vec::new();
 
-    let engine = make_engine(wasm_points(env));
+    let points = wasm_points(env);
+    let engine = make_engine(points);
     let mut store = Store::new(engine);
 
     // Load Module (From Cache or Compile)
-    let cache_key = artifact_cache_key(wasm_bytes);
+    let cache_key = artifact_cache_key(wasm_bytes, points);
     let module = match artifact_cache_get(&cache_key) {
         Some(artifact_bytes) => match unsafe { Module::deserialize(&store, &artifact_bytes) } {
             Ok(m) => m,

@@ -5,11 +5,14 @@ use crate::consensus::consensus_muts;
 use crate::consensus::{consensus_kv, hbsmt_common};
 use crate::model::tx_receipt::TXReceipt;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::panic::panic_any;
 use std::sync::OnceLock;
 
-static SOL_VERIFY_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+static APPLY_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+pub const SPECULATIVE_BUDGET_BYTES: usize = 1024 * 1024 * 1024;
+
+pub type SolCache = std::sync::Arc<std::sync::Mutex<HashMap<([u8; 32], Vec<u8>, u64), bool>>>;
 
 pub struct CallerEnv {
     pub readonly: bool,
@@ -99,13 +102,14 @@ pub struct ApplyEnv<'db> {
     pub receipts: Vec<TXReceipt>,
     pub logs: Vec<Vec<u8>>,
     pub logs_size: usize,
-    pub preverified_sol_hashes: HashSet<[u8; 32]>,
+    pub sol_cache: SolCache,
     //(exec lock, storage lock) per tx of the entry, set by call_txs_pre_upfront_cost
     pub tx_locks: Vec<(i128, i128)>,
     pub testnet: bool,
     pub readonly: bool,
     pub call_depth: u32,
     pub overlay: consensus_kv::Overlay,
+    pub tree_written: bool,
 }
 
 impl<'db> ApplyEnv<'db> {
@@ -162,77 +166,76 @@ pub fn make_apply_env<'db>(
         receipts: Vec::new(),
         logs: Vec::new(),
         logs_size: 0,
-        preverified_sol_hashes: HashSet::new(),
+        sol_cache: SolCache::default(),
         tx_locks: Vec::new(),
         testnet: testnet,
         readonly: false,
         call_depth: 0,
         overlay: consensus_kv::Overlay::default(),
+        tree_written: false,
     }
 }
 
-fn sol_verify_pool() -> &'static rayon::ThreadPool {
-    SOL_VERIFY_POOL.get_or_init(|| {
+fn apply_pool() -> &'static rayon::ThreadPool {
+    APPLY_POOL.get_or_init(|| {
         let threads = std::thread::available_parallelism().map(|n| ((n.get() * 3) / 4).max(1)).unwrap_or(1);
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
-            .thread_name(|i| format!("rdb-sol-verify-{}", i))
+            .thread_name(|i| format!("rdb-apply-{}", i))
             .build()
-            .unwrap_or_else(|_| panic_any("sol_verify_pool_failed"))
+            .unwrap_or_else(|_| panic_any("apply_pool_failed"))
     })
 }
 
-fn submit_sol_arg(txu: &crate::model::tx::TXU) -> Option<[u8; consensus::bic::sol::SOL_SIZE]> {
-    let action = &txu.tx.action;
-    if action.contract.as_slice() != b"Epoch" || action.function.as_slice() != b"submit_sol" {
-        return None;
+fn mutation_bytes(m: &consensus_muts::Mutation) -> usize {
+    match m {
+        consensus_muts::Mutation::Put { key, value, .. } => key.len() + value.len(),
+        consensus_muts::Mutation::Delete { key, .. } | consensus_muts::Mutation::SetBit { key, .. } | consensus_muts::Mutation::ClearBit { key, .. } => key.len(),
     }
-    if action.args.len() != 1 || action.args[0].len() != consensus::bic::sol::SOL_SIZE {
-        return None;
-    }
-
-    action.args[0].as_slice().try_into().ok()
 }
 
-fn preverify_entry_sols(env: &mut ApplyEnv, txs: &[crate::model::tx::TXU]) -> HashSet<[u8; 32]> {
-    let sols: Vec<[u8; consensus::bic::sol::SOL_SIZE]> = txs.iter().filter_map(submit_sol_arg).collect();
+fn output_bytes(out: &TxOutput) -> usize {
+    out.writes.iter().map(|(k, v)| k.len() + v.as_ref().map_or(0, |v| v.len())).sum::<usize>()
+        + out.muts.iter().chain(out.muts_rev.iter()).map(mutation_bytes).sum::<usize>()
+        + out.logs.iter().map(|l| l.len()).sum::<usize>()
+        + out.reads.len() * 64
+}
 
-    if sols.is_empty() {
-        return HashSet::new();
-    }
+fn execute_speculative(main: &ApplyEnv, txs: &[crate::model::tx::TXU], budget: usize) -> Vec<Option<TxOutput>> {
+    let db = main.db;
+    let shared = std::sync::Arc::new(main.overlay.block.clone());
+    let tx_locks = &main.tx_locks;
+    let sol_cache = &main.sol_cache;
+    let testnet = main.testnet;
+    let c = &main.caller_env;
+    let (signer, prev_hash, slot, prev_slot, height, epoch) = (c.entry_signer, c.entry_prev_hash, c.entry_slot, c.entry_prev_slot, c.entry_height, c.entry_epoch);
+    let (vr, vr_b3, dr) = (c.entry_vr, c.entry_vr_b3, c.entry_dr);
+    let held = std::sync::atomic::AtomicUsize::new(0);
 
-    let Some(segment_vr_hash) = consensus_kv::kv_get(env, b"bic:epoch:segment_vr_hash") else {
-        return HashSet::new();
-    };
-    let Some(diff_bits) = consensus_kv::kv_get(env, b"bic:epoch:diff_bits") else {
-        return HashSet::new();
-    };
-    let Some(diff_bits_int) = std::str::from_utf8(&diff_bits).ok().and_then(|s| s.parse::<u64>().ok()) else {
-        return HashSet::new();
-    };
-
-    let entry_epoch = env.caller_env.entry_epoch;
-    let entry_vr_b3 = env.caller_env.entry_vr_b3;
-
-    let verify_one = |sol: &[u8; consensus::bic::sol::SOL_SIZE]| {
-        let usol = consensus::bic::sol::unpack(sol);
-        if usol.epoch != entry_epoch {
-            return None;
-        }
-
-        let hash = blake3::hash(sol);
-        match consensus::bic::sol::verify(sol, hash.as_bytes(), &segment_vr_hash, &entry_vr_b3, diff_bits_int) {
-            Ok(true) => Some(*hash.as_bytes()),
-            _ => None,
-        }
-    };
-
-    if sols.len() == 1 {
-        sols.iter().filter_map(verify_one).collect()
-    } else {
-        sol_verify_pool().install(|| sols.par_iter().filter_map(verify_one).collect())
-    }
+    apply_pool().install(|| {
+        txs.par_iter()
+            .enumerate()
+            .map_init(
+                || {
+                    let cf = || db.cf_handle("contractstate").unwrap();
+                    let mut env = make_apply_env(
+                        db, db.transaction(), cf(), b"contractstate".to_vec(), cf(), db.cf_handle("contractstate_tree_hbsmt").unwrap(),
+                        &signer, &prev_hash, slot, prev_slot, height, epoch, &vr, &vr_b3, &dr, testnet,
+                    );
+                    env.overlay.shared = shared.clone();
+                    env.tx_locks = tx_locks.clone();
+                    env.sol_cache = sol_cache.clone();
+                    env
+                },
+                |env, (i, txu)| {
+                    let out = execute_tx(env, i, txu.clone());
+                    let bytes = output_bytes(&out);
+                    (held.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes <= budget).then_some(out)
+                },
+            )
+            .collect()
+    })
 }
 
 pub fn set_apply_env_tx<'db>(env: &mut ApplyEnv<'db>, tx_hash: &[u8; 32], tx_signer: &[u8; 48], tx_nonce: u64) {
@@ -403,6 +406,18 @@ pub fn apply_entry<'db, 'a>(
     sk: &[u8],
     testnet: bool,
 ) -> (Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32]) {
+    apply_entry_mode(db, txn, entry, pk, sk, testnet, Some(SPECULATIVE_BUDGET_BYTES)).0
+}
+
+pub fn apply_entry_mode<'db>(
+    db: &'db TransactionDB<MultiThreaded>,
+    txn: Transaction<'db, TransactionDB<MultiThreaded>>,
+    entry: crate::model::entry::Entry,
+    _pk: &[u8],
+    _sk: &[u8],
+    testnet: bool,
+    speculative_budget: Option<usize>,
+) -> ((Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32]), usize) {
 
     let cf_h = db.cf_handle("contractstate").unwrap();
     let cf2_h = db.cf_handle("contractstate").unwrap();
@@ -436,23 +451,38 @@ pub fn apply_entry<'db, 'a>(
     );
 
 
-    applyenv.preverified_sol_hashes = preverify_entry_sols(&mut applyenv, &entry.txs);
-
     call_txs_pre_upfront_cost(&mut applyenv, &entry.txs);
 
     consensus_kv::overlay_commit_tx(&mut applyenv);
 
     let txs_count = entry.txs.len();
+    let mut speculative = match speculative_budget {
+        Some(budget) if txs_count > 1 => execute_speculative(&applyenv, &entry.txs, budget),
+        _ => Vec::new(),
+    }
+    .into_iter();
+    let mut reexecuted = 0;
     for (i, txu) in entry.txs.into_iter().enumerate() {
-        let out = execute_tx(&mut applyenv, i, txu);
+        let out = match speculative.next() {
+            Some(Some(out)) if consensus_kv::reads_valid(&applyenv, &out.reads) => out,
+            Some(_) => {
+                reexecuted += 1;
+                execute_tx(&mut applyenv, i, txu)
+            }
+            None => execute_tx(&mut applyenv, i, txu),
+        };
         commit_tx(&mut applyenv, out);
     }
 
     call_exit(&mut applyenv);
 
-    let root_receipts = root_receipts(txs_count, applyenv.receipts.clone());
-    let root_contractstate = update_and_root_contractstate(&mut applyenv);
-    applyenv.into_parts(root_receipts, root_contractstate)
+    let receipts = applyenv.receipts.clone();
+    let (root_receipts, root_contractstate) = std::thread::scope(|scope| {
+        let receipts_root = scope.spawn(move || root_receipts(txs_count, receipts));
+        let root_contractstate = update_and_root_contractstate(&mut applyenv);
+        (receipts_root.join().unwrap_or_else(|e| std::panic::resume_unwind(e)), root_contractstate)
+    });
+    (applyenv.into_parts(root_receipts, root_contractstate), reexecuted)
 
     //println!("r{:?} {}", applyenv.caller_env.entry_height, root_receipts(txus.clone(), applyenv.result_log.clone()).iter().map(|b| format!("{:02x}", b)).collect::<String>() );
     //println!("c{:?} {}", applyenv.caller_env.entry_height, hubt_contractstate_root.iter().map(|b| format!("{:02x}", b)).collect::<String>());

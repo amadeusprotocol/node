@@ -148,9 +148,14 @@ pub fn call_submit_sol(env: &mut crate::consensus::consensus_apply::ApplyEnv, ar
     let segment_vr_hash = kv_get(env, b"bic:epoch:segment_vr_hash").unwrap();
     let diff_bits = kv_get(env, b"bic:epoch:diff_bits").unwrap();
     let diff_bits_int = std::str::from_utf8(&diff_bits).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_diff_bits"));
-    if !env.preverified_sol_hashes.contains(hash.as_bytes())
-        && !consensus::bic::sol::verify(&sol, hash.as_bytes(), &segment_vr_hash, &env.caller_env.entry_vr_b3, diff_bits_int).unwrap_or(false)
-    {
+    let cache_key = (*hash.as_bytes(), segment_vr_hash.clone(), diff_bits_int);
+    let cached = env.sol_cache.lock().unwrap().get(&cache_key).copied();
+    let valid = cached.unwrap_or_else(|| {
+        let valid = consensus::bic::sol::verify(&sol, hash.as_bytes(), &segment_vr_hash, &env.caller_env.entry_vr_b3, diff_bits_int).unwrap_or(false);
+        env.sol_cache.lock().unwrap().insert(cache_key, valid);
+        valid
+    });
+    if !valid {
         panic_any("invalid_sol");
     }
 
