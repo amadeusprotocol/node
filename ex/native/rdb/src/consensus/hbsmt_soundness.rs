@@ -1375,7 +1375,7 @@ impl TestEnv {
             readonly: false,
             call_depth: 0,
             overlay: Default::default(),
-            tree_written: false,
+            tree_written: true,
         }
     }
 }

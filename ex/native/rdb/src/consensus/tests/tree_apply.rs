@@ -36,6 +36,7 @@ fn run(seed: u64) {
             chain.db, chain.db.transaction(), tree(), b"contractstate_tree_hbsmt".to_vec(), chain.db.cf_handle("contractstate").unwrap(), tree(),
             &[0u8; 48], &[0u8; 32], 1, 0, 1, 0, &[0u8; 96], &[0u8; 32], &[0u8; 32], false,
         );
+        env.tree_written = false;
         hbsmt_batch_update_env_muts(&mut env, "contractstate_tree_hbsmt", ops);
         let root = hbsmt_root_env(&mut env, "contractstate_tree_hbsmt");
         env.txn.commit().unwrap();
@@ -62,6 +63,7 @@ fn repeated_tree_updates_in_one_transaction_match_the_reference() {
                 chain.db, chain.db.transaction(), tree(), b"contractstate_tree_hbsmt".to_vec(), chain.db.cf_handle("contractstate").unwrap(), tree(),
                 &[0u8; 48], &[0u8; 32], 1, 0, 1, 0, &[0u8; 96], &[0u8; 32], &[0u8; 32], false,
             );
+            env.tree_written = false;
             for _ in 0..3 {
                 let ops: Vec<Op> = (0..1 + rng.below(20)).map(|_| op(&mut rng)).collect();
                 reference.batch_update(ops.clone());

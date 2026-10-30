@@ -327,13 +327,20 @@ fn split_key(path: &Path, depth: u16) -> [u8; 34] {
     k
 }
 
+const PAR_MIN_DIRTY: usize = 8;
+const PAR_MAX_DEPTH: u16 = 12;
+
 enum Leaves<'a> {
-    Txn(DBRawIteratorWithThreadMode<'a, Transaction<'a, TransactionDB<MultiThreaded>>>),
-    Db(RawIter<'a>, &'a BTreeMap<Path, Option<Vec<u8>>>),
+    Txn(&'a Transaction<'a, TransactionDB<MultiThreaded>>, DBRawIteratorWithThreadMode<'a, Transaction<'a, TransactionDB<MultiThreaded>>>),
+    Db(&'a TransactionDB<MultiThreaded>, RawIter<'a>, &'a BTreeMap<Path, Option<Vec<u8>>>),
+}
+
+enum SplitOp {
+    Put(Path, u16, Hash),
+    Remove(Path, u16),
 }
 
 struct Ctx<'a> {
-    txn: &'a Transaction<'a, TransactionDB<MultiThreaded>>,
     leaves: Leaves<'a>,
     cf_leaves: &'a Arc<BoundColumnFamily<'a>>,
     cf_splits: &'a Arc<BoundColumnFamily<'a>>,
@@ -341,16 +348,41 @@ struct Ctx<'a> {
     split_cache: FxHashMap<(Path, u16), Hash>,
     split_writes: FxHashMap<(Path, u16), Hash>,
     split_deletes: Vec<(Path, u16)>,
+    log: Vec<SplitOp>,
 }
 
 impl<'a> Ctx<'a> {
+    fn new(leaves: Leaves<'a>, cf: &'a Arc<BoundColumnFamily<'a>>, empties: &'a [Hash; 257]) -> Ctx<'a> {
+        Ctx {
+            leaves,
+            cf_leaves: cf,
+            cf_splits: cf,
+            empties,
+            split_cache: FxHashMap::default(),
+            split_writes: FxHashMap::default(),
+            split_deletes: Vec::new(),
+            log: Vec::new(),
+        }
+    }
+
+    fn read(&self, key: &[u8]) -> Option<Vec<u8>> {
+        match &self.leaves {
+            Leaves::Txn(txn, _) => txn.get_cf(self.cf_leaves, key).ok().flatten(),
+            Leaves::Db(db, _, pending) => match key.try_into().ok().and_then(|path: Path| pending.get(&path)) {
+                Some(v) => v.clone(),
+                None => db.get_cf(self.cf_leaves, key).ok().flatten(),
+            },
+        }
+    }
+
+
     #[inline]
     fn get_split(&mut self, prefix: &Path, depth: u16) -> Option<Hash> {
         let key = (*prefix, depth);
         if let Some(h) = self.split_cache.get(&key) { return Some(*h); }
         if let Some(h) = self.split_writes.get(&key) { return Some(*h); }
-        match self.txn.get_cf(self.cf_leaves, split_key(prefix, depth)) {
-            Ok(Some(v)) => {
+        match self.read(&split_key(prefix, depth)) {
+            Some(v) => {
                 let h: Hash = v.try_into().unwrap_or(ZERO_HASH);
                 self.split_cache.insert(key, h);
                 Some(h)
@@ -362,20 +394,22 @@ impl<'a> Ctx<'a> {
     fn put_split(&mut self, prefix: Path, depth: u16, h: Hash) {
         self.split_writes.insert((prefix, depth), h);
         self.split_cache.insert((prefix, depth), h);
+        self.log.push(SplitOp::Put(prefix, depth, h));
     }
     #[inline]
     fn remove_split(&mut self, prefix: Path, depth: u16) {
         self.split_writes.remove(&(prefix, depth));
         self.split_cache.remove(&(prefix, depth));
         self.split_deletes.push((prefix, depth));
+        self.log.push(SplitOp::Remove(prefix, depth));
     }
 
     /// Two leaves at or after `lo`, ≤ `hi`. Filters out 34-byte split keys
     /// that share the CF with 32-byte leaf keys.
     fn first_two_leaves_in(&mut self, lo: &Path, hi: &Path) -> (Option<(Path, Hash, Hash)>, bool) {
         let iter = match &mut self.leaves {
-            Leaves::Txn(iter) => iter,
-            Leaves::Db(iter, pending) => return first_two_leaves_pending(iter, pending, lo, hi),
+            Leaves::Txn(_, iter) => iter,
+            Leaves::Db(_, iter, pending) => return first_two_leaves_pending(iter, pending, lo, hi),
         };
         iter.seek(lo);
         let mut first: Option<(Path, Hash, Hash)> = None;
@@ -470,18 +504,40 @@ fn descend_and_collect_splits<'a>(
     dirty: &[Path],
     leaves: Option<Leaves<'a>>,
 ) -> (FxHashMap<(Path, u16), Hash>, Vec<(Path, u16)>) {
-    let mut ctx = Ctx {
-        txn,
-        leaves: leaves.unwrap_or_else(|| Leaves::Txn(txn.raw_iterator_cf(cf))),
-        cf_leaves: cf,
-        cf_splits: cf,
-        empties,
-        split_cache: FxHashMap::default(),
-        split_writes: FxHashMap::default(),
-        split_deletes: Vec::new(),
-    };
+    let mut ctx = Ctx::new(leaves.unwrap_or_else(|| Leaves::Txn(txn, txn.raw_iterator_cf(cf))), cf, empties);
     let _ = descend_and_rehash(&mut ctx, [0u8; 32], 0, dirty);
     (ctx.split_writes, ctx.split_deletes)
+}
+
+fn descend_db_parallel<'a>(
+    db: &'a TransactionDB<MultiThreaded>,
+    cf: &'a Arc<BoundColumnFamily<'a>>,
+    empties: &'a [Hash; 257],
+    dirty: &[Path],
+    pending: &'a BTreeMap<Path, Option<Vec<u8>>>,
+) -> (FxHashMap<(Path, u16), Hash>, Vec<(Path, u16)>) {
+    crate::consensus::consensus_apply::apply_pool().install(|| {
+        let mut ctx = Ctx::new(Leaves::Db(db, db.raw_iterator_cf(cf), pending), cf, empties);
+        let _ = descend_and_rehash(&mut ctx, [0u8; 32], 0, dirty);
+        let mut split_writes = FxHashMap::default();
+        let mut split_deletes = Vec::new();
+        for op in ctx.log {
+            match op {
+                SplitOp::Put(prefix, depth, h) => { split_writes.insert((prefix, depth), h); }
+                SplitOp::Remove(prefix, depth) => {
+                    split_writes.remove(&(prefix, depth));
+                    split_deletes.push((prefix, depth));
+                }
+            }
+        }
+        (split_writes, split_deletes)
+    })
+}
+
+fn descend_child(db: &TransactionDB<MultiThreaded>, cf: &Arc<BoundColumnFamily>, empties: &[Hash; 257], pending: &BTreeMap<Path, Option<Vec<u8>>>, prefix: Path, depth: u16, dirty: &[Path]) -> (Hash, Vec<SplitOp>) {
+    let mut ctx = Ctx::new(Leaves::Db(db, db.raw_iterator_cf(cf), pending), cf, empties);
+    let h = descend_and_rehash(&mut ctx, prefix, depth, dirty);
+    (h, ctx.log)
 }
 
 fn descend_and_flush(
@@ -504,7 +560,7 @@ fn descend_and_rehash(ctx: &mut Ctx, prefix: Path, depth: u16, dirty: &[Path]) -
         return subtree_hash(ctx, prefix, depth);
     }
     if depth == 256 {
-        match ctx.txn.get_cf(ctx.cf_leaves, prefix).ok().flatten() {
+        match ctx.read(&prefix) {
             Some(v) => match decode_leaf(&v) {
                 Some((id, val)) => leaf_hash_from_components(&id, &val),
                 None => ctx.empties[256],
@@ -572,8 +628,23 @@ fn descend_and_rehash(ctx: &mut Ctx, prefix: Path, depth: u16, dirty: &[Path]) -
         let mut lp = prefix; set_bit_be(&mut lp, depth, 0); mask_after_be(&mut lp, depth + 1);
         let mut rp = prefix; set_bit_be(&mut rp, depth, 1); mask_after_be(&mut rp, depth + 1);
 
-        let l = descend_and_rehash(ctx, lp, depth + 1, left_dirty);
-        let r = descend_and_rehash(ctx, rp, depth + 1, right_dirty);
+        let fork = match &ctx.leaves {
+            Leaves::Db(db, _, pending) if depth < PAR_MAX_DEPTH && dirty.len() >= PAR_MIN_DIRTY && !left_dirty.is_empty() && !right_dirty.is_empty() => Some((*db, *pending)),
+            _ => None,
+        };
+        let (l, r) = match fork {
+            Some((db, pending)) => {
+                let (cf, empties) = (ctx.cf_leaves, ctx.empties);
+                let ((l, left_log), (r, right_log)) = rayon::join(
+                    || descend_child(db, cf, empties, pending, lp, depth + 1, left_dirty),
+                    || descend_child(db, cf, empties, pending, rp, depth + 1, right_dirty),
+                );
+                ctx.log.extend(left_log);
+                ctx.log.extend(right_log);
+                (l, r)
+            }
+            None => (descend_and_rehash(ctx, lp, depth + 1, left_dirty), descend_and_rehash(ctx, rp, depth + 1, right_dirty)),
+        };
 
         let empty_next = ctx.empties[(depth + 1) as usize];
         if l == empty_next && r == empty_next {
@@ -600,7 +671,7 @@ fn descend_and_rehash(ctx: &mut Ctx, prefix: Path, depth: u16, dirty: &[Path]) -
 /// the stale entry. See the matching guard in `Hbsmt::subtree_hash`.
 fn subtree_hash(ctx: &mut Ctx, prefix: Path, depth: u16) -> Hash {
     if depth == 256 {
-        return match ctx.txn.get_cf(ctx.cf_leaves, prefix).ok().flatten() {
+        return match ctx.read(&prefix) {
             Some(v) => match decode_leaf(&v) {
                 Some((id, val)) => leaf_hash_from_components(&id, &val),
                 None => ctx.empties[256],
@@ -668,16 +739,7 @@ pub fn hbsmt_root_env(env: &mut ApplyEnv, cf_name: &str) -> [u8; 32] {
     // No stored top-level split: walk the tree. Construct an ephemeral Ctx
     // with empty in-memory caches; we only need `subtree_hash` which reads.
     let empties = make_empties();
-    let mut ctx = Ctx {
-        txn: &env.txn,
-        leaves: Leaves::Txn(env.txn.raw_iterator_cf(&cf)),
-        cf_leaves: &cf,
-        cf_splits: &cf,           // SAME CF — length filter disambiguates
-        empties: &empties,
-        split_cache: FxHashMap::default(),
-        split_writes: FxHashMap::default(),
-        split_deletes: Vec::new(),
-    };
+    let mut ctx = Ctx::new(Leaves::Txn(&env.txn, env.txn.raw_iterator_cf(&cf)), &cf, &empties);
     subtree_hash(&mut ctx, [0u8; 32], 0)
 }
 
@@ -795,9 +857,12 @@ pub fn hbsmt_batch_update_env_muts(env: &mut ApplyEnv, cf_name: &str, ops: Vec<O
     // already reflects the leaf writes above), then record them as mutations too.
     let empties = make_empties();
     let pending: BTreeMap<Path, Option<Vec<u8>>> = latest.iter().map(|(path, val)| (*path, val.as_ref().map(|(id, v)| encode_leaf(id, v).to_vec()))).collect();
-    let leaves = (!env.tree_written).then(|| Leaves::Db(env.db.raw_iterator_cf(&cf), &pending));
+    let (split_writes, split_deletes) = if env.tree_written {
+        descend_and_collect_splits(&env.txn, &cf, &empties, &dirty, None)
+    } else {
+        descend_db_parallel(env.db, &cf, &empties, &dirty, &pending)
+    };
     env.tree_written = true;
-    let (split_writes, split_deletes) = descend_and_collect_splits(&env.txn, &cf, &empties, &dirty, leaves);
     for ((path, depth), hash) in split_writes {
         kv_put(env, &split_key(&path, depth), &hash);
     }

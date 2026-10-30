@@ -172,11 +172,11 @@ pub fn make_apply_env<'db>(
         readonly: false,
         call_depth: 0,
         overlay: consensus_kv::Overlay::default(),
-        tree_written: false,
+        tree_written: true,
     }
 }
 
-fn apply_pool() -> &'static rayon::ThreadPool {
+pub(crate) fn apply_pool() -> &'static rayon::ThreadPool {
     APPLY_POOL.get_or_init(|| {
         let threads = std::thread::available_parallelism().map(|n| ((n.get() * 3) / 4).max(1)).unwrap_or(1);
 
@@ -451,6 +451,7 @@ pub fn apply_entry_mode<'db>(
     );
 
 
+    applyenv.tree_written = false;
     call_txs_pre_upfront_cost(&mut applyenv, &entry.txs);
 
     consensus_kv::overlay_commit_tx(&mut applyenv);
