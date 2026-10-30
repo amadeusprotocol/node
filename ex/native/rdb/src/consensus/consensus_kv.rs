@@ -5,20 +5,33 @@ use consensus_apply::ApplyEnv;
 
 use crate::consensus::consensus_muts;
 use consensus_muts::Mutation;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
+
+pub type Writes = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
+pub type BitWrites = BTreeMap<Vec<u8>, BTreeSet<u64>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Read {
+    Key { key: Vec<u8>, value: Option<Vec<u8>> },
+    Next { seek: Vec<u8>, found: Option<(Vec<u8>, Vec<u8>)> },
+    Prev { seek: Vec<u8>, inclusive: bool, found: Option<(Vec<u8>, Vec<u8>)> },
+    Bit { key: Vec<u8>, bit: u64, exists: bool, set: bool },
+}
 
 #[derive(Default)]
 pub struct Overlay {
-    pub block: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    pub tx: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub block: Writes,
+    pub tx: Writes,
+    pub bits: BitWrites,
+    pub reads: Vec<Read>,
 }
 
 fn overlay_active(env: &ApplyEnv) -> bool {
     env.cf_name.as_slice() == b"contractstate"
 }
 
-fn raw_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
+fn layered_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
     if overlay_active(env) {
         if let Some(v) = env.overlay.tx.get(key) {
             return v.clone();
@@ -30,8 +43,28 @@ fn raw_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
     env.txn.get_cf(&env.cf, key).unwrap()
 }
 
+fn raw_get(env: &mut ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
+    let value = layered_get(env, key);
+    if overlay_active(env) {
+        if !env.overlay.tx.contains_key(key) {
+            env.overlay.reads.push(Read::Key { key: key.to_vec(), value: value.clone() });
+        } else if env.overlay.bits.contains_key(key) {
+            let outside = outside_get(env, key);
+            env.overlay.reads.push(Read::Key { key: key.to_vec(), value: outside });
+        }
+    }
+    value
+}
+
+fn record(env: &mut ApplyEnv, read: Read) {
+    if overlay_active(env) {
+        env.overlay.reads.push(read);
+    }
+}
+
 fn raw_put(env: &mut ApplyEnv, key: &[u8], value: &[u8], err: &'static str) {
     if overlay_active(env) {
+        env.overlay.bits.remove(key);
         env.overlay.tx.insert(key.to_vec(), Some(value.to_vec()));
     } else {
         env.txn.put_cf(&env.cf, key, value).unwrap_or_else(|_| panic_any(err));
@@ -40,6 +73,7 @@ fn raw_put(env: &mut ApplyEnv, key: &[u8], value: &[u8], err: &'static str) {
 
 fn raw_delete(env: &mut ApplyEnv, key: &[u8]) {
     if overlay_active(env) {
+        env.overlay.bits.remove(key);
         env.overlay.tx.insert(key.to_vec(), None);
     } else {
         env.txn.delete_cf(&env.cf, key).unwrap_or_else(|_| panic_any("exec_kv_delete_failed"));
@@ -47,12 +81,43 @@ fn raw_delete(env: &mut ApplyEnv, key: &[u8]) {
 }
 
 pub fn overlay_commit_tx(env: &mut ApplyEnv) {
-    let tx = std::mem::take(&mut env.overlay.tx);
-    env.overlay.block.extend(tx);
+    let (writes, bits, _) = overlay_take_tx(env);
+    overlay_apply(env, writes, bits);
 }
 
 pub fn overlay_discard_tx(env: &mut ApplyEnv) {
-    env.overlay.tx.clear();
+    overlay_take_tx(env);
+}
+
+pub fn overlay_take_tx(env: &mut ApplyEnv) -> (Writes, BitWrites, Vec<Read>) {
+    let mut writes = std::mem::take(&mut env.overlay.tx);
+    let bits = std::mem::take(&mut env.overlay.bits);
+    for key in bits.keys() {
+        writes.remove(key);
+    }
+    (writes, bits, std::mem::take(&mut env.overlay.reads))
+}
+
+pub fn overlay_apply(env: &mut ApplyEnv, writes: Writes, bits: BitWrites) {
+    env.overlay.block.extend(writes);
+    for (key, set) in bits {
+        let mut page = match env.overlay.block.get(&key) {
+            Some(v) => v.clone(),
+            None => env.txn.get_cf(&env.cf_contractstate, &key).unwrap(),
+        }
+        .unwrap_or_else(|| vec![0u8; crate::consensus::bic::sol_bloom::PAGE_SIZE as usize]);
+        for bit in set {
+            page[(bit / 8) as usize] |= 1u8 << (7 - (bit % 8) as u8);
+        }
+        env.overlay.block.insert(key, Some(page));
+    }
+}
+
+fn outside_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
+    match env.overlay.block.get(key) {
+        Some(v) => v.clone(),
+        None => env.txn.get_cf(&env.cf, key).unwrap(),
+    }
 }
 
 pub fn overlay_flush(env: &mut ApplyEnv) {
@@ -103,7 +168,7 @@ fn merged_next(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>,
             (Some(a), None) | (None, Some(a)) => a,
             (None, None) => return None,
         };
-        match raw_get(env, &key) {
+        match layered_get(env, &key) {
             Some(v) => return Some((key, v)),
             None => {
                 cursor = key;
@@ -130,7 +195,7 @@ fn merged_prev(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>,
             (Some(a), None) | (None, Some(a)) => a,
             (None, None) => return None,
         };
-        match raw_get(env, &key) {
+        match layered_get(env, &key) {
             Some(v) => return Some((key, v)),
             None => {
                 cursor = key;
@@ -278,7 +343,9 @@ pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
 
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len()) as i128);
 
-    let (mut old, exists) = match raw_get(env, key) {
+    let own_page = env.overlay.tx.contains_key(key) && !env.overlay.bits.contains_key(key);
+    let own_bit = env.overlay.bits.get(key).map_or(false, |set| set.contains(&bit_idx));
+    let (mut old, exists) = match layered_get(env, key) {
         None => (vec![0u8; crate::consensus::bic::sol_bloom::PAGE_SIZE as usize], false),
         Some(value) => (value, true),
     };
@@ -286,6 +353,11 @@ pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
     let byte_idx = (bit_idx / 8) as usize;
     let bit_in_byte = (bit_idx % 8) as u8;
     let mask: u8 = 1u8 << (7 - bit_in_byte);
+    if overlay_active(env) && !own_page && !own_bit {
+        let outside = outside_get(env, key);
+        let set = outside.as_ref().map_or(false, |page| (page[byte_idx] & mask) != 0);
+        record(env, Read::Bit { key: key.to_vec(), bit: bit_idx, exists: outside.is_some(), set });
+    }
 
     if (old[byte_idx] & mask) != 0 {
         false
@@ -302,7 +374,13 @@ pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
             false => env.muts_rev.push(Mutation::Delete { op: b"delete".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec() }),
         };
         old[byte_idx] |= mask;
+        let bits = env.overlay.bits.remove(key);
         raw_put(env, key, &old, "exec_kv_set_bit_failed");
+        if overlay_active(env) && !own_page {
+            let mut bits = bits.unwrap_or_default();
+            bits.insert(bit_idx);
+            env.overlay.bits.insert(key.to_vec(), bits);
+        }
         true
     }
 }
@@ -334,7 +412,9 @@ pub fn kv_get_next(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 
     let seek = [prefix, key].concat();
 
-    let result = match merged_next(env, &seek, false) {
+    let found = merged_next(env, &seek, false);
+    record(env, Read::Next { seek: seek.clone(), found: found.clone() });
+    let result = match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
     };
@@ -350,7 +430,9 @@ pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 
     let seek = [prefix, key].concat();
 
-    let result = match merged_prev(env, &seek, false) {
+    let found = merged_prev(env, &seek, false);
+    record(env, Read::Prev { seek: seek.clone(), inclusive: false, found: found.clone() });
+    let result = match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
     };
@@ -366,7 +448,9 @@ pub fn kv_get_prev_or_first(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Op
 
     let seek = [prefix, key].concat();
 
-    let result = match merged_prev(env, &seek, true) {
+    let found = merged_prev(env, &seek, true);
+    record(env, Read::Prev { seek: seek.clone(), inclusive: true, found: found.clone() });
+    let result = match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
     };

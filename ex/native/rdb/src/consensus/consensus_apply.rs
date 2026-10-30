@@ -242,6 +242,159 @@ pub fn set_apply_env_tx<'db>(env: &mut ApplyEnv<'db>, tx_hash: &[u8; 32], tx_sig
     env.caller_env.account_origin = tx_signer.to_vec();
 }
 
+pub struct TxOutput {
+    pub result: std::thread::Result<Vec<u8>>,
+    pub writes: consensus_kv::Writes,
+    pub bits: consensus_kv::BitWrites,
+    pub reads: Vec<consensus_kv::Read>,
+    pub muts: Vec<consensus_muts::Mutation>,
+    pub muts_rev: Vec<consensus_muts::Mutation>,
+    pub logs: Vec<Vec<u8>>,
+    pub account_origin: Vec<u8>,
+    pub tx_hash: [u8; 32],
+    pub tx_historical_cost: i128,
+    pub exec_left: i128,
+    pub exec_max: i128,
+    pub storage_left: i128,
+    pub storage_max: i128,
+}
+
+pub fn execute_tx(applyenv: &mut ApplyEnv, i: usize, txu: crate::model::tx::TXU) -> TxOutput {
+    let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(&txu);
+    let (exec_lock, storage_lock) = applyenv.tx_locks[i];
+
+    let tx_hash = txu.hash.as_slice().try_into().unwrap_or_else(|_| panic!("tx_hash_len_wrong"));
+    let tx_signer = txu.tx.signer.as_slice().try_into().unwrap_or_else(|_| panic!("tx_signer_len_wrong"));
+    let tx_nonce = txu.tx.nonce;
+    let action = txu.tx.action;
+
+    applyenv.caller_env.tx_index = i as u64;
+    applyenv.caller_env.tx_hash = tx_hash;
+    applyenv.caller_env.tx_signer = tx_signer;
+    applyenv.caller_env.tx_nonce = tx_nonce;
+    applyenv.caller_env.account_origin = tx_signer.to_vec();
+    applyenv.caller_env.account_caller = tx_signer.to_vec();
+
+    //let op = action.map_get(crate::atoms::op()).unwrap().decode::<rustler::Binary>().unwrap().as_slice();
+    let contract = action.contract;
+    let function = action.function;
+    let args = action.args;
+    let attached_symbol = action.attached_symbol.clone();
+    let attached_amount = action.attached_amount.clone();
+
+    applyenv.caller_env.call_counter = 1;
+    applyenv.caller_env.account_current = contract.to_vec();
+    applyenv.muts = Vec::new();
+    applyenv.muts_rev = Vec::new();
+    applyenv.logs = Vec::new();
+    applyenv.logs_size = 0;
+    applyenv.exec_left = exec_lock;
+    applyenv.exec_max = exec_lock;
+    applyenv.storage_left = storage_lock;
+    applyenv.storage_max = storage_lock;
+    applyenv.call_depth = 0;
+
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        applyenv.exec_track = true;
+        match consensus::bls12_381::validate_public_key(contract.as_slice()) {
+            false => {
+                //println!("{:?}->{:?} {:?} {:?}", String::from_utf8_lossy(&contract), String::from_utf8_lossy(&function), attached_amount, attached_symbol);
+                call_bic(applyenv, contract, function, args, attached_symbol, attached_amount);
+                b"ok".to_vec()
+            }
+            true => {
+                //println!("{:?}->{:?} {:?} {:?}", bs58::encode(&contract).into_string(), String::from_utf8_lossy(&function), attached_amount, attached_symbol);
+                let result = call_wasmvm(applyenv, contract, function, args, attached_symbol, attached_amount);
+                result
+            }
+        }
+    }));
+
+    applyenv.exec_track = false;
+
+    let (writes, bits, reads) = consensus_kv::overlay_take_tx(applyenv);
+    TxOutput {
+        result,
+        writes,
+        bits,
+        reads,
+        muts: std::mem::take(&mut applyenv.muts),
+        muts_rev: std::mem::take(&mut applyenv.muts_rev),
+        logs: std::mem::take(&mut applyenv.logs),
+        account_origin: applyenv.caller_env.account_origin.clone(),
+        tx_hash,
+        tx_historical_cost,
+        exec_left: applyenv.exec_left,
+        exec_max: applyenv.exec_max,
+        storage_left: applyenv.storage_left,
+        storage_max: applyenv.storage_max,
+    }
+}
+
+pub fn commit_tx(applyenv: &mut ApplyEnv, out: TxOutput) {
+    let TxOutput { result, writes, bits, reads: _, mut muts, mut muts_rev, logs, account_origin, tx_hash, tx_historical_cost, exec_left, exec_max, storage_left, storage_max } = out;
+    applyenv.caller_env.account_origin = account_origin;
+    applyenv.logs = logs;
+    applyenv.exec_left = exec_left;
+    applyenv.exec_max = exec_max;
+    applyenv.storage_left = storage_left;
+    applyenv.storage_max = storage_max;
+
+    let exec_cost_total =
+        ((tx_historical_cost + (applyenv.exec_max - applyenv.exec_left) + (applyenv.storage_max - applyenv.storage_left)) as u64).to_string();
+
+    match result {
+        Ok(result) => {
+            consensus_kv::overlay_apply(applyenv, writes, bits);
+            applyenv.muts_final.append(&mut muts);
+            applyenv.muts_final_rev.append(&mut muts_rev);
+            refund_exec_storage_deposit(applyenv);
+
+            //max logs 100
+            //max logs size 1024bytes
+            //
+            //status	🚨 Critical	1 = Success, 0 = Revert. Always check this first. If it is 0, ignore the rest.
+            //logs	🚨 Critical	Contains the actual data of what happened (token transfers, updates).
+            //transactionHash	ℹ️ Medium	Links the receipt back to your original request.
+            //logsBloom
+            let receipt = TXReceipt {
+                txid: tx_hash.into(),
+                success: true,
+                result: result.into(),
+                exec_used: exec_cost_total.clone().into(),
+                logs: applyenv.logs.clone(),
+            };
+            applyenv.receipts.push(receipt);
+        }
+        Err(payload) => {
+            //TODO: refund storage costs on revert?
+            refund_exec_storage_deposit(applyenv);
+
+            if let Some(&s) = payload.downcast_ref::<&'static str>() {
+                let receipt = TXReceipt {
+                    txid: tx_hash.into(),
+                    success: false,
+                    result: s.to_string().into(),
+                    exec_used: exec_cost_total.clone().into(),
+                    logs: applyenv.logs.clone(),
+                };
+                applyenv.receipts.push(receipt);
+            } else {
+                let receipt = TXReceipt {
+                    txid: tx_hash.into(),
+                    success: false,
+                    result: b"unknown".into(),
+                    exec_used: exec_cost_total.clone().into(),
+                    logs: applyenv.logs.clone(),
+                };
+                applyenv.receipts.push(receipt);
+            }
+        }
+    }
+    consensus_kv::overlay_commit_tx(applyenv);
+}
+
 pub fn apply_entry<'db, 'a>(
     db: &'db TransactionDB<MultiThreaded>,
     txn: Transaction<'db, TransactionDB<MultiThreaded>>,
@@ -287,115 +440,12 @@ pub fn apply_entry<'db, 'a>(
 
     call_txs_pre_upfront_cost(&mut applyenv, &entry.txs);
 
+    consensus_kv::overlay_commit_tx(&mut applyenv);
+
     let txs_count = entry.txs.len();
     for (i, txu) in entry.txs.into_iter().enumerate() {
-        let tx_historical_cost = crate::consensus::bic::protocol::tx_historical_cost(&txu);
-        let (exec_lock, storage_lock) = applyenv.tx_locks[i];
-
-        let tx_hash = txu.hash.as_slice().try_into().unwrap_or_else(|_| panic!("tx_hash_len_wrong"));
-        let tx_signer = txu.tx.signer.as_slice().try_into().unwrap_or_else(|_| panic!("tx_signer_len_wrong"));
-        let tx_nonce = txu.tx.nonce;
-        let action = txu.tx.action;
-
-        consensus_kv::overlay_commit_tx(&mut applyenv);
-
-        applyenv.caller_env.tx_index = i as u64;
-        applyenv.caller_env.tx_hash = tx_hash;
-        applyenv.caller_env.tx_signer = tx_signer;
-        applyenv.caller_env.tx_nonce = tx_nonce;
-        applyenv.caller_env.account_origin = tx_signer.to_vec();
-        applyenv.caller_env.account_caller = tx_signer.to_vec();
-
-        //let op = action.map_get(crate::atoms::op()).unwrap().decode::<rustler::Binary>().unwrap().as_slice();
-        let contract = action.contract;
-        let function = action.function;
-        let args = action.args;
-        let attached_symbol = action.attached_symbol.clone();
-        let attached_amount = action.attached_amount.clone();
-
-        applyenv.caller_env.call_counter = 1;
-        applyenv.caller_env.account_current = contract.to_vec();
-        applyenv.muts = Vec::new();
-        applyenv.muts_rev = Vec::new();
-        applyenv.logs = Vec::new();
-        applyenv.logs_size = 0;
-        applyenv.exec_left = exec_lock;
-        applyenv.exec_max = exec_lock;
-        applyenv.storage_left = storage_lock;
-        applyenv.storage_max = storage_lock;
-        applyenv.call_depth = 0;
-
-        std::panic::set_hook(Box::new(|_| {}));
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            applyenv.exec_track = true;
-            match consensus::bls12_381::validate_public_key(contract.as_slice()) {
-                false => {
-                    //println!("{:?}->{:?} {:?} {:?}", String::from_utf8_lossy(&contract), String::from_utf8_lossy(&function), attached_amount, attached_symbol);
-                    call_bic(&mut applyenv, contract, function, args, attached_symbol, attached_amount);
-                    b"ok".to_vec()
-                }
-                true => {
-                    //println!("{:?}->{:?} {:?} {:?}", bs58::encode(&contract).into_string(), String::from_utf8_lossy(&function), attached_amount, attached_symbol);
-                    let result = call_wasmvm(&mut applyenv, contract, function, args, attached_symbol, attached_amount);
-                    result
-                }
-            }
-        }));
-
-        applyenv.exec_track = false;
-
-        let exec_cost_total =
-            ((tx_historical_cost + (applyenv.exec_max - applyenv.exec_left) + (applyenv.storage_max - applyenv.storage_left)) as u64).to_string();
-
-
-        match res {
-            Ok(result) => {
-                applyenv.muts_final.append(&mut applyenv.muts);
-                applyenv.muts_final_rev.append(&mut applyenv.muts_rev);
-                refund_exec_storage_deposit(&mut applyenv);
-
-                //max logs 100
-                //max logs size 1024bytes
-                //
-                //status	🚨 Critical	1 = Success, 0 = Revert. Always check this first. If it is 0, ignore the rest.
-                //logs	🚨 Critical	Contains the actual data of what happened (token transfers, updates).
-                //transactionHash	ℹ️ Medium	Links the receipt back to your original request.
-                //logsBloom
-                let receipt = TXReceipt {
-                    txid: tx_hash.into(),
-                    success: true,
-                    result: result.into(),
-                    exec_used: exec_cost_total.clone().into(),
-                    logs: applyenv.logs.clone(),
-                };
-                applyenv.receipts.push(receipt);
-            }
-            Err(payload) => {
-                //TODO: refund storage costs on revert?
-                consensus_kv::overlay_discard_tx(&mut applyenv);
-                refund_exec_storage_deposit(&mut applyenv);
-
-                if let Some(&s) = payload.downcast_ref::<&'static str>() {
-                    let receipt = TXReceipt {
-                        txid: tx_hash.into(),
-                        success: false,
-                        result: s.to_string().into(),
-                        exec_used: exec_cost_total.clone().into(),
-                        logs: applyenv.logs.clone(),
-                    };
-                    applyenv.receipts.push(receipt);
-                } else {
-                    let receipt = TXReceipt {
-                        txid: tx_hash.into(),
-                        success: false,
-                        result: b"unknown".into(),
-                        exec_used: exec_cost_total.clone().into(),
-                        logs: applyenv.logs.clone(),
-                    };
-                    applyenv.receipts.push(receipt);
-                }
-            }
-        }
+        let out = execute_tx(&mut applyenv, i, txu);
+        commit_tx(&mut applyenv, out);
     }
 
     call_exit(&mut applyenv);

@@ -11,5 +11,6 @@ pub mod lockup_vault;
 pub mod nft;
 pub mod overlay_ranges;
 pub mod prime;
+pub mod read_sets;
 pub mod wasm_attachments;
 pub mod validator_set;
