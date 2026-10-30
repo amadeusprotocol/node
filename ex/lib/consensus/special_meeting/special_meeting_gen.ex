@@ -132,7 +132,7 @@ defmodule SpecialMeetingGen do
     #IO.inspect state[:slash_trainer]
     st = state[:slash_trainer]
     cond do
-      !state[:slash_trainer] -> maybe_start_motion(state)
+      !state[:slash_trainer] -> maybe_resume_slash(state) || maybe_start_motion(state)
       st.attempts > 3 -> Map.delete(state, :slash_trainer)
       !motion_current?(st) -> Map.delete(state, :slash_trainer)
 
@@ -182,6 +182,80 @@ defmodule SpecialMeetingGen do
     end
   end
 
+  #the UNSIGNED slash entry to propose at height (ReplicaGen.bound/1), stored
+  #durably (by hash) before it is proposed:
+  #  * the group already holds a slash value here on our tip: that one, and
+  #    only for its own validator (another motion must not replace it)
+  #  * anything else is bound there, the height is closed, or we are not a
+  #    prepared leader: none, store nothing
+  #  * free: the one stored for this parent and validator, else a build
+  defp slash_candidate_entry(st, sk, cur_entry, height) do
+    case ReplicaGen.bound(height) do
+      %{hash: hash, kind: :slash} ->
+        case ReplicaGen.get_candidate(hash) do
+          %{mpk: mpk, entry: %{header: %{prev_hash: prev}} = e} when mpk == st.mpk and prev == cur_entry.hash -> e
+          _ -> nil
+        end
+      :free ->
+        stored = case MnesiaKV.get(ReplicaKV, "slash_entry") do
+          %{hash: hash, mpk: mpk} -> {ReplicaGen.get_candidate(hash)[:entry], mpk}
+          _ -> {nil, nil}
+        end
+        case stored do
+          {%{header: %{prev_hash: prev}} = e, mpk} when prev == cur_entry.hash and mpk == st.mpk -> e
+          _ ->
+            txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, length(ValidatorSet.roster(st.validator_set)))]
+            e = Entry.build_next(sk, cur_entry, txs)
+            hash = ReplicaGen.put_candidate(e, :slash, st.mpk)
+            MnesiaKV.merge_override(ReplicaKV, "slash_entry", %{hash: hash, mpk: st.mpk})
+            e
+        end
+      _ -> nil
+    end
+  end
+
+  #the group holds a slash value at the next height, on our tip, with no
+  #motion carrying it: the motion expired, its node crashed, or the replica
+  #running it is gone (its entry came to us with the promises). the leader
+  #resumes it: build_slash_entry has the group choose it again before
+  #signing, then signatures are gathered as for any entry motion. an outside
+  #carrier's slash entry (:slash_ext) is resumed the same way: the pack signs
+  #it itself and gathers like for its own. nil when there is none
+  def maybe_resume_slash(state) do
+    height = DB.Chain.height() + 1
+    tip = DB.Chain.tip()
+    with true <- ReplicaGen.can_sign?(),
+         %{hash: hash, kind: kind} when kind in [:slash, :slash_ext] <- ReplicaGen.bound(height),
+         %{mpk: mpk, entry: %{header: %{prev_hash: ^tip}} = e} <- ReplicaGen.get_candidate(hash),
+         true <- FabricSyncAttestGen.isQuorumSynced(),
+         true <- mpk in (DB.Chain.validators_for_height(height) || []),
+         {:noreply, %{slash_trainer: st} = resumed} <- start_slash_motion(mpk, state, :entry),
+         {entry, aggsig} <- (if kind == :slash do build_slash_entry(st) else sign_external_slash(st, e, hash) end) do
+      IO.puts "🔁 resuming the group's slash entry #{height} for #{Base58.encode(mpk)}"
+      resumed
+      |> put_in([:slash_trainer, :entry, :entry], entry)
+      |> put_in([:slash_trainer, :entry, :aggsig], aggsig)
+      |> put_in([:slash_trainer, :state], :gather_entry_sigs)
+    else
+      _ -> nil
+    end
+  end
+
+  #an outside carrier's slash entry the group holds: chosen again, then signed
+  #by our keys (its carrier signature is replaced by the aggregate
+  #when the masked entry is assembled)
+  defp sign_external_slash(st, e, hash) do
+    height = e.header.height
+    with true <- ReplicaGen.choose(height, hash, %{entry: e, kind: :slash_ext, mpk: st.mpk}) do
+      aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
+        BLS12AggSig.add_padded(aggsig, st.validator_set, pk, BlsEx.sign!(seed, hash, BLS12AggSig.dst_entry()))
+      end)
+      {Map.merge(e, %{hash: hash, signature: <<>>}), aggsig}
+    else
+      _ -> nil
+    end
+  end
+
   #prefer a key that is actually in the validator set to carry the slash
   def carrier_sk(st) do
     case st.my_validators do
@@ -215,21 +289,18 @@ defmodule SpecialMeetingGen do
       true = FabricSyncAttestGen.isQuorumSynced()
       cur_entry = DB.Chain.tip_entry()
 
-      next_entry = case MnesiaKV.get(ReplicaKV, "slash_entry") do
-        %{entry: e} = stored when e.header.prev_hash == cur_entry.hash and stored.mpk == st.mpk -> e
-        _ ->
-          txs = [build_slash_tx(sk, st.mpk, st.epoch, st.tx.aggsig.aggsig, st.tx.aggsig.mask, length(ValidatorSet.roster(st.validator_set)))]
-          e = Entry.sign(sk, Entry.build_next(sk, cur_entry, txs))
-          MnesiaKV.merge_override(ReplicaKV, "slash_entry", %{entry: e, mpk: st.mpk})
-          e
-      end
+      height = cur_entry.header.height + 1
+      unsigned = slash_candidate_entry(st, sk, cur_entry, height)
 
-    #same single-shot rule as attesters: we sign our own entry, so it goes
-    #through the same persisted height lock, quorum-replicated before signing
+    #a slash entry is an entry at this height like any other, the carrier
+    #signature included: the group chooses it first, with the candidate, so
+    #any replica of the choosing majority can finish it
+    hash = unsigned && Entry.header_hash(unsigned.header)
     cond do
-      !SpecialMeetingAttestGen.acquire_entry_sign_lock(next_entry.header.height, next_entry.hash) -> nil
-      !ReplicaGen.await_slash_lock_replicated(next_entry.header.height, next_entry.hash) -> nil
+      unsigned == nil -> nil
+      !ReplicaGen.choose(height, hash, %{entry: unsigned, kind: :slash, mpk: st.mpk}) -> nil
       true ->
+        next_entry = Entry.sign(sk, unsigned)
         aggsig = Enum.reduce(st.my_validators, st.entry.aggsig, fn(%{pk: pk, seed: seed}, aggsig)->
           h = :crypto.hash(:sha256, RDB.vecpak_encode(next_entry.header))
           signature = BlsEx.sign!(seed, h, BLS12AggSig.dst_entry())

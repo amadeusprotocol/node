@@ -313,7 +313,7 @@ defmodule FabricGen do
       true ->
         set = DB.Chain.validator_set_for_height(height)
         validators = ValidatorSet.active(set)
-        attestations = Application.fetch_env!(:ama, :keys)
+        seeds = Application.fetch_env!(:ama, :keys)
         |> Enum.filter(& &1.pk in validators)
         |> Enum.filter(fn(seed)->
           #never sign twice at one height, and skip once our signature is
@@ -322,7 +322,9 @@ defmodule FabricGen do
           !DB.Attestation.by_height_by_signer(height, seed.pk)
             and !signer_in_consensus?(hash, Claim.hash(claim), set, seed.pk)
         end)
-        |> Enum.map(fn(seed)->
+        #the group's choice, only once there is something to sign
+        seeds = if seeds != [] and ReplicaGen.choose(height, hash) do seeds else [] end
+        attestations = Enum.map(seeds, fn(seed)->
           attestation = Attestation.sign(seed.seed, claim)
           DB.Attestation.put(attestation, height)
           FabricInbox.aggregate_attestation(attestation)
@@ -380,8 +382,8 @@ defmodule FabricGen do
 
       !FabricSyncAttestGen.isQuorumSynced() -> nil
 
-      #replica follower, or a replica already signed this height: never produce
-      !!am_i_next and !ReplicaGen.can_produce?(next_height) -> nil
+      #replica follower: never produce
+      !!am_i_next and !ReplicaGen.can_sign?() -> nil
 
       am_i_next ->
         if :persistent_term.get(:snapshot_before_my_slot, nil) do
@@ -400,15 +402,17 @@ defmodule FabricGen do
   end
 
   def produce_insert_and_broadcast_next_entry(seed, cur_entry) do
-    unsigned = build_next_entry(seed, cur_entry)
-    #snapshot + tx selection + build can outlast a replica leadership handover:
-    #re-check right before signing so two replicas never sign the same height
-    if ReplicaGen.can_produce?(unsigned.header.height) do
-      #record before anything leaves the box so replicas never re-sign this height
-      ReplicaGen.note_signed_height(unsigned.header.height)
-      ReplicaGen.flush_heartbeat()
+    with %{} = unsigned <- production_candidate(seed, cur_entry),
+         height = unsigned.header.height,
+         hash = Entry.header_hash(unsigned.header),
+         #the group chooses the entry (with the candidate itself) before it is
+         #signed: a leader cut off inside its ack lease would otherwise sign a
+         #height its successor signs again
+         true <- ReplicaGen.choose(height, hash, %{entry: unsigned, kind: :produce}) do
       next_entry = Entry.sign(seed, unsigned)
       insert_and_broadcast_produced(next_entry)
+    else
+      _ -> nil
     end
   end
 
@@ -427,8 +431,39 @@ defmodule FabricGen do
     next_entry
   end
 
-  def produce_entry(seed, cur_entry) do
-    Entry.sign(seed, build_next_entry(seed, cur_entry))
+  #the unsigned entry we may propose (ReplicaGen.bound/1). the header commits
+  #to the txs, so a rebuild hashes differently:
+  #  * the group already holds a production value at this height (ours from
+  #    before a timeout or crash, or one a replica that died left behind,
+  #    pushed to us with its promise): that one, always, if it sits on our tip
+  #  * anything else is bound there, the height is closed, or we are not a
+  #    prepared leader: nothing can be produced, build nothing
+  #  * free: the one stored for this parent, else a fresh build, stored by
+  #    hash before it is proposed
+  defp production_candidate(seed, cur_entry) do
+    pk = BlsEx.get_public_key!(seed)
+    height = cur_entry.header.height + 1
+    case ReplicaGen.bound(height) do
+      %{hash: hash, kind: :produce} ->
+        case ReplicaGen.get_candidate(hash) do
+          %{entry: %{header: %{signer: ^pk, prev_hash: prev}} = e} when prev == cur_entry.hash -> e
+          _ -> nil
+        end
+      :free ->
+        stored = case MnesiaKV.get(ReplicaKV, "produce_candidate") do
+          %{hash: hash} -> ReplicaGen.get_candidate(hash)
+          _ -> nil
+        end
+        case stored do
+          %{entry: %{header: %{prev_hash: prev, signer: ^pk}} = e} when prev == cur_entry.hash -> e
+          _ ->
+            e = build_next_entry(seed, cur_entry)
+            hash = ReplicaGen.put_candidate(e, :produce)
+            MnesiaKV.merge_override(ReplicaKV, "produce_candidate", %{hash: hash})
+            e
+        end
+      _ -> nil
+    end
   end
 
   defp build_next_entry(seed, cur_entry) do
@@ -527,10 +562,14 @@ defmodule FabricGen do
 
       set = DB.Chain.validator_set_for_height(height, %{rtx: rtx})
       validators = ValidatorSet.active(set)
-      #replica followers never attest: the leader attests for the shared keys
+      #replica followers never attest: the leader attests for the shared keys.
+      #never attest a different entry at a height already signed (a softfork
+      #sibling, or a successor leader re-applying a height): the group must
+      #choose this entry at this height first
       my_validators = if !ReplicaGen.can_sign?() do [] else
         Application.fetch_env!(:ama, :keys) |> Enum.filter(& &1.pk in validators)
       end
+      my_validators = if my_validators != [] and ReplicaGen.choose(height, next_entry.hash) do my_validators else [] end
       attestations = Enum.map(my_validators, fn(seed)->
         attestation = Attestation.sign(seed.seed, claim)
         DB.Attestation.put(attestation, height, %{rtx: rtx})

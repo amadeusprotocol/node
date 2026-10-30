@@ -31,6 +31,8 @@ defmodule NodeOps do
     event_tx: 8000,
     event_attestation: 8000,
     solicit_entry: 2,
+    #replica group only: a leader pushes each unsigned candidate it locks
+    replica_candidate: 300,
     sell_sol: 10_000
   }
 

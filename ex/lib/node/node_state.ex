@@ -109,6 +109,16 @@ defmodule NodeState do
     FabricInbox.insert_entry(term.entry_packed, istate.peer.pk)
   end
 
+  #only a node holding a key of our own pack may hand us a candidate; it is
+  #stored as-is and only ever finished as the exact entry its lock names
+  def handle(:replica_candidate, istate, term) do
+    kind = case term[:kind] do "produce" -> :produce; "slash" -> :slash; "slash_ext" -> :slash_ext; _ -> nil end
+    if kind && istate.peer.pk in (Application.fetch_env!(:ama, :keys_all_pks) || []) do
+      mpk = if term[:mpk] in ["", nil] do nil else term.mpk end
+      ReplicaGen.receive_candidate(Entry.unpack_from_net(term.entry), kind, mpk)
+    end
+  end
+
   def handle(:event_attestation, istate, term) do
     Enum.each(term.attestations, & FabricInbox.insert_attestation/1)
   end

@@ -2,10 +2,11 @@ defmodule ReplicaGen do
   use GenServer
 
   @heartbeat_ms 500
-  @ack_ttl_ms 1_000          #producing needs majority acks fresher than this
   @silence_timeout_ms 2_000  #peer counts as gone after this much silence
-  @ack_cooldown_ms 2_500     #quiet gap between acking two different peers
-  @slash_ack_timeout_ms 2_500
+  @lock_timeout_ms 1_000     #give up on a value the group cannot choose in time
+  @prepare_timeout_ms 1_500  #give up on a prepare round and start over
+  @retransmit_ms 250         #resend prepare/accept to peers that have not answered
+  @push_every_ms 1_000       #at most one push of the same entry to a peer
   @keypack_ms 30_000         #interval between key-pack (pks only) broadcasts
 
   def start_link() do
@@ -21,16 +22,106 @@ defmodule ReplicaGen do
       %{my_id: my_id, majority: majority} ->
         now = :erlang.monotonic_time(:millisecond)
         self_ack = case :ets.lookup(ReplicaGen, :self_ack) do
-          [{:self_ack, ^my_id}] -> 1
-          _ -> 0
+          [{:self_ack, ack}] -> ack
+          _ -> nil
         end
-        fresh = :ets.foldl(fn
-          ({{:peer, _id}, acking, _h, _sh, _shash, _synced, seen}, acc)->
-            if acking == my_id and now - seen <= @ack_ttl_ms do acc + 1 else acc end
-          (_, acc)-> acc
-        end, 0, ReplicaGen)
-        synced_for_leadership?() and self_ack + fresh >= majority
+        ReplicaCore.leader?(my_id, majority, self_ack, synced_for_leadership?(), peer_rows(), now)
     end
+  end
+
+  def peer_rows() do
+    for {{:peer, id}, row} <- :ets.match_object(ReplicaGen, {{:peer, :_}, :_}), do: Map.put(row, :id, id)
+  end
+
+  #PER-HEIGHT CONSENSUS (see ReplicaCore): the only door to a signature.
+  #blocks until the group chose {height, entry_hash} (a majority accepted it
+  #under our ballot), then returns true: only then may a produced entry, a
+  #slash entry or an attestation at height leave the box. false when we are not
+  #the leader, when the group already holds a different value there (the
+  #caller must use bound/1's), when the height is closed, or on timeout.
+  #candidate: %{entry, kind, mpk} for an entry that exists nowhere but here
+  #(our unsigned production or slash candidate). it is stored and pushed to
+  #every replica; an acceptor accepts only while it stores it, so whichever
+  #replicas outlive us can always finish the chosen entry.
+  #single node mode runs the same rule against its own durable acceptor
+  def choose(height, entry_hash, candidate \\ nil) when is_integer(height) and is_binary(entry_hash) do
+    try do
+      GenServer.call(__MODULE__, {:choose, %{height: height, hash: entry_hash, candidate: candidate}}, @lock_timeout_ms + 5_000)
+    catch
+      :exit, _ -> false
+    end
+  end
+
+  #what may be signed at height: %{hash, kind} (only that value: it may
+  #already be chosen), :free (our own value), :closed (never), or
+  #:unprepared (not the leader, or its prepare round has not completed yet)
+  def bound(height) when is_integer(height) do
+    try do
+      GenServer.call(__MODULE__, {:bound, height}, 5_000)
+    catch
+      :exit, _ -> :unprepared
+    end
+  end
+
+  #CANDIDATES: entries that exist nowhere but in the group, by header hash,
+  #fsynced in ReplicaKV before an accept can name them. one pushed by a
+  #replica is validated first (well-formed, txs match the header's root_tx,
+  #signer in our pack or the height's validators, slash target set), so a
+  #stored candidate is always one
+  #that can be signed and applied. kept for 2x the consensus window, and
+  #never while an accepted value names it
+  def put_candidate(entry, kind, mpk \\ nil) do
+    hash = Entry.header_hash(entry.header)
+    key = candidate_key(hash)
+    if MnesiaKV.get(ReplicaKV, key) == nil do
+      MnesiaKV.merge_override(ReplicaKV, key, %{entry: Map.take(entry, [:header, :txs]), kind: kind, mpk: mpk, height: entry.header.height})
+      prune_candidates(entry.header.height)
+    end
+    hash
+  end
+
+  def get_candidate(hash) when is_binary(hash), do: MnesiaKV.get(ReplicaKV, candidate_key(hash))
+  def get_candidate(_), do: nil
+
+  def held?(hash), do: get_candidate(hash) != nil
+
+  #:produce/:slash are ours (signer in our pack); :slash_ext is an outside
+  #carrier's slash entry we were asked to sign (signer a validator of the height)
+  def valid_candidate?(entry, kind, mpk) do
+    try do
+      hash = Entry.header_hash(entry.header)
+      signers = case kind do
+        :slash_ext -> DB.Chain.validators_for_height(entry.header.height) || []
+        _ -> Application.fetch_env!(:ama, :keys_all_pks) || []
+      end
+      kind in [:produce, :slash, :slash_ext] and entry.header.signer in signers and
+        (kind == :produce or (is_binary(mpk) and byte_size(mpk) == 48)) and
+        Entry.validate_entry(Map.put(Map.take(entry, [:header, :txs]), :hash, hash), hash) == %{error: :ok}
+    catch
+      _, _ -> false
+    end
+  end
+
+  defp candidate_key(hash), do: "candidate:" <> Base58.encode(hash)
+
+  defp prune_candidates(newest) do
+    keep = case MnesiaKV.get(ReplicaKV, "acceptor") do
+      %{accepted: accepted} -> MapSet.new(Map.values(accepted), & candidate_key(&1.hash))
+      _ -> MapSet.new()
+    end
+    MnesiaKV.get(ReplicaKV)
+    |> Enum.each(fn
+      %{uuid: "candidate:" <> _ = key, height: h} when h < newest - 2 * 16 ->
+        if !MapSet.member?(keep, key), do: MnesiaKV.delete(ReplicaKV, key)
+      _ -> :ok
+    end)
+  end
+
+  #a candidate pushed by a replica (NodeState :replica_candidate, sender
+  #checked to hold a pack key): validated, stored, then the accept it was
+  #pushed for can go through
+  def receive_candidate(entry, kind, mpk) do
+    GenServer.cast(__MODULE__, {:candidate, %{entry: entry, kind: kind, mpk: mpk}})
   end
 
   #a replica behind on BFT or rooted sync must not carry leadership: it can
@@ -67,115 +158,32 @@ defmodule ReplicaGen do
       nil -> nil
       replicas ->
         now = :erlang.monotonic_time(:millisecond)
-        {synced, syncing} = :ets.foldl(fn
-          ({{:peer, _id}, _acking, _h, _sh, _shash, p_synced, seen}, {s, b})->
-            cond do
-              now - seen > @silence_timeout_ms -> {s, b}
-              p_synced -> {s + 1, b}
-              true -> {s, b + 1}
-            end
-          (_, acc)-> acc
-        end, {0, 0}, ReplicaGen)
+        {synced, syncing} = Enum.reduce(peer_rows(), {0, 0}, fn(r, {s, b})->
+          cond do
+            now - r.seen > @silence_timeout_ms -> {s, b}
+            r.synced -> {s + 1, b}
+            true -> {s, b + 1}
+          end
+        end)
         {synced, syncing} = if synced_for_leadership?() do {synced + 1, syncing} else {synced, syncing + 1} end
         {Application.fetch_env!(:ama, :replica_id), synced, syncing, length(replicas)}
     end
   end
 
-  #production additionally never re-signs a height any replica already signed
-  def can_produce?(height) do
-    case :persistent_term.get({ReplicaGen, :config}, nil) do
-      nil -> true
-      _ -> can_sign?() and height > max_seen_signed_height()
+  defp load_acceptor() do
+    case MnesiaKV.get(ReplicaKV, "acceptor") do
+      %{promised: promised, accepted: accepted} -> %{promised: promised, accepted: accepted}
+      _ -> ReplicaCore.new_acceptor()
     end
   end
 
-  def max_seen_signed_height() do
-    peers_max = :ets.foldl(fn
-      ({{:peer, _id}, _acking, h, _sh, _shash, _synced, _seen}, acc)-> max(h, acc)
-      (_, acc)-> acc
-    end, 0, ReplicaGen)
-    max(my_signed_height(), peers_max)
-  end
+  defp fresh_proposer(), do: %{ballot: nil, prepared: false, preparing_until: nil, promises: %{}, chosen: MapSet.new()}
 
-  #single durable source of truth for our high-water mark: the ReplicaKV MnesiaKV
-  #table — ETS-speed reads, rocksdb-backed so it survives a restart (auto-restored
-  #at MnesiaKV.load). no hand-rolled cache to fall out of sync.
-  def my_signed_height() do
-    case MnesiaKV.get(ReplicaKV, "last_signed_height") do
-      %{height: h} -> h
-      _ -> 0
-    end
-  end
-
-  #called after signing a produced entry, before it leaves the box, so a restart
-  #can never forget a height we signed
-  def note_signed_height(height) do
-    case :persistent_term.get({ReplicaGen, :config}, nil) do
-      nil -> :ok
-      _ ->
-        if height > my_signed_height() do
-          MnesiaKV.merge(ReplicaKV, "last_signed_height", %{height: height})
-        end
-        :ok
-    end
-  end
-
-  #push a heartbeat right now (out of band) instead of waiting up to @heartbeat_ms
-  def flush_heartbeat() do
-    case :persistent_term.get({ReplicaGen, :config}, nil) do
-      nil -> :ok
-      _ -> GenServer.cast(__MODULE__, :heartbeat_now)
-    end
-  end
-
-  @empty_hash :binary.copy(<<0>>, 32)
-
-  #slash-entry single-shot lock, durable in ReplicaKV (sync). read at ETS speed for
-  #the heartbeat; written by the slash signing guard. node-local, like the HWM —
-  #not consensus state (the chain never reads it).
-  def my_slash_lock() do
-    case MnesiaKV.get(ReplicaKV, "slash_lock") do
-      %{height: h, hash: hash} -> {h, hash}
-      _ -> {0, @empty_hash}
-    end
-  end
-
-  def put_slash_lock(height, hash) do
-    MnesiaKV.merge(ReplicaKV, "slash_lock", %{height: height, hash: hash})
-  end
-
-  #before releasing a slash-entry signature the leader waits until a majority
-  #of the group carries the lock (peers adopt it from our heartbeats)
-  def await_slash_lock_replicated(height, hash) do
-    case :persistent_term.get({ReplicaGen, :config}, nil) do
-      nil -> true
-      %{ready: false} -> false
-      %{majority: majority} ->
-        await_slash_1(height, hash, majority, :erlang.monotonic_time(:millisecond) + @slash_ack_timeout_ms)
-    end
-  end
-  defp await_slash_1(height, hash, majority, deadline) do
-    now = :erlang.monotonic_time(:millisecond)
-    replicated = :ets.foldl(fn
-      ({{:peer, _id}, _acking, _h, sh, shash, _synced, seen}, acc)->
-        ok = (sh > height or (sh == height and shash == hash)) and now - seen <= @silence_timeout_ms
-        if ok do acc + 1 else acc end
-      (_, acc)-> acc
-    end, 0, ReplicaGen)
-    cond do
-      1 + replicated >= majority -> true
-      now >= deadline -> false
-      true ->
-        Process.sleep(100)
-        await_slash_1(height, hash, majority, deadline)
-    end
-  end
-
-  def init(state) do
+  def init(_state) do
     :ets.new(ReplicaGen, [:named_table, :public, read_concurrency: true])
     replicas = Application.fetch_env!(:ama, :replicas)
     if replicas == nil do
-      {:ok, %{enabled: false}}
+      {:ok, %{enabled: false, acceptor: load_acceptor()}}
     else
       my_id = Application.fetch_env!(:ama, :replica_id)
       psk = Application.fetch_env!(:ama, :replica_psk)
@@ -183,8 +191,8 @@ defmodule ReplicaGen do
       peers = Enum.reject(replicas, & &1.id == my_id)
       {:ok, socket} = :gen_udp.open(me.port, [:binary, {:active, true}, {:ip, {0, 0, 0, 0}}])
 
-      #volatile leadership state only — the durable HWM and slash lock live in the
-      #ReplicaKV MnesiaKV table (my_signed_height/0, my_slash_lock/0), never cached here
+      #volatile leadership state only — the durable acceptor lives in the
+      #ReplicaKV MnesiaKV table, never cached elsewhere
       :ets.insert(ReplicaGen, {:self_ack, nil})
       :ets.insert(ReplicaGen, {:synced, false})
       #not ready (can_sign? false) until persisted state is restored
@@ -194,20 +202,24 @@ defmodule ReplicaGen do
       #heartbeat. no assumption about key ordering — the pk comes off the wire.
       peer_ips = Map.new(peers, fn(p)-> {p.id, p.ip} end)
       my_pk = Application.fetch_env!(:ama, :trainer_pk)
+      acceptor = load_acceptor()
 
       IO.puts "🔁 replica #{my_id} of #{length(replicas)} (majority #{div(length(replicas), 2) + 1})"
       :erlang.send_after(3_000, self(), :restore)
-      {:ok, %{enabled: true, my_id: my_id, my_pk: my_pk, majority: div(length(replicas), 2) + 1, psk: psk,
-              peers: peers, peer_ips: peer_ips, meshed: MapSet.new(), socket: socket,
+      :erlang.send_after(@retransmit_ms, self(), :retransmit)
+      {:ok, %{enabled: true, my_id: my_id, my_pk: my_pk, majority: ReplicaCore.majority(length(replicas)), psk: psk,
+              peers: peers, peer_ips: peer_ips, peer_pks: %{}, meshed: MapSet.new(), socket: socket,
               ack_target: nil, last_ack_change: nil, last_seq: 0, last_seqs: %{}, last_keypack: 0,
-              synced: false, unsynced_streak: 0}}
+              synced: false, unsynced_streak: 0,
+              acceptor: acceptor, max_round: elem(acceptor.promised, 0), proposer: fresh_proposer(),
+              waiters: [], pushed: %{}}}
     end
   end
 
   def handle_info(:restore, state) do
     try do
-      #HWM and slash lock live in ReplicaKV (auto-restored at MnesiaKV.load) — nothing
-      #to warm here. peers are meshed lazily as their heartbeats arrive.
+      #the acceptor lives in ReplicaKV (auto-restored at MnesiaKV.load).
+      #peers are meshed lazily as their heartbeats arrive.
       :persistent_term.put({ReplicaGen, :config}, %{ready: true, my_id: state.my_id, majority: state.majority})
       :erlang.send_after(@heartbeat_ms, self(), :tick)
     catch
@@ -224,18 +236,325 @@ defmodule ReplicaGen do
     {:noreply, state}
   end
 
+  def handle_info(:retransmit, state = %{enabled: true}) do
+    state = try do retransmit(state) catch e,r -> IO.inspect({ReplicaGen, :retransmit_failed, e, r}); state end
+    :erlang.send_after(@retransmit_ms, self(), :retransmit)
+    {:noreply, state}
+  end
+
   def handle_info({:udp, _socket, _ip, _port, packet}, state = %{enabled: true}) do
     state = try do handle_packet(packet, state) catch _,_ -> state end
     {:noreply, state}
   end
 
+  def handle_info({:waiter_timeout, ref}, state = %{enabled: true}) do
+    {timed_out, waiters} = Enum.split_with(state.waiters, & &1.ref == ref)
+    Enum.each(timed_out, fn(w)->
+      IO.puts "🔁 ⚠️  height #{w.height} not chosen by the group in time, not signing"
+      GenServer.reply(w.from, false)
+    end)
+    {:noreply, %{state | waiters: waiters}}
+  end
+
   def handle_info(_msg, state) do {:noreply, state} end
 
-  def handle_cast(:heartbeat_now, state = %{enabled: true}) do
-    state = try do broadcast_heartbeat(state) catch _,_ -> state end
+  def handle_cast({:candidate, %{entry: entry, kind: kind, mpk: mpk}}, state = %{enabled: true}) do
+    if valid_candidate?(entry, kind, mpk), do: put_candidate(entry, kind, mpk)
     {:noreply, state}
   end
   def handle_cast(_msg, state) do {:noreply, state} end
+
+  #single node: our own acceptor is the whole group
+
+  def handle_call({:bound, height}, _from, state = %{enabled: false}) do
+    {:reply, ReplicaCore.bound([state.acceptor.accepted], height), state}
+  end
+
+  def handle_call({:choose, %{height: height, hash: hash, candidate: candidate}}, _from, state = %{enabled: false}) do
+    acc = state.acceptor
+    kind = if candidate do candidate.kind else :attest end
+    candidate && put_candidate(candidate.entry, candidate.kind, candidate[:mpk])
+    case ReplicaCore.bound([acc.accepted], height) do
+      :closed -> {:reply, false, state}
+      %{hash: bhash} when bhash != hash -> {:reply, false, state}
+      bound ->
+        kind = case bound do %{kind: bkind} -> bkind; :free -> kind end
+        case ReplicaCore.on_accept(acc, acc.promised, height, hash, kind, held?(hash)) do
+          {acc, %{op: :accepted}} -> {:reply, true, store_acceptor(state, acc)}
+          _ -> {:reply, false, state}
+        end
+    end
+  end
+
+  #replica group
+
+  def handle_call({:bound, height}, _from, state) do
+    cond do
+      !can_sign?() -> {:reply, :unprepared, state}
+      !state.proposer.prepared -> {:reply, :unprepared, ensure_prepared(state)}
+      true -> {:reply, proposer_bound(state, height), state}
+    end
+  end
+
+  def handle_call({:choose, %{height: height, hash: hash, candidate: candidate}}, from, state) do
+    cond do
+      !can_sign?() -> {:reply, false, state}
+      true ->
+        candidate && put_candidate(candidate.entry, candidate.kind, candidate[:mpk])
+        ref = make_ref()
+        :erlang.send_after(@lock_timeout_ms, self(), {:waiter_timeout, ref})
+        kind = if candidate do candidate.kind else :attest end
+        waiter = %{from: from, ref: ref, height: height, hash: hash, kind: kind, stage: :pending, ballot: nil, acks: MapSet.new()}
+        state = ensure_prepared(%{state | waiters: state.waiters ++ [waiter]})
+        {:noreply, advance_waiters(state)}
+    end
+  end
+
+  #proposer
+
+  #our own acceptor window is live (it holds what we proposed this term, under
+  #our ballot, so it outranks every promise); the peers' are as promised
+  defp proposer_bound(state, height) do
+    ReplicaCore.bound([state.acceptor.accepted | Map.values(state.proposer.promises)], height)
+  end
+
+  defp ensure_prepared(state) do
+    p = state.proposer
+    now = :erlang.monotonic_time(:millisecond)
+    cond do
+      p.prepared -> state
+      p.preparing_until != nil and now < p.preparing_until -> state
+      true ->
+        state = end_term(state)
+        ballot = ReplicaCore.next_ballot(max(state.max_round, elem(state.acceptor.promised, 0)), state.my_id)
+        {acc, _} = ReplicaCore.on_prepare(state.acceptor, ballot)
+        state = store_acceptor(state, acc)
+        state = %{state | max_round: elem(ballot, 0),
+                          proposer: %{fresh_proposer() | ballot: ballot, preparing_until: now + @prepare_timeout_ms}}
+        send_peers(state, %{op: :prepare, from: state.my_id, ballot: ballot})
+        maybe_prepared(state)
+    end
+  end
+
+  defp maybe_prepared(state) do
+    p = state.proposer
+    if !p.prepared and p.ballot != nil and 1 + map_size(p.promises) >= state.majority do
+      advance_waiters(%{state | proposer: %{p | prepared: true, preparing_until: nil}})
+    else
+      state
+    end
+  end
+
+  #pending waiters start their accept round once prepared; accepting ones
+  #resolve on a majority
+  defp advance_waiters(state) do
+    Enum.reduce(state.waiters, state, fn(w, state)->
+      if w not in state.waiters do state else advance_waiter(state, w) end
+    end)
+  end
+
+  defp advance_waiter(state, w = %{stage: :pending}) do
+    p = state.proposer
+    cond do
+      !p.prepared -> state
+      MapSet.member?(p.chosen, {w.height, w.hash}) -> resolve(state, w, true)
+      true ->
+        case proposer_bound(state, w.height) do
+          :closed -> resolve(state, w, false)
+          %{hash: bhash} when bhash != w.hash -> resolve(state, w, false)
+          bound ->
+            #a value keeps the kind it was first accepted with
+            kind = case bound do %{kind: bkind} -> bkind; :free -> w.kind end
+            case ReplicaCore.on_accept(state.acceptor, p.ballot, w.height, w.hash, kind, held?(w.hash)) do
+              {acc, %{op: :accepted}} ->
+                state = store_acceptor(state, acc)
+                w2 = %{w | stage: :accepting, kind: kind, ballot: p.ballot, acks: MapSet.new([state.my_id])}
+                state = replace_waiter(state, w, w2)
+                state = if ReplicaCore.needs_entry?(kind) do push_entry_all(state, w.hash) else state end
+                send_peers(state, accept_msg(state, w2))
+                |> advance_waiter(w2)
+              {_, %{op: :nack, promised: promised}} -> resolve(ballot_lost(state, promised), w, false)
+              _ -> resolve(state, w, false)
+            end
+        end
+    end
+  end
+  defp advance_waiter(state, w = %{stage: :accepting}) do
+    if ReplicaCore.chosen?(w.acks, state.majority) do
+      p = state.proposer
+      state = %{state | proposer: %{p | chosen: MapSet.put(p.chosen, {w.height, w.hash})}}
+      resolve(state, w, true)
+    else
+      state
+    end
+  end
+
+  defp replace_waiter(state, w, w2), do: %{state | waiters: Enum.map(state.waiters, & if(&1 == w, do: w2, else: &1))}
+
+  defp resolve(state, w, result) do
+    GenServer.reply(w.from, result)
+    %{state | waiters: List.delete(state.waiters, w)}
+  end
+
+  #our ballot is beaten: the term ends, the next acquire prepares a higher one
+  defp ballot_lost(state, promised) do
+    end_term(%{state | max_round: max(state.max_round, elem(promised, 0))})
+  end
+
+  #a term ends (beaten, demoted, prepare timed out, or a new ballot starts):
+  #every accept round in flight fails with it. an accept round belongs to ONE
+  #ballot: its acks are only ever counted, and it is only ever retransmitted,
+  #under that ballot, and a retry starts over from the bound check under the
+  #next term. pending waiters (no value proposed yet) carry over
+  defp end_term(state) do
+    state = %{state | proposer: fresh_proposer()}
+    Enum.reduce(Enum.filter(state.waiters, & &1.stage == :accepting), state, & resolve(&2, &1, false))
+  end
+
+  defp retransmit(state) do
+    p = state.proposer
+    now = :erlang.monotonic_time(:millisecond)
+    state = cond do
+      #no majority in time: start over (pending waiters time out on their own)
+      p.ballot != nil and !p.prepared and p.preparing_until != nil and now >= p.preparing_until ->
+        state = end_term(state)
+        if state.waiters != [] and can_sign?() do ensure_prepared(state) else state end
+      p.ballot != nil and !p.prepared ->
+        Enum.each(state.peers, fn(peer)->
+          if !Map.has_key?(p.promises, peer.id), do: send_peer(state, peer, %{op: :prepare, from: state.my_id, ballot: p.ballot})
+        end)
+        state
+      true -> state
+    end
+    Enum.each(state.waiters, fn
+      w = %{stage: :accepting} ->
+        Enum.each(state.peers, fn(peer)->
+          if !MapSet.member?(w.acks, peer.id), do: send_peer(state, peer, accept_msg(state, w))
+        end)
+      _ -> :ok
+    end)
+    want_entries(state)
+  end
+
+  #every entry a promise named that we do not store yet is asked for again from
+  #the acceptor that reported it, until it arrives: the push that rode along
+  #with the promise may have been lost, and nothing else would ever repeat it
+  defp want_entries(state = %{proposer: %{prepared: true, promises: promises}}) do
+    now = :erlang.monotonic_time(:millisecond)
+    Enum.reduce(promises, state, fn({id, window}, state)->
+      Enum.reduce(window, state, fn({_, v}, state)->
+        key = {:want, id, v.hash}
+        last = Map.get(state.pushed, key, now - @push_every_ms)
+        if ReplicaCore.needs_entry?(v.kind) and !held?(v.hash) and now - last >= @push_every_ms do
+          send_to_id(state, id, %{op: :want_entry, from: state.my_id, hash: v.hash})
+          %{state | pushed: Map.put(state.pushed, key, now)}
+        else
+          state
+        end
+      end)
+    end)
+  end
+  defp want_entries(state), do: state
+
+  defp accept_msg(state, w) do
+    %{op: :accept, from: state.my_id, ballot: w.ballot, height: w.height, hash: w.hash, kind: w.kind}
+  end
+
+  #acceptor
+
+  defp store_acceptor(state = %{acceptor: acc}, acc), do: state
+  defp store_acceptor(state, acc) do
+    #durable before any reply or signature can depend on it
+    MnesiaKV.merge_override(ReplicaKV, "acceptor", %{promised: acc.promised, accepted: acc.accepted})
+    %{state | acceptor: acc}
+  end
+
+  defp handle_consensus(%{op: :prepare, from: from, ballot: ballot}, state) do
+    {acc, reply} = ReplicaCore.on_prepare(state.acceptor, ballot)
+    state = store_acceptor(state, acc)
+    state = case reply do
+      %{op: :promise, accepted: accepted} ->
+        #a higher ballot than our own term: we are no longer the proposer
+        state = case state.proposer.ballot do
+          b when b != nil and ballot > b -> ballot_lost(state, ballot)
+          _ -> state
+        end
+        #a successor must be able to carry on whatever we accepted: hand it the
+        #entries along with our promise
+        Enum.reduce(accepted, state, fn({_, v}, state)->
+          if ReplicaCore.needs_entry?(v.kind) do push_entry(state, from, v.hash) else state end
+        end)
+      _ -> state
+    end
+    send_to_id(state, from, Map.put(reply, :from, state.my_id))
+  end
+
+  defp handle_consensus(%{op: :accept, from: from, ballot: ballot, height: height, hash: hash, kind: kind}, state) do
+    {acc, reply} = ReplicaCore.on_accept(state.acceptor, ballot, height, hash, kind, held?(hash))
+    state = store_acceptor(state, acc)
+    send_to_id(state, from, Map.put(reply, :from, state.my_id))
+  end
+
+  defp handle_consensus(%{op: :promise, from: from, ballot: ballot, accepted: accepted}, state) do
+    p = state.proposer
+    if p.ballot == ballot and !p.prepared do
+      maybe_prepared(%{state | proposer: %{p | promises: Map.put(p.promises, from, accepted)}})
+    else
+      state
+    end
+  end
+
+  defp handle_consensus(%{op: :accepted, from: from, ballot: ballot, height: height, hash: hash}, state) do
+    if state.proposer.ballot == ballot do
+      Enum.reduce(state.waiters, state, fn
+        w = %{stage: :accepting, ballot: ^ballot, height: ^height, hash: ^hash}, state ->
+          w2 = %{w | acks: MapSet.put(w.acks, from)}
+          advance_waiter(replace_waiter(state, w, w2), w2)
+        _, state -> state
+      end)
+    else
+      state
+    end
+  end
+
+  defp handle_consensus(%{op: :nack, ballot: ballot, promised: promised}, state) do
+    if state.proposer.ballot == ballot and promised > ballot do ballot_lost(state, promised) else state end
+  end
+
+  defp handle_consensus(%{op: :closed, ballot: ballot, height: height}, state) do
+    if state.proposer.ballot == ballot do
+      Enum.reduce(Enum.filter(state.waiters, & &1.height == height and &1.ballot == ballot), state, & resolve(&2, &1, false))
+    else
+      state
+    end
+  end
+
+  #an acceptor lacks the entry it was asked to accept, or a promise named an
+  #entry we lack: push it
+  defp handle_consensus(%{op: op, from: from, hash: hash}, state) when op in [:need_entry, :want_entry] do
+    push_entry(state, from, hash)
+  end
+
+  #entries ride the node protocol (they reach megabytes; the replica UDP
+  #channel carries only small packets). replicas are meshed peers. at most one
+  #push of an entry to a peer per @push_every_ms
+  defp push_entry_all(state, hash), do: Enum.reduce(state.peers, state, & push_entry(&2, &1.id, hash))
+
+  defp push_entry(state, id, hash) do
+    now = :erlang.monotonic_time(:millisecond)
+    last = Map.get(state.pushed, {id, hash}, now - @push_every_ms)
+    with true <- now - last >= @push_every_ms,
+         %{entry: entry, kind: kind, mpk: mpk} <- get_candidate(hash),
+         pk when pk != nil <- state.peer_pks[id],
+         ip when ip != nil <- state.peer_ips[id] do
+      msg = NodeProto.replica_candidate(entry, kind, mpk)
+      send(NodeGen.get_socket_gen(), {:send_to, [%{ip4: ip |> Tuple.to_list() |> Enum.join("."), pk: pk}], msg})
+      pushed = state.pushed |> Map.reject(fn({_, t})-> now - t > 10 * @push_every_ms end) |> Map.put({id, hash}, now)
+      %{state | pushed: pushed}
+    else
+      _ -> state
+    end
+  end
 
   defp tick(state) do
     now = :erlang.monotonic_time(:millisecond)
@@ -244,27 +563,20 @@ defmodule ReplicaGen do
     #consecutive unsynced samples (1.5s) so a transient blip cannot flap
     #leadership. a compute crash (chain not readable) counts as unsynced
     raw = try do compute_synced?() catch _,_ -> false end
-    {synced, streak} = cond do
-      raw -> {true, 0}
-      state.unsynced_streak + 1 >= 3 -> {false, state.unsynced_streak + 1}
-      true -> {state.synced, state.unsynced_streak + 1}
-    end
+    {synced, streak} = ReplicaCore.next_sync(raw, state.synced, state.unsynced_streak)
     :ets.insert(ReplicaGen, {:synced, synced})
     state = %{state | synced: synced, unsynced_streak: streak}
 
-    #leadership candidates: fresh AND self-reporting synced. an unsynced
-    #member (self included) is never endorsed; with no synced member at all
-    #the target goes nil and nobody signs until someone catches up
-    candidate_ids = Enum.filter(state.peers, fn(p)->
-      case :ets.lookup(ReplicaGen, {:peer, p.id}) do
-        [{{:peer, _}, _acking, _h, _sh, _shash, synced, seen}] -> synced and now - seen <= @silence_timeout_ms
-        _ -> false
-      end
-    end)
-    |> Enum.map(& &1.id)
-    candidate_ids = if state.synced do [state.my_id | candidate_ids] else candidate_ids end
-    desired = case candidate_ids do [] -> nil; ids -> Enum.min(ids) end
+    desired = ReplicaCore.desired_target(state.my_id, state.synced, peer_rows(), now)
     state = update_ack_target(state, desired, now)
+
+    #a leader prepares its term up front, so the first height it signs does
+    #not pay for the prepare round; a non-leader drops its term
+    state = cond do
+      can_sign?() -> ensure_prepared(state)
+      state.proposer.ballot != nil -> end_term(state)
+      true -> state
+    end
 
     state = broadcast_heartbeat(state)
     maybe_broadcast_keypack(state, now)
@@ -275,7 +587,7 @@ defmodule ReplicaGen do
   #and drop it harmlessly
   defp maybe_broadcast_keypack(state, now) do
     if now - state.last_keypack < @keypack_ms do state else
-      payload = :erlang.term_to_binary({:keypack, state.my_id, Application.fetch_env!(:ama, :keys_all_pks)})
+      payload = :erlang.term_to_binary(%{op: :keypack, id: state.my_id, pks: Application.fetch_env!(:ama, :keys_all_pks)})
       packet = encrypt(payload, state.psk)
       Enum.each(state.peers, fn(p)->
         :gen_udp.send(state.socket, p.ip, p.port, packet)
@@ -284,8 +596,7 @@ defmodule ReplicaGen do
     end
   end
 
-  #build and gossip one heartbeat: our ack target + HWM + slash lock + sync
-  #state. carry my pk
+  #build and gossip one heartbeat: our ack target + sync state. carry my pk
   #so peers can mesh me without assuming any particular seed-pack ordering.
   #seq must strictly increase so peers dedup/order correctly (they drop
   #seq <= last_seq). ms wall clock + the bump past last_seq: the bump keeps two
@@ -295,9 +606,8 @@ defmodule ReplicaGen do
   #finer unit would poison peers' volatile last_seqs against any rollback build.
   defp broadcast_heartbeat(state) do
     seq = max(:os.system_time(:millisecond), state.last_seq + 1)
-    my_h = my_signed_height()
-    {sh, shash} = my_slash_lock()
-    payload = :erlang.term_to_binary({state.my_id, state.my_pk, state.ack_target, my_h, sh, shash, seq, synced_for_leadership?()})
+    payload = :erlang.term_to_binary(%{op: :heartbeat, id: state.my_id, pk: state.my_pk, acking: state.ack_target,
+                                       seq: seq, synced: synced_for_leadership?()})
     packet = encrypt(payload, state.psk)
     Enum.each(state.peers, fn(p)->
       :gen_udp.send(state.socket, p.ip, p.port, packet)
@@ -305,28 +615,36 @@ defmodule ReplicaGen do
     %{state | last_seq: seq}
   end
 
-  #never endorse two different leaders within one freshness window: any target
-  #switch goes through a silent cooldown first
-  defp update_ack_target(state, desired, now) do
-    cond do
-      state.ack_target == desired -> state
-      state.ack_target != nil ->
-        :ets.insert(ReplicaGen, {:self_ack, nil})
-        %{state | ack_target: nil, last_ack_change: now}
-      state.last_ack_change == nil or now - state.last_ack_change >= @ack_cooldown_ms ->
-        :ets.insert(ReplicaGen, {:self_ack, desired})
-        %{state | ack_target: desired, last_ack_change: now}
-      true -> state
+  #every replica packet is a map with an :op. builds before per-height
+  #consensus speak tuples: the group must be upgraded all at once
+  defp send_peers(state, msg) do
+    Enum.each(state.peers, & send_peer(state, &1, msg))
+    state
+  end
+
+  defp send_to_id(state, id, msg) do
+    case Enum.find(state.peers, & &1.id == id) do
+      nil -> state
+      peer -> send_peer(state, peer, msg); state
     end
+  end
+
+  defp send_peer(state, peer, msg) do
+    :gen_udp.send(state.socket, peer.ip, peer.port, encrypt(:erlang.term_to_binary(msg), state.psk))
+  end
+
+  defp update_ack_target(state, desired, now) do
+    {target, last_change} = ReplicaCore.update_ack_target(state.ack_target, state.last_ack_change, desired, now)
+    if target != state.ack_target, do: :ets.insert(ReplicaGen, {:self_ack, target})
+    %{state | ack_target: target, last_ack_change: last_change}
   end
 
   defp handle_packet(packet, state) do
     payload = decrypt(packet, state.psk)
     case :erlang.binary_to_term(payload, [:safe]) do
-      {:keypack, id, pks} -> handle_keypack(id, pks, state)
-      {id, pk, acking, h, sh, shash, seq, synced} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, state)
-      #pre-syncstate builds: no flag on the wire, count them as synced
-      {id, pk, acking, h, sh, shash, seq} -> handle_heartbeat(id, pk, acking, h, sh, shash, seq, true, state)
+      %{op: :keypack} = m -> handle_keypack(m, state)
+      %{op: :heartbeat} = m -> handle_heartbeat(m, state)
+      %{op: _} = m -> handle_consensus(m, state)
     end
   end
 
@@ -334,7 +652,7 @@ defmodule ReplicaGen do
   #each replica fronts a different first key as its identity). log every
   #divergence, both directions, on every replica that can see it; repeats
   #each @keypack_ms while the divergence lasts
-  defp handle_keypack(id, pks, state) do
+  defp handle_keypack(%{id: id, pks: pks}, state) do
     true = Enum.any?(state.peers, & &1.id == id)
     true = is_list(pks) and Enum.all?(pks, & is_binary(&1) and byte_size(&1) == 48)
     mine = MapSet.new(Application.fetch_env!(:ama, :keys_all_pks))
@@ -348,8 +666,8 @@ defmodule ReplicaGen do
     state
   end
 
-  defp handle_heartbeat(id, pk, acking, h, sh, shash, seq, synced, state) do
-    true = is_integer(id) and is_binary(pk) and is_integer(h) and is_integer(sh) and is_integer(seq) and is_boolean(synced)
+  defp handle_heartbeat(%{id: id, pk: pk, acking: acking, seq: seq, synced: synced}, state) do
+    true = is_integer(id) and is_binary(pk) and is_integer(seq) and is_boolean(synced)
     true = Enum.any?(state.peers, & &1.id == id)
     last_seq = Map.get(state.last_seqs, id, 0)
     if seq <= last_seq do state else
@@ -357,23 +675,15 @@ defmodule ReplicaGen do
       #first heartbeat, or back from silence: push our keypack right away so
       #pack divergence surfaces at connect time, not up to @keypack_ms later
       fresh_connect = case :ets.lookup(ReplicaGen, {:peer, id}) do
-        [{{:peer, _}, _acking, _h, _sh, _shash, _synced, seen}] -> now - seen > @silence_timeout_ms
+        [{{:peer, _}, %{seen: seen}}] -> now - seen > @silence_timeout_ms
         _ -> true
       end
-      :ets.insert(ReplicaGen, {{:peer, id}, acking, h, sh, shash, synced, now})
+      :ets.insert(ReplicaGen, {{:peer, id}, %{acking: acking, synced: synced, seen: now}})
       #mesh the peer the first time we see it, then keep it live: a heartbeat is
       #proof the peer is up, so keep it in the gossip online set so the leader's
       #entry/attestation broadcasts keep reaching it
-      state = ensure_meshed(state, id, pk)
+      state = ensure_meshed(%{state | peer_pks: Map.put(state.peer_pks, id, pk)}, id, pk)
       NodeANR.set_last_message(pk)
-      #persist a peer's signed height so a restart still never re-signs it;
-      #capped so a buggy peer far ahead cannot block production forever
-      if is_integer(h) and h <= (DB.Chain.height() || 0) + 10, do: note_signed_height(h)
-      #adopt a newer slash-entry lock from a peer
-      {my_sh, _} = my_slash_lock()
-      if sh > my_sh and is_binary(shash) and byte_size(shash) == 32 do
-        SpecialMeetingAttestGen.adopt_entry_sign_lock(sh, shash)
-      end
       state = %{state | last_seqs: Map.put(state.last_seqs, id, seq)}
       if fresh_connect do maybe_broadcast_keypack(%{state | last_keypack: 0}, now) else state end
     end

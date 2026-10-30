@@ -232,8 +232,12 @@ defmodule SpecialMeetingAttestGen do
         !guilty -> []
         my_keys == [] -> []
         !ReplicaGen.can_sign?() -> []
-        !acquire_entry_sign_lock(entry.header.height, entry.hash) -> []
-        !ReplicaGen.await_slash_lock_replicated(entry.header.height, entry.hash) -> []
+        #an entry signature at this height: the group's per-height consensus
+        #first, so a slash entry and a normal entry at one height can never both
+        #be signed. the entry goes with it: if the carrier and our leader are
+        #both gone before it lands, a successor finishes it from the group
+        !ReplicaGen.choose(entry.header.height, entry.hash,
+          %{entry: Map.take(entry, [:header, :txs]), kind: :slash_ext, mpk: malicious_pk}) -> []
 
         true ->
           h = :crypto.hash(:sha256, RDB.vecpak_encode(entry.header))
@@ -281,37 +285,6 @@ defmodule SpecialMeetingAttestGen do
     :throw, %{error: error} -> error
     _, _ -> :invalid_signature
   end
-
-  #last slash entry we signed, durable in ReplicaKV (sync, fsync'd before any
-  #signature is released so a crash cannot forget it): never sign a DIFFERENT entry
-  #at or below that height; re-signing the exact same hash is always allowed (net
-  #retries). node-local guard — the chain never reads it.
-  #maybe_attest runs in parallel tasks: serialize check-and-write so two
-  #different entries at one height can never both take the lock
-  def acquire_entry_sign_lock(height, entry_hash) do
-    with_sign_lock(fn ->
-      {last_height, last_hash} = ReplicaGen.my_slash_lock()
-      cond do
-          entry_hash == last_hash -> true
-          height <= last_height -> false
-          true ->
-              ReplicaGen.put_slash_lock(height, entry_hash)
-              true
-      end
-    end)
-  end
-
-  #adopt a replica peer's slash-entry lock heard via heartbeat; only ever advances
-  def adopt_entry_sign_lock(height, entry_hash) do
-    with_sign_lock(fn ->
-      {current, _} = ReplicaGen.my_slash_lock()
-      if height > current do
-          ReplicaGen.put_slash_lock(height, entry_hash)
-      end
-    end)
-  end
-
-  defp with_sign_lock(fun), do: :global.trans({{__MODULE__, :sign_lock}, self()}, fun, [node()])
 
   def entries_last_x(cnt) do
       entry = DB.Chain.tip_entry()

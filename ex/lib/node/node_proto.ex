@@ -45,6 +45,11 @@ defmodule NodeProto do
     %{op: :event_attestation, attestations: List.wrap(attestations)}
   end
 
+  #an unsigned entry a replica leader is about to lock, for its replicas only
+  def replica_candidate(entry, kind, mpk) do
+    %{op: :replica_candidate, entry: Entry.pack_for_net(entry), kind: Atom.to_string(kind), mpk: mpk || ""}
+  end
+
   def catchup(height_flags) do
     %{op: :catchup, height_flags: height_flags}
   end

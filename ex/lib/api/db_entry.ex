@@ -105,10 +105,18 @@ defmodule DB.Entry do
     end
 
     entry_packed = Entry.pack_for_db(entry)
-    if !by_hash(entry.hash, db_opts) do
-      RocksDB.put(entry.hash, entry_packed, db_handle(db_opts, :entry, %{}))
-      RocksDB.put("by_height:#{pad_integer(entry.header.height)}:#{entry.hash}", entry.hash, db_handle(db_opts, :entry_meta, %{}))
-      RocksDB.put("entry:#{entry.hash}:seentime", :os.system_time(1000), db_handle(db_opts, :entry_meta, %{to_integer: true}))
+    existing = by_hash(entry.hash, db_opts)
+    cond do
+      !existing ->
+        RocksDB.put(entry.hash, entry_packed, db_handle(db_opts, :entry, %{}))
+        RocksDB.put("by_height:#{pad_integer(entry.header.height)}:#{entry.hash}", entry.hash, db_handle(db_opts, :entry_meta, %{}))
+        RocksDB.put("entry:#{entry.hash}:seentime", :os.system_time(1000), db_handle(db_opts, :entry_meta, %{to_integer: true}))
+      #a quorum-signed (masked) copy supersedes an unapplied unmasked copy of the
+      #same header: a slash entry's carrier may gossip its own signed copy, which
+      #can never be applied, and keeping it would shut out the one that can
+      entry[:mask] != nil and existing[:mask] == nil and !in_chain(entry.hash, db_opts) ->
+        RocksDB.put(entry.hash, entry_packed, db_handle(db_opts, :entry, %{}))
+      true -> :ok
     end
 
     db_opts[:rtx_commit] && RocksDB.transaction_commit(db_opts.rtx)
