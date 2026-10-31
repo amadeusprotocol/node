@@ -6,6 +6,8 @@ export const bridgeAbi = [
   'function orders(uint64) view returns (bytes32)',
   'function received(uint64) view returns (bool)',
   'function send(uint128 amount, bytes recipient, bytes refundTo, uint64 fillDeadline, uint128 gasDrop, uint128 gasDropFee) returns (uint64)',
+  'function send(uint128 amount, bytes32 dstChain, bytes dstCoin, bytes recipient, bytes refundTo, uint64 fillDeadline, uint128 gasDrop, uint128 gasDropFee) returns (uint64)',
+  'function sendPaused() view returns (bool)',
   `function receiveOrder(bytes order, uint64 height, ${proof} proof) payable`,
   `function receiveOrderWithConsensus(bytes claim, bytes mask, bytes sig, bytes roster, bytes order, ${proof} proof) payable`,
   'event OrderCreated(uint64 indexed nonce, bytes order)',

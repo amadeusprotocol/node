@@ -10,7 +10,7 @@ The steps below are the same on every EVM chain; examples use BSC testnet (`bsc-
 
 Testnet (Amadeus testnet ⇄ BSC Chapel, chain id 97):
 - Amadeus API `https://testnet-rpc.ama.one/api`, BSC RPC `https://bsc-testnet-rpc.publicnode.com`
-- AmaBridge `0xbA423F25aa91301761d7cb4C0f63eE769047B884`, wAMA `0x751D543E23E02BE2b40A0FB1dD36868746d4742e` (9 decimals),
+- AmaBridge `0xc2D2ddB8A8b34313Eba5aacB710401db206ACb81`, wAMA `0xd433f85e0B43A6F97E46f1F424FD92dbCCa3d4be` (9 decimals),
   AmadeusLightClient `0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410`
 
 Amounts are base units (1 AMA = 1e9). Chain names: `amadeus-testnet`, `bsc-testnet`.
@@ -45,6 +45,14 @@ Every order has `gasDrop` and `gasDropFee`:
    - If `keccak256(roster) != AmadeusLightClient.rosterHash()` the Amadeus set just rotated; the relay
      syncs it shortly (or call `submitValidatorSet` yourself, see `evm.js adoptValidatorRecordsUpTo`).
 
+## BSC → Base (any chain to another, through Amadeus)
+1. On BSC: `AmaBridge.send(amount, bytes32("base-testnet"), <Base wAMA 20 bytes>, <recipient 20 bytes>, refundTo, 0, gasDrop, gasDropFee)`
+   (the 8-argument `send`). gasDrop is wei of ETH on Base; gasDropFee pays both deliveries: the relay
+   charges `amadeusCost` plus its Base delivery cost (`relayer/src/tips.js costThroughAmadeus`).
+2. Amadeus `Bridge.receive` of that order (as for BSC → AMA below) passes it on as Amadeus' own order to
+   Base (next nonce, same fee and gas drop, 0.1 bp burned); deliver or claim that like AMA → BSC, on Base.
+   An order Amadeus cannot pass on (unknown chain or coin, bad address) is refunded to refundTo on BSC.
+
 ## BSC → AMA
 1. Send on BSC: `AmaBridge.send(amount, recipient48, refundTo, 0, gasDrop, gasDropFee)` burns your wAMA.
    `recipient48` is the 48-byte Amadeus public key (base58-decode the address). The order is in
@@ -65,5 +73,6 @@ Every order has `gasDrop` and `gasDropFee`:
    - `GET /bridge/received/bsc-testnet/<AmaBridge address>/<nonce>` turns true.
 
 ## Checks before sending
-- Per-route cap: 10M AMA per Amadeus epoch (Amadeus) / per day (BSC); admin can pause routes.
+- Per-chain cap: each chain's net inflow is capped at 10M AMA per Amadeus epoch (coins leaving a chain
+  free room again); each EVM contract caps 10M per day per direction; admin can pause routes.
 - `fillDeadline` is reserved; pass 0. `exclusiveFiller` and `message` must be empty.

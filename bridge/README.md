@@ -2,14 +2,20 @@
 
 Trustless: each chain verifies Amadeus consensus (BLS12-381 via the EIP-2537 precompiles),
 Amadeus verifies each chain's finality (node: `ex/native/rdb/src/consensus/bridge/<chain>`,
-BIC `ex/native/rdb/src/consensus/bic/bridge.rs`). Recipients claim themselves, or tip a relay
-(`gasDropFee`, out of the order) which delivers and funds their gas (`gasDrop`). See AGENTS.md.
+BIC `ex/native/rdb/src/consensus/bic/bridge.rs`). Recipients claim themselves, or pay a relay its
+cost (`gasDropFee`, out of the order), which delivers and funds their gas (`gasDrop`). See AGENTS.md.
+
+Amadeus is the hub: an order from one chain to another (BSC -> Base) is proven on Amadeus and passed
+on as Amadeus' own order, the AMA staying in escrow; the user only acts on the source chain.
+Limits are per chain, not per route: each chain has a cap on its net inflow per Amadeus epoch
+(coins moving out of it free room again), and Amadeus keeps how much of its escrow backs each
+chain's wAMA, so coins only ever leave a chain out of that chain's own backing.
 
 | Chain | Amadeus follows | Status |
 |---|---|---|
 | BSC | Parlia fast finality (`consensus/bridge/bsc`) | testnet live |
 | Ethereum | beacon sync committee | planned (`relayer/src/chains/eth.js`) |
-| Base | OP-stack output roots via Ethereum | planned (`relayer/src/chains/base.js`) |
+| Base | OP-stack output roots via Ethereum | testnet: Amadeus -> Base and BSC -> Base; Base -> anything needs the Ethereum light client (its sends stay paused) |
 
 ```
 bridge/
@@ -32,7 +38,9 @@ bridge/
   storage slot 0 (which Amadeus proves); `receiveOrder` mints wAMA for a proven Amadeus
   order (`receiveOrderWithConsensus` also submits the consensus, one tx). The 0.1 bp fee is only
   charged (and burned) on Amadeus sends; none here. Tips are minted to the deliverer, `msg.value`
-  (the gas drop) goes to the recipient. 10M AMA cap per day per direction, admin can only pause.
+  (the gas drop, at most 30k gas for the transfer) goes to the recipient. 10M AMA cap per day per
+  direction on the contract, admin can only pause. `send` takes a destination: Amadeus, or another
+  chain through Amadeus (its wAMA and a 20-byte recipient).
 - `WAMA.sol`: wrapped AMA, 9 decimals, minted/burned by the bridge only.
 - `Bls12381.sol`, `Hbsmt.sol`, `Order.sol`: BLS hash-to-curve + pairing, Amadeus state-tree
   proofs, the shared packed order format (`ex/native/rdb/src/consensus/bridge/order.rs`).

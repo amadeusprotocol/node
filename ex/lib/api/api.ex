@@ -54,7 +54,14 @@ defmodule API do
     cond do
       size != byte_size(binary) -> Base58.decode(binary)
       binary == :binary.copy(<<"1">>, size) -> :binary.copy(<<0>>, size)
+      #a base58 text that is itself `size` long (the bridge ESCROW, 47 zero bytes and a 1, is "1...12")
+      b58_of_size?(binary, size) -> Base58.decode(binary)
       true -> binary
     end
+  end
+
+  defp b58_of_size?(binary, size) do
+    Regex.match?(~r/^[1-9A-HJ-NP-Za-km-z]+$/, binary) and
+      (try do byte_size(Base58.decode(binary)) == size rescue _ -> false end)
   end
 end

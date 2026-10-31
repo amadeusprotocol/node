@@ -5,7 +5,7 @@ import { encode as vecpak, fromBase58 } from '@amadeus-protocol/sdk'
 import { bridgeAbi, lightClientAbi } from './abi.js'
 import { decodeValidatorRecord, rosterEip, g2Eip, pad20, unpackOrder } from './codec.js'
 import { finalities } from './chains/index.js'
-import { paysToChain, costToChain } from './tips.js'
+import { paysToChain, costToChain, DELIVERY_BYTES } from './tips.js'
 
 const LOG_QUERY_BLOCKS = 1000
 //how far back a reorg could have moved an order's event
@@ -29,6 +29,10 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
   const head = () => retryRateLimited(() => provider.getBlockNumber())
   //what deliveries are priced at (src/tips.js) and sent with
   const gasPrice = async () => BigInt(await rpc('eth_gasPrice', []))
+  //OP-stack chains charge an L1 data fee on top of gas (GasPriceOracle upper bound for a delivery)
+  const l1Fee = async () => chain.opStack
+    ? BigInt(await rpc('eth_call', [{ to: '0x420000000000000000000000000000000000000F', data: '0xf1c7a58b' + DELIVERY_BYTES.toString(16).padStart(64, '0') }, 'latest']))
+    : 0n
   //orders are scanned only up to here, so a reorg cannot drop one after it was seen
   const finalizedHead = async () => Number((await block('finalized')).number)
   const finality = finalities[chain.finality]({ ama, chain, block, rpc, log, sleep })
@@ -81,8 +85,8 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     //the order pays for chain.deliveryGas at today's gas price: until it covers that, it waits (the
     //recipient may claim it any time). The tx may never use more gas than was paid for: a recipient
     //contract burning gas in its gas-drop callback costs the relay nothing beyond that
-    const price = await gasPrice()
-    if (!paysToChain(chain, price, o)) throw new Error(`amadeus order ${n} pays ${o.gasDropFee}, delivery costs ${costToChain(chain, price, o.gasDrop)} at ${price} wei gas: waiting`)
+    const [price, l1] = [await gasPrice(), await l1Fee()]
+    if (!paysToChain(chain, price, o, l1)) throw new Error(`amadeus order ${n} pays ${o.gasDropFee}, delivery costs ${costToChain(chain, price, o.gasDrop, l1)} at ${price} wei gas: waiting`)
     const c = await ama.consensus(h)
     const args = [fromBase58(c.claim), fromBase58(c.aggsig.mask), g2Eip(fromBase58(c.aggsig.aggsig)), await eipRosterAt(h), packed, toSolidityProof(sp.proofs[0].proof)]
     const limit = BigInt(chain.deliveryGas)
@@ -171,6 +175,11 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     return failed
   }
 
-  return { key, name: chain.name, head, finalizedHead, gasPrice, adoptNewAmadeusValidatorRecord, syncAmadeusLightClient: () => (finality.keepCurrent ?? finality.sync)(), lightClientTrust: () => finality.trust(),
+  //a chain Amadeus cannot verify yet (inbound: false, Base): the relay only delivers to it
+  if (chain.inbound === false) {
+    return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, syncAmadeusLightClient: async () => ({}), lightClientTrust: async () => null,
+             deliverAmadeusOrder, findTippedOrders: async () => [], orderCreatedBy: async () => null, deliverToAmadeus: async () => [] }
+  }
+  return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, syncAmadeusLightClient: () => (finality.keepCurrent ?? finality.sync)(), lightClientTrust: () => finality.trust(),
            deliverAmadeusOrder, findTippedOrders, orderCreatedBy, deliverToAmadeus }
 }

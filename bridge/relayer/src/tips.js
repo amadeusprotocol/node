@@ -6,11 +6,11 @@ export const AVG_TX_GAS = 100_000n
 /// AMA base units an Amadeus account wants for ~2 txs (each locks 0.01 AMA up front, mostly refunded)
 export const AMA_FOR_TWO_TXS = 20_000_000n
 
-/// AMA base units for a delivery to an EVM chain: its gas at `gasPrice` plus the gas drop (wei),
-/// at chain.amaPerGasCoin; null when the chain is not priced (no relay delivery)
-export function costToChain(chain, gasPrice, gasDrop) {
+/// AMA base units for a delivery to an EVM chain: its gas at `gasPrice`, its L1 data fee (OP-stack
+/// chains, wei) and the gas drop (wei), at chain.amaPerGasCoin; null when the chain is not priced
+export function costToChain(chain, gasPrice, gasDrop, l1Fee = 0n) {
   if (!chain.amaPerGasCoin) return null
-  const wei = BigInt(chain.deliveryGas) * gasPrice + gasDrop
+  const wei = BigInt(chain.deliveryGas) * gasPrice + l1Fee + gasDrop
   return (wei * parseUnits(chain.amaPerGasCoin, 9) + 10n ** 18n - 1n) / 10n ** 18n
 }
 
@@ -21,8 +21,17 @@ export const costToAmadeus = (net, gasDrop) => BigInt(net.amadeusCost) + gasDrop
 /// one the relay funds. Whether it pays enough depends on the gas price at delivery (paysToChain)
 export const forRelay = (chain, o) => Boolean(chain.amaPerGasCoin) && o.gasDropFee > 0n && o.gasDrop <= BigInt(chain.maxGasDrop)
 
-export const paysToChain = (chain, gasPrice, o) => {
-  const cost = costToChain(chain, gasPrice, o.gasDrop)
+/// a delivery's calldata (claim, roster, order, proof) for the L1 data fee upper bound
+export const DELIVERY_BYTES = 4000
+
+/// from another chain through Amadeus: the Amadeus leg plus the delivery on `chain`
+export const costThroughAmadeus = (net, chain, gasPrice, gasDrop, l1Fee = 0n) => {
+  const c = costToChain(chain, gasPrice, gasDrop, l1Fee)
+  return c === null ? null : costToAmadeus(net, 0n) + c
+}
+
+export const paysToChain = (chain, gasPrice, o, l1Fee = 0n) => {
+  const cost = costToChain(chain, gasPrice, o.gasDrop, l1Fee)
   return cost !== null && o.gasDrop <= BigInt(chain.maxGasDrop) && o.gasDropFee >= cost
 }
 export const paysToAmadeus = (net, o) => o.gasDrop <= BigInt(net.maxGasDropAma) && o.gasDropFee >= costToAmadeus(net, o.gasDrop)

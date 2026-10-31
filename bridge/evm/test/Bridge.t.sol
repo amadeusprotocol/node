@@ -179,6 +179,32 @@ contract BridgeTest is Test {
         assertEq(wama.balanceOf(recipient), 250e9 - 250e9 / 100_000 - 5e9);
     }
 
+    function test_send_to_another_chain_through_amadeus() public {
+        finalize();
+        bridge.receiveOrder(vm.parseJsonBytes(json, ".order"), 5000, proof(".order_proof"));
+        bytes memory baseWama = abi.encodePacked(address(0xBA5E));
+        address to = address(0xB0B);
+        vm.prank(recipient);
+        vm.recordLogs();
+        bridge.send(100e9, bytes32("base-testnet"), baseWama, abi.encodePacked(to), "", 0, 1e14, 2e9);
+        Order.Data memory o = this.unpackOrder(abi.decode(vm.getRecordedLogs()[1].data, (bytes)));
+        assertEq(o.dstChain, bytes32("base-testnet"));
+        assertEq(o.dstCoin, baseWama);
+        assertEq(o.recipient, abi.encodePacked(to));
+        assertEq(o.outputAmount, 98e9);
+        assertEq(o.gasDrop, 1e14);
+        assertEq(o.gasDropFee, 2e9);
+        //an Amadeus key to Amadeus only, 20-byte addresses elsewhere, never back to this chain
+        vm.startPrank(recipient);
+        vm.expectRevert(AmaBridge.BadAddress.selector);
+        bridge.send(1e9, bytes32("base-testnet"), baseWama, vm.parseJsonBytesArray(json, ".roster_b_compressed")[0], "", 0, 0, 0);
+        vm.expectRevert(AmaBridge.WrongChain.selector);
+        bridge.send(1e9, bytes32("bsc-testnet"), baseWama, abi.encodePacked(to), "", 0, 0, 0);
+        vm.expectRevert(AmaBridge.WrongCoin.selector);
+        bridge.send(1e9, bytes32("amadeus-testnet"), baseWama, vm.parseJsonBytesArray(json, ".roster_b_compressed")[0], "", 0, 0, 0);
+        vm.stopPrank();
+    }
+
     function test_send_writes_the_slot_amadeus_proves() public {
         finalize();
         bridge.receiveOrder(vm.parseJsonBytes(json, ".order"), 5000, proof(".order_proof"));

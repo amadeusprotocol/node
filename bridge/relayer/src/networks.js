@@ -9,7 +9,9 @@
 //   deliveryGas          gas a delivery may use and its tx gas limit: a ceiling (684k measured without a
 //                        gas drop, +~35k with one to a new account, proofs grow with state), at the chain's
 //                        current gas price, converted at amaPerGasCoin (whole AMA per whole gas coin;
-//                        '' = not priced, no relay delivery). 9360 = BNB $749 / AMA $0.08
+//                        '' = not priced, no relay delivery). 9360 = BNB $749 / AMA $0.08, 28148 = ETH $2252 / AMA $0.08
+//   inbound / opStack    false: Amadeus cannot verify the chain yet, the relay only delivers to it /
+//                        an OP-stack chain (L1 data fee per delivery from its GasPriceOracle)
 //   gasDrop(Ama)         the gas drop the site offers when the recipient could not pay for ~2 txs
 //   maxGasDrop(Ama)      largest gas drop the relay funds (chain wei / AMA base units)
 const chain = c => ({ bridge: '', lightClient: '', wama: '', from: '', trustEpoch: '', amaPerGasCoin: '', deliveryGas: 800000, maxGasDrop: '1000000000000000', gasDrop: '0.0001', ...c })
@@ -24,7 +26,7 @@ export default {
     chains: {
       bsc: chain({ name: 'bsc', label: 'BNB Smart Chain', chainId: 56, rpc: 'https://bsc-rpc.publicnode.com', explorer: 'https://bscscan.com', gasSymbol: 'BNB', finality: 'bsc', amaPerGasCoin: '9360' }),
       eth: chain({ name: 'eth', label: 'Ethereum', chainId: 1, rpc: 'https://ethereum-rpc.publicnode.com', gasSymbol: 'ETH', finality: 'eth' }),
-      base: chain({ name: 'base', label: 'Base', chainId: 8453, rpc: 'https://base-rpc.publicnode.com', gasSymbol: 'ETH', finality: 'base' }),
+      base: chain({ name: 'base', label: 'Base', chainId: 8453, rpc: 'https://base-rpc.publicnode.com', explorer: 'https://basescan.org', gasSymbol: 'ETH', finality: 'base', inbound: false, opStack: true, amaPerGasCoin: '28148' }),
     },
   },
   testnet: {
@@ -36,12 +38,20 @@ export default {
     chains: {
       bsc: chain({
         name: 'bsc-testnet', label: 'BSC Testnet', chainId: 97, rpc: 'https://bsc-testnet-rpc.publicnode.com', explorer: 'https://testnet.bscscan.com', gasSymbol: 'tBNB', finality: 'bsc',
-        bridge: '0xbA423F25aa91301761d7cb4C0f63eE769047B884', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
-        wama: '0x751D543E23E02BE2b40A0FB1dD36868746d4742e', from: '139440000', trustEpoch: '138539000',
+        bridge: '0xc2D2ddB8A8b34313Eba5aacB710401db206ACb81', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
+        wama: '0xd433f85e0B43A6F97E46f1F424FD92dbCCa3d4be', from: '140028000', trustEpoch: '138539000',
         amaPerGasCoin: '9360',
       }),
       eth: chain({ name: 'eth-testnet', label: 'Ethereum Sepolia', chainId: 11155111, rpc: 'https://ethereum-sepolia-rpc.publicnode.com', gasSymbol: 'SepoliaETH', finality: 'eth' }),
-      base: chain({ name: 'base-testnet', label: 'Base Sepolia', chainId: 84532, rpc: 'https://base-sepolia-rpc.publicnode.com', gasSymbol: 'ETH', finality: 'base' }),
+      //Amadeus -> Base only (inbound: false): Amadeus cannot verify Base until it follows Ethereum.
+      //Its bridge's sends stay paused; BSC reaches it through Amadeus
+      base: chain({
+        name: 'base-testnet', label: 'Base Sepolia', chainId: 84532, rpc: 'https://base-sepolia-rpc.publicnode.com', explorer: 'https://sepolia.basescan.org', gasSymbol: 'ETH', finality: 'base',
+        inbound: false, opStack: true,
+        bridge: '0x9d9Af25190820fdbd18336C00959875AE9517817', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
+        wama: '0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B', from: '52720000',
+        amaPerGasCoin: '28148',
+      }),
     },
   },
 }

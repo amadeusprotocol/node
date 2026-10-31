@@ -69,10 +69,28 @@ contract AmaBridge {
     function send(uint128 amount, bytes calldata recipient, bytes calldata refundTo, uint64 fillDeadline, uint128 gasDrop, uint128 gasDropFee)
         external returns (uint64 n)
     {
+        return send(amount, amadeusChain, "AMA", recipient, refundTo, fillDeadline, gasDrop, gasDropFee);
+    }
+
+    /// burn `amount` wAMA and create an order to `dstChain`: Amadeus (dstCoin "AMA", a 48-byte
+    /// Amadeus key), or another chain Amadeus bridges to (dstCoin its wAMA, a 20-byte address):
+    /// Amadeus proves the order and passes it on as its own order to that chain, the AMA staying
+    /// in escrow. An order Amadeus cannot pass on goes back to refundTo. gasDrop is in the
+    /// destination's gas coin; gasDropFee pays every delivery on the way
+    function send(uint128 amount, bytes32 dstChain, bytes memory dstCoin, bytes calldata recipient, bytes calldata refundTo,
+                  uint64 fillDeadline, uint128 gasDrop, uint128 gasDropFee) public returns (uint64 n)
+    {
         if (sendPaused) revert Paused();
         if (amount == 0 || gasDropFee > amount) revert BadAmount();
-        //a compressed G1 key: compression flag set, infinity flag clear
-        if (recipient.length != 48 || uint8(recipient[0]) & 0xc0 != 0x80 || refundTo.length > 48) revert BadAddress();
+        if (dstChain == amadeusChain) {
+            //a compressed G1 key: compression flag set, infinity flag clear
+            if (keccak256(dstCoin) != keccak256("AMA")) revert WrongCoin();
+            if (recipient.length != 48 || uint8(recipient[0]) & 0xc0 != 0x80) revert BadAddress();
+        } else {
+            if (dstChain == localChain || dstChain == bytes32(0)) revert WrongChain();
+            if (dstCoin.length != 20 || recipient.length != 20) revert BadAddress();
+        }
+        if (refundTo.length > 48) revert BadAddress();
         if ((sentPerDay[block.timestamp / 1 days] += amount) > CAP_PER_DAY) revert CapReached();
         wama.burn(msg.sender, amount);
 
@@ -84,8 +102,8 @@ contract AmaBridge {
         o.refundTo = refundTo.length == 0 ? o.sender : refundTo;
         o.srcCoin = abi.encodePacked(address(wama));
         o.amount = amount;
-        o.dstChain = amadeusChain;
-        o.dstCoin = "AMA";
+        o.dstChain = dstChain;
+        o.dstCoin = dstCoin;
         o.recipient = recipient;
         o.outputAmount = amount - gasDropFee;
         o.fillDeadline = fillDeadline;
