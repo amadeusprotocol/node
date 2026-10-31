@@ -33,6 +33,8 @@ let signer, evmAddress, amaAddress
 //the gas drop: on by default when the recipient could not pay for ~2 txs, the user may switch it off
 let drop = false, dropTouched = false, recipientGas = null
 const balances = { ama: null, wama: null }
+//the bridge fee, set by each side's admin (parts per million; 10 = 0.1 bp): Amadeus' and the source chain's
+let amaFeePpm = 10n, chainFeePpm = 10n
 
 const side = k => k === AMA
   ? { chainName: settings.network === 'mainnet' ? 'Amadeus' : 'Amadeus Testnet', chainLogo: amaLogo, coin: 'AMA', coinLogo: amaLogo, badge: null }
@@ -93,9 +95,12 @@ function render() {
   const rows = []
   let receive = null
   if (a !== null && a > 0n && c !== null) {
-    const burn = to === AMA ? 0n : a / 100_000n
-    receive = a - burn - c
-    rows.push(burn > 0n ? ['Bridge fee (0.1 bp, burned on Amadeus)', `${fmt(burn)} AMA`] : ['Bridge fee', 'none this way'])
+    //off the source asset at the source: burned on Amadeus, to the bridge admin on a chain
+    const ppm = to === AMA ? 0n : from === AMA ? amaFeePpm : chainFeePpm
+    const bp = a * ppm / 1_000_000n
+    receive = a - bp - c
+    const rate = `${Number(ppm) / 100} bp`
+    rows.push(ppm === 0n ? ['Bridge fee', 'none this way'] : [from === AMA ? `Bridge fee (${rate}, burned on Amadeus)` : `Bridge fee (${rate}, to the bridge on ${f.chainName})`, `${fmt(bp)} ${f.coin}`])
     const via = from !== AMA && to !== AMA ? ' (both legs, via Amadeus)' : ''
     rows.push([`Relay delivery${drop ? ` + ${dropText} gas drop` : ''}${via}, at cost`, `${fmt(c)} ${f.coin}`])
   }
@@ -162,6 +167,8 @@ async function readGas() {
 
 async function refresh() {
   await readGas()
+  amaFeePpm = BigInt((await amaGet('/bridge/fee')).fee_ppm)
+  if (from !== AMA) chainFeePpm = BigInt(await new Contract(chainOf(from).bridge, bridgeAbi, rpcOf(chainOf(from))).feePpm())
   if (amaAddress) balances.ama = await amaBalance(amaAddress)
   balances.wama = null
   if (evmAddress && from !== AMA) balances.wama = await new Contract(chainOf(from).wama, tokenAbi, rpcOf(chainOf(from))).balanceOf(evmAddress)

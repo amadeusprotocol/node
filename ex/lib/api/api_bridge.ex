@@ -11,6 +11,12 @@ defmodule API.Bridge do
     end
   end
 
+  #the fee on sends from Amadeus, parts per million (ADMIN sets it; 10 = 0.1 bp)
+  def fee() do
+    ppm = get("bic:bridge:fee_ppm")
+    %{error: :ok, fee_ppm: if(ppm, do: :erlang.binary_to_integer(ppm), else: 10)}
+  end
+
   def nonce(), do: %{error: :ok, nonce: :erlang.binary_to_integer(get("bic:bridge:nonce") || "0")}
 
   #per remote bridge contract (hex), so a redeployed contract has its own nonces

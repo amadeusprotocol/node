@@ -955,6 +955,7 @@ pub fn call_bic(
         (b"Bridge", b"vote_key") => consensus::bic::bridge::call_vote_key(env, args),
         (b"Bridge", b"seal_update") => consensus::bic::bridge::call_seal_update(env, args),
         (b"Bridge", b"pause") => consensus::bic::bridge::call_pause(env, args),
+        (b"Bridge", b"set_fee") => consensus::bic::bridge::call_set_fee(env, args),
 
         //coin admins can mint, pause, and atomically rotate permissions for existing symbols
         (b"Coin", b"mint") => consensus::bic::coin::call_mint(env, args),

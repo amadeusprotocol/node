@@ -60,8 +60,19 @@ contract AmaBridge {
         admin = admin_;
     }
 
-    function amadeusFee(uint256 amount) public pure returns (uint256) {
-        return amount / 100_000;
+    /// the fee on sends from here to another chain, parts per million, for the admin (setFee)
+    uint32 public feePpm = 10;
+    uint32 public constant MAX_FEE_PPM = 10_000;
+
+    /// admin only, at most 1%; orders already made keep theirs
+    function setFee(uint32 ppm) external {
+        if (msg.sender != admin) revert OnlyAdmin();
+        if (ppm > MAX_FEE_PPM) revert BadAmount();
+        feePpm = ppm;
+    }
+
+    function fee(uint256 amount) public view returns (uint256) {
+        return amount * feePpm / 1_000_000;
     }
 
     /// burn `amount` wAMA and create an order for AMA to `recipient` (48-byte Amadeus key) on Amadeus.
@@ -75,13 +86,15 @@ contract AmaBridge {
     /// burn `amount` wAMA and create an order to `dstChain`: Amadeus (dstCoin "AMA", a 48-byte
     /// Amadeus key), or another chain Amadeus bridges to (dstCoin its wAMA, a 20-byte address):
     /// Amadeus proves the order and passes it on as its own order to that chain, the AMA staying
-    /// in escrow. An order Amadeus cannot pass on goes back to refundTo. gasDrop is in the
-    /// destination's gas coin; gasDropFee pays every delivery on the way
+    /// in escrow. To another chain the 0.1 bp fee is taken here, off the wAMA, for the admin; the
+    /// order carries the rest. An order Amadeus cannot pass on goes back to refundTo. gasDrop is in
+    /// the destination's gas coin; gasDropFee pays every delivery on the way
     function send(uint128 amount, bytes32 dstChain, bytes memory dstCoin, bytes calldata recipient, bytes calldata refundTo,
                   uint64 fillDeadline, uint128 gasDrop, uint128 gasDropFee) public returns (uint64 n)
     {
         if (sendPaused) revert Paused();
-        if (amount == 0 || gasDropFee > amount) revert BadAmount();
+        uint128 cut = dstChain == amadeusChain ? 0 : uint128(fee(amount));
+        if (amount == 0 || gasDropFee > amount - cut) revert BadAmount();
         if (dstChain == amadeusChain) {
             //a compressed G1 key: compression flag set, infinity flag clear
             if (keccak256(dstCoin) != keccak256("AMA")) revert WrongCoin();
@@ -93,6 +106,7 @@ contract AmaBridge {
         if (refundTo.length > 48) revert BadAddress();
         if ((sentPerDay[block.timestamp / 1 days] += amount) > CAP_PER_DAY) revert CapReached();
         wama.burn(msg.sender, amount);
+        if (cut > 0) wama.mint(admin, cut);
 
         n = ++nonce;
         Order.Data memory o;
@@ -101,11 +115,11 @@ contract AmaBridge {
         o.sender = abi.encodePacked(msg.sender);
         o.refundTo = refundTo.length == 0 ? o.sender : refundTo;
         o.srcCoin = abi.encodePacked(address(wama));
-        o.amount = amount;
+        o.amount = amount - cut;
         o.dstChain = dstChain;
         o.dstCoin = dstCoin;
         o.recipient = recipient;
-        o.outputAmount = amount - gasDropFee;
+        o.outputAmount = amount - cut - gasDropFee;
         o.fillDeadline = fillDeadline;
         o.gasDrop = gasDrop;
         o.gasDropFee = gasDropFee;
@@ -131,9 +145,11 @@ contract AmaBridge {
     function deliver(bytes calldata order, uint64 height, Hbsmt.Proof calldata proof) private {
         if (receivePaused) revert Paused();
         Order.Data memory o = Order.unpack(order);
-        if (o.srcChain != amadeusChain || o.dstChain != localChain) revert WrongChain();
+        //Amadeus' own orders, and orders it passes on from another chain. Amadeus set their amounts
+        //(its fee, if any, already taken off): this mints no more than the order's amount
+        if (o.dstChain != localChain || o.srcChain == localChain) revert WrongChain();
         if (keccak256(o.srcCoin) != keccak256("AMA") || keccak256(o.dstCoin) != keccak256(abi.encodePacked(address(wama)))) revert WrongCoin();
-        if (uint256(o.outputAmount) + o.gasDropFee != o.amount - amadeusFee(o.amount)) revert BadAmount();
+        if (uint256(o.outputAmount) + o.gasDropFee > o.amount) revert BadAmount();
         if (o.exclusiveFiller.length != 0 || o.message.length != 0) revert Unsupported();
         if (o.recipient.length != 20) revert BadAddress();
         address to = address(bytes20(o.recipient));

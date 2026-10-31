@@ -27,8 +27,10 @@ pub const ESCROW: [u8; 48] = {
 };
 /// may pause/unpause routes, nothing else. set before the bridge fork
 pub const ADMIN: [u8; 48] = [0u8; 48];
-/// 0.1 bp on sends from Amadeus, burned
-pub const FEE_DIVISOR: u128 = 100_000;
+/// the fee on sends from Amadeus, burned: parts per million, ADMIN sets it (set_fee) up to MAX_FEE_PPM
+pub const DEFAULT_FEE_PPM: u128 = 10;
+pub const MAX_FEE_PPM: u128 = 10_000;
+const KEY_FEE_PPM: &[u8] = b"bic:bridge:fee_ppm";
 
 pub const COST_BLS_VERIFY: i128 = 500_000;
 /// subgroup check of one vote key in a caller-supplied signing header
@@ -73,15 +75,11 @@ pub struct Remote {
     /// bridge contract whose `mapping(uint64 => bytes32) orders` we prove
     pub contract: [u8; 20],
     pub orders_slot: u64,
-    /// how far its net inflow may grow per Amadeus epoch: in from Amadeus or another chain adds,
-    /// out of it subtracts (base units of AMA)
-    pub cap_per_epoch: u128,
 }
 
-const CAP_10M_AMA: u128 = 10_000_000 * 1_000_000_000;
 
 //TODO before the mainnet bridge fork: deployed BSC bridge, wAMA and the trust epoch header
-pub const BSC: Remote = Remote { name: b"bsc", address_len: 20, contract: [0u8; 20], orders_slot: 0, cap_per_epoch: CAP_10M_AMA };
+pub const BSC: Remote = Remote { name: b"bsc", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
 const BSC_WAMA: [u8; 20] = [0u8; 20];
 const BSC_TRUST_EPOCH_HEADER: &[u8] = &[];
 pub const ROUTES: &[Route] = &[
@@ -90,10 +88,10 @@ pub const ROUTES: &[Route] = &[
 ];
 
 //BSC testnet (Chapel, chain id 97), contracts in bridge/evm
-//AmaBridge 0xc2D2ddB8A8b34313Eba5aacB710401db206ACb81
-pub const BSC_TESTNET: Remote = Remote { name: b"bsc", address_len: 20, contract: [0xc2, 0xd2, 0xdd, 0xb8, 0xa8, 0xb3, 0x43, 0x13, 0xeb, 0xa5, 0xaa, 0xcb, 0x71, 0x04, 0x01, 0xdb, 0x20, 0x6a, 0xcb, 0x81], orders_slot: 0, cap_per_epoch: CAP_10M_AMA };
-//WAMA 0xd433f85e0B43A6F97E46f1F424FD92dbCCa3d4be
-pub const BSC_TESTNET_WAMA: [u8; 20] = [0xd4, 0x33, 0xf8, 0x5e, 0x0b, 0x43, 0xa6, 0xf9, 0x7e, 0x46, 0xf1, 0xf4, 0x24, 0xfd, 0x92, 0xdb, 0xcc, 0xa3, 0xd4, 0xbe];
+//AmaBridge 0x9A0b97147DE379D84c45D4E56649bEa6bD7A7B92
+pub const BSC_TESTNET: Remote = Remote { name: b"bsc", address_len: 20, contract: [0x9a, 0x0b, 0x97, 0x14, 0x7d, 0xe3, 0x79, 0xd8, 0x4c, 0x45, 0xd4, 0xe5, 0x66, 0x49, 0xbe, 0xa6, 0xbd, 0x7a, 0x7b, 0x92], orders_slot: 0 };
+//WAMA 0xA2B32A87E971E3deE4A895bc4de4f8f4D887Df44
+pub const BSC_TESTNET_WAMA: [u8; 20] = [0xa2, 0xb3, 0x2a, 0x87, 0xe9, 0x71, 0xe3, 0xde, 0xe4, 0xa8, 0x95, 0xbc, 0x4d, 0xe4, 0xf8, 0xf4, 0xd8, 0x87, 0xdf, 0x44];
 //finalized Chapel epoch header (bridge/relayer `init-trust`), re-baked before a deploy
 const BSC_TESTNET_TRUST_EPOCH_HEADER: &[u8] = include_bytes!("bsc_testnet_trust_header.bin");
 pub const ROUTES_TESTNET: &[Route] = &[
@@ -104,12 +102,12 @@ pub const ROUTES_TESTNET: &[Route] = &[
 
 //Base: Amadeus -> Base only, until Amadeus verifies Base (an Ethereum light client, as Base's state
 //roots settle on Ethereum); orders from BSC reach Base through Amadeus
-pub const BASE: Remote = Remote { name: b"base", address_len: 20, contract: [0u8; 20], orders_slot: 0, cap_per_epoch: CAP_10M_AMA };
+pub const BASE: Remote = Remote { name: b"base", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
 //Base testnet (Base Sepolia, chain id 84532), contracts in bridge/evm; sends from it stay paused
-//AmaBridge 0x9d9Af25190820fdbd18336C00959875AE9517817
-pub const BASE_TESTNET: Remote = Remote { name: b"base", address_len: 20, contract: [0x9d, 0x9a, 0xf2, 0x51, 0x90, 0x82, 0x0f, 0xdb, 0xd1, 0x83, 0x36, 0xc0, 0x09, 0x59, 0x87, 0x5a, 0xe9, 0x51, 0x78, 0x17], orders_slot: 0, cap_per_epoch: CAP_10M_AMA };
-//WAMA 0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B
-pub const BASE_TESTNET_WAMA: [u8; 20] = [0xc1, 0x56, 0x44, 0xe8, 0x88, 0x5f, 0x9e, 0xdb, 0x05, 0xf0, 0xd6, 0xea, 0xbe, 0x17, 0x01, 0xc7, 0xd8, 0x0d, 0x13, 0x2b];
+//AmaBridge 0x46D39a5C027d00EbdA7528812bD4a5110b6cDb6D
+pub const BASE_TESTNET: Remote = Remote { name: b"base", address_len: 20, contract: [0x46, 0xd3, 0x9a, 0x5c, 0x02, 0x7d, 0x00, 0xeb, 0xda, 0x75, 0x28, 0x81, 0x2b, 0xd4, 0xa5, 0x11, 0x0b, 0x6c, 0xdb, 0x6d], orders_slot: 0 };
+//WAMA 0x02D1E0dB4Df9F03e1E316746292173E7490173c7
+pub const BASE_TESTNET_WAMA: [u8; 20] = [0x02, 0xd1, 0xe0, 0xdb, 0x4d, 0xf9, 0xf0, 0x3e, 0x1e, 0x31, 0x67, 0x46, 0x29, 0x21, 0x73, 0xe7, 0x49, 0x01, 0x73, 0xc7];
 
 fn routes(env: &ApplyEnv) -> &'static [Route] {
     if env.testnet { ROUTES_TESTNET } else { ROUTES }
@@ -152,8 +150,20 @@ fn check_active(env: &ApplyEnv) {
     }
 }
 
-pub fn fee(amount: u128) -> u128 {
-    amount / FEE_DIVISOR
+/// 10 ppm (0.1 bp) unless ADMIN set another
+pub fn fee(env: &mut ApplyEnv, amount: u128) -> u128 {
+    let ppm = kv_get(env, KEY_FEE_PPM).and_then(|v| std::str::from_utf8(&v).ok()?.parse::<u128>().ok()).unwrap_or(DEFAULT_FEE_PPM);
+    amount * ppm / 1_000_000
+}
+
+/// set_fee(ppm): ADMIN only, at most MAX_FEE_PPM; orders already made keep theirs
+pub fn call_set_fee(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    check_active(env);
+    let [ppm] = <[Vec<u8>; 1]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
+    if env.caller_env.account_caller != ADMIN { panic_any("no_permissions") }
+    let ppm = parse_u128(&ppm);
+    if ppm > MAX_FEE_PPM { panic_any("bridge_fee_too_high") }
+    kv_put(env, KEY_FEE_PPM, ppm.to_string().as_bytes());
 }
 
 fn key_paused(r: &Route) -> Vec<u8> { bcat(&[b"bic:bridge:paused:", r.id]) }
@@ -197,21 +207,10 @@ fn check_open(env: &mut ApplyEnv, r: &Route) {
     }
 }
 
-/// limits are per chain, not per route: coins moving into a chain (from Amadeus or, through
-/// Amadeus, from another chain) count against its cap for this epoch, coins leaving it free that
-/// room again. So BSC -> Base frees BSC's room and takes Base's, not a second cap
-fn flow_in(env: &mut ApplyEnv, chain: &[u8], amount: u128) {
-    let cap = remote(env, chain).cap_per_epoch;
-    if kv_increment(env, &key_flow(env, chain), to_i128(amount)) > to_i128(cap) { panic_any("bridge_chain_cap_reached") }
-}
-
-fn flow_out(env: &mut ApplyEnv, chain: &[u8], amount: u128) {
-    kv_increment(env, &key_flow(env, chain), -to_i128(amount));
-}
-
-fn key_flow(env: &ApplyEnv, chain: &[u8]) -> Vec<u8> {
-    bcat(&[b"bic:bridge:flow:", chain, b":", env.caller_env.entry_epoch.to_string().as_bytes()])
-}
+/// at most this much AMA outside Amadeus at once (in ESCROW): whatever goes wrong on a remote chain,
+/// no more can be lost. Coins coming back to Amadeus free room; moving between remote chains
+/// through Amadeus does not count (they never left the escrow)
+pub const MAX_ESCROW: i128 = 10_000_000 * 1_000_000_000;
 
 /// the part of ESCROW backing each chain's wAMA: coins leave a chain only out of its own backing,
 /// so a chain whose verification failed could never take what backs another chain
@@ -253,23 +252,23 @@ pub fn call_send(env: &mut ApplyEnv, mut args: Vec<Vec<u8>>) {
     let [src_coin, amount, dst_chain, dst_coin, recipient, refund_to, fill_deadline] =
         <[Vec<u8>; 7]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
     let amount = parse_u128(&amount);
-    if gas_drop_fee > amount - fee(amount) { panic_any("bridge_gas_drop_fee_too_large") }
+    let fee_amount = fee(env, amount);
+    if gas_drop_fee > amount - fee_amount { panic_any("bridge_gas_drop_fee_too_large") }
     let dst = chain_name(&dst_chain).unwrap_or_else(|| panic_any("bridge_invalid_chain"));
     let r = route(env, true, &dst_chain, &src_coin, &dst_coin);
     if amount == 0 { panic_any("invalid_amount") }
     if recipient.len() != remote(env, &dst_chain).address_len || refund_to.len() > 48 { panic_any("bridge_invalid_address") }
     check_open(env, r);
-    flow_in(env, &dst_chain, amount);
 
     let caller = env.caller_env.account_caller.clone();
-    let (amount_i, fee_i) = (to_i128(amount), to_i128(fee(amount)));
+    let (amount_i, fee_i) = (to_i128(amount), to_i128(fee_amount));
     if amount_i > coin::balance(env, &caller, &src_coin) { panic_any("insufficient_funds") }
     if coin::paused(env, &src_coin) { panic_any("paused") }
     kv_increment(env, &balance_key(&caller, &src_coin), -amount_i);
     kv_increment(env, &balance_key(&coin::BURN_ADDRESS, &src_coin), fee_i);
     match r.kind {
         Kind::Native => {
-            kv_increment(env, &balance_key(&ESCROW, &src_coin), amount_i - fee_i);
+            if kv_increment(env, &balance_key(&ESCROW, &src_coin), amount_i - fee_i) > MAX_ESCROW { panic_any("bridge_cap_reached") }
             backing_add(env, &dst_chain, amount_i - fee_i);
         }
         Kind::Wrapped => { kv_increment(env, &bcat(&[b"coin:", &src_coin, b":totalSupply"]), -(amount_i - fee_i)); }
@@ -286,7 +285,7 @@ pub fn call_send(env: &mut ApplyEnv, mut args: Vec<Vec<u8>>) {
         dst_chain: dst,
         dst_coin,
         recipient,
-        output_amount: amount - fee(amount) - gas_drop_fee,
+        output_amount: amount - fee_amount - gas_drop_fee,
         fill_deadline: parse_u64(&fill_deadline),
         gas_drop,
         gas_drop_fee,
@@ -344,7 +343,6 @@ pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if word != keccak256(&packed) { panic_any("bridge_order_not_found") }
 
     check_open(env, r);
-    flow_out(env, &src_chain, order.amount);
     if onward {
         forward(env, r, &order, &src_chain);
         kv_put(env, &received, b"");
@@ -415,15 +413,15 @@ pub fn call_vote_key(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
 /// chain mints for the refund
 fn refund(env: &mut ApplyEnv, inbound: &Route, order: &Order, src_chain: &[u8]) {
     let back = route(env, true, src_chain, inbound.local_coin, inbound.remote_coin);
-    //a refund is an outbound order like any other: it waits while that route is paused or capped
+    //a refund is an outbound order like any other: it waits while that route is paused
     check_open(env, back);
-    flow_in(env, src_chain, order.amount - order.gas_drop_fee);
     let len = remote(env, src_chain).address_len;
     let to = if order.refund_to.len() == len { order.refund_to.clone() } else { order.sender.clone() };
     if to.len() != len { panic_any("bridge_invalid_refund_address") }
     let tip = order.gas_drop_fee;
     let amount = order.amount - tip;
-    let (tip_i, fee_i) = (to_i128(tip), to_i128(fee(amount)));
+    let fee_amount = fee(env, amount);
+    let (tip_i, fee_i) = (to_i128(tip), to_i128(fee_amount));
     if coin::balance(env, &ESCROW, inbound.local_coin) < tip_i + fee_i { panic_any("bridge_escrow_insufficient") }
     //the rest stays in escrow backing the same chain, which mints the refund
     backing_take(env, src_chain, tip_i + fee_i);
@@ -443,7 +441,7 @@ fn refund(env: &mut ApplyEnv, inbound: &Route, order: &Order, src_chain: &[u8]) 
         dst_chain: order.src_chain,
         dst_coin: back.remote_coin.to_vec(),
         recipient: to,
-        output_amount: amount - fee(amount),
+        output_amount: amount - fee_amount,
         ..Default::default()
     };
     kv_put(env, &key_order(nonce), &out.pack());
@@ -515,29 +513,23 @@ pub fn call_seal_update(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     kv_put(env, &key_bsc_seal(&e_hash, &caller), &c);
 }
 
-/// an inbound native order for another chain Amadeus bridges to: passed on as Amadeus' own order to
-/// it, the AMA staying in ESCROW (it now backs what that chain mints) less the usual 0.1 bp burn.
-/// Its delivery fee and gas drop go with it, for whoever delivers the last leg. An order Amadeus
-/// cannot pass on (unknown chain or coin, wrong address length, fee too large) goes back instead
+/// an inbound native order for another chain Amadeus bridges to: passed on as an Amadeus order to
+/// it, keeping its source chain so the destination knows its fee was taken there. The AMA stays
+/// in ESCROW, now backing what that chain mints; nothing is burned. Its delivery fee and gas drop
+/// go with it, for whoever delivers the last leg. An order Amadeus cannot pass on (unknown chain
+/// or coin, wrong address length) goes back instead
 fn forward(env: &mut ApplyEnv, inbound: &Route, order: &Order, src_chain: &[u8]) {
     let name = order.dst_chain.iter().position(|b| *b == 0).map(|i| &order.dst_chain[..i]).unwrap_or(&order.dst_chain);
     let out = routes(env).iter().find(|r| r.outbound && network_name(env, r.remote_chain) == name
         && r.local_coin == inbound.local_coin && r.remote_coin == order.dst_coin.as_slice());
-    let burn = fee(order.amount);
-    let fits = out.is_some_and(|_| remote(env, name).address_len == order.recipient.len()) && order.gas_drop_fee <= order.amount - burn;
+    let fits = out.is_some_and(|_| remote(env, name).address_len == order.recipient.len());
     let Some(out) = out.filter(|_| fits && inbound.kind == Kind::Native) else { return refund(env, inbound, order, src_chain) };
     check_open(env, out);
-    flow_in(env, name, order.amount);
-    let burn_i = to_i128(burn);
-    if coin::balance(env, &ESCROW, inbound.local_coin) < burn_i { panic_any("bridge_escrow_insufficient") }
-    //the backing moves with the coins: off the source chain, onto the destination less the burn
     backing_take(env, src_chain, to_i128(order.amount));
-    backing_add(env, name, to_i128(order.amount) - burn_i);
-    kv_increment(env, &balance_key(&ESCROW, inbound.local_coin), -burn_i);
-    kv_increment(env, &balance_key(&coin::BURN_ADDRESS, inbound.local_coin), burn_i);
+    backing_add(env, name, to_i128(order.amount));
     let nonce = kv_increment(env, KEY_NONCE, 1) as u64;
     let onward = Order {
-        src_chain: local_chain(env),
+        src_chain: order.src_chain,
         nonce,
         sender: order.sender.clone(),
         refund_to: order.refund_to.clone(),
@@ -546,7 +538,7 @@ fn forward(env: &mut ApplyEnv, inbound: &Route, order: &Order, src_chain: &[u8])
         dst_chain: order.dst_chain,
         dst_coin: order.dst_coin.clone(),
         recipient: order.recipient.clone(),
-        output_amount: order.amount - burn - order.gas_drop_fee,
+        output_amount: order.output_amount,
         gas_drop: order.gas_drop,
         gas_drop_fee: order.gas_drop_fee,
         ..Default::default()

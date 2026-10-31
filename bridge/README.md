@@ -6,10 +6,15 @@ BIC `ex/native/rdb/src/consensus/bic/bridge.rs`). Recipients claim themselves, o
 cost (`gasDropFee`, out of the order), which delivers and funds their gas (`gasDrop`). See AGENTS.md.
 
 Amadeus is the hub: an order from one chain to another (BSC -> Base) is proven on Amadeus and passed
-on as Amadeus' own order, the AMA staying in escrow; the user only acts on the source chain.
-Limits are per chain, not per route: each chain has a cap on its net inflow per Amadeus epoch
-(coins moving out of it free room again), and Amadeus keeps how much of its escrow backs each
-chain's wAMA, so coins only ever leave a chain out of that chain's own backing.
+on as an Amadeus order, the AMA staying in escrow; the user only acts on the source chain.
+At most 10M AMA is outside Amadeus at once (the escrow): whatever goes wrong on a remote chain, no
+more can be lost. Coins coming back to Amadeus free room; moves between chains never left the escrow,
+so they do not count. Amadeus also keeps how much of the escrow backs each chain's wAMA, so coins only
+ever leave a chain out of that chain's own backing. Fees come off the source asset at the source:
+0.1 bp burned on Amadeus for sends from Amadeus, 0.1 bp to the bridge's admin on the source chain for
+moves between chains (Amadeus passes those on untouched, keeping their source chain), none to Amadeus.
+Each side's admin sets its own fee (Amadeus `Bridge.set_fee`, EVM `setFee`, parts per million, at most
+1%; orders already made keep theirs) and pauses its own side (`pause`).
 
 | Chain | Amadeus follows | Status |
 |---|---|---|
@@ -36,8 +41,8 @@ bridge/
   record `bic:epoch:validators:height:<h+1>`.
 - `AmaBridge.sol`: `send` burns wAMA and records `orders[nonce] = keccak256(order)` in
   storage slot 0 (which Amadeus proves); `receiveOrder` mints wAMA for a proven Amadeus
-  order (`receiveOrderWithConsensus` also submits the consensus, one tx). The 0.1 bp fee is only
-  charged (and burned) on Amadeus sends; none here. Tips are minted to the deliverer, `msg.value`
+  order (`receiveOrderWithConsensus` also submits the consensus, one tx). The 0.1 bp fee is burned on
+  Amadeus for its sends; here it is charged only on sends to another chain (to the admin). Tips are minted to the deliverer, `msg.value`
   (the gas drop, at most 30k gas for the transfer) goes to the recipient. 10M AMA cap per day per
   direction on the contract, admin can only pause. `send` takes a destination: Amadeus, or another
   chain through Amadeus (its wAMA and a 20-byte recipient).

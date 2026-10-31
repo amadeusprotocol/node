@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {AmadeusLightClient} from "../src/AmadeusLightClient.sol";
 import {AmaBridge} from "../src/AmaBridge.sol";
 import {WAMA} from "../src/WAMA.sol";
@@ -106,7 +106,7 @@ contract BridgeTest is Test {
 
         bytes memory tampered = bytes.concat(order);
         tampered[tampered.length - 1] ^= 0x01;
-        vm.expectRevert(AmaBridge.BadAmount.selector); //gas_drop_fee byte
+        vm.expectRevert(); //gas_drop_fee byte: the tampered order is not the one Amadeus proves
         bridge.receiveOrder(tampered, 5000, p);
     }
 
@@ -184,16 +184,22 @@ contract BridgeTest is Test {
         bridge.receiveOrder(vm.parseJsonBytes(json, ".order"), 5000, proof(".order_proof"));
         bytes memory baseWama = abi.encodePacked(address(0xBA5E));
         address to = address(0xB0B);
+        uint256 before = wama.balanceOf(recipient);
         vm.prank(recipient);
         vm.recordLogs();
         bridge.send(100e9, bytes32("base-testnet"), baseWama, abi.encodePacked(to), "", 0, 1e14, 2e9);
-        Order.Data memory o = this.unpackOrder(abi.decode(vm.getRecordedLogs()[1].data, (bytes)));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        Order.Data memory o = this.unpackOrder(abi.decode(logs[logs.length - 1].data, (bytes)));
         assertEq(o.dstChain, bytes32("base-testnet"));
         assertEq(o.dstCoin, baseWama);
         assertEq(o.recipient, abi.encodePacked(to));
-        assertEq(o.outputAmount, 98e9);
+        //0.1 bp taken here, for the admin; the order carries the rest
+        assertEq(o.amount, 100e9 - 1e6);
+        assertEq(o.outputAmount, 100e9 - 1e6 - 2e9);
         assertEq(o.gasDrop, 1e14);
         assertEq(o.gasDropFee, 2e9);
+        assertEq(wama.balanceOf(recipient), before - 100e9);
+        assertEq(wama.balanceOf(bridge.admin()), 1e6);
         //an Amadeus key to Amadeus only, 20-byte addresses elsewhere, never back to this chain
         vm.startPrank(recipient);
         vm.expectRevert(AmaBridge.BadAddress.selector);
@@ -203,6 +209,34 @@ contract BridgeTest is Test {
         vm.expectRevert(AmaBridge.WrongCoin.selector);
         bridge.send(1e9, bytes32("amadeus-testnet"), baseWama, vm.parseJsonBytesArray(json, ".roster_b_compressed")[0], "", 0, 0, 0);
         vm.stopPrank();
+    }
+
+    function test_admin_sets_the_fee_on_sends_to_another_chain() public {
+        finalize();
+        bridge.receiveOrder(vm.parseJsonBytes(json, ".order"), 5000, proof(".order_proof"));
+        vm.expectRevert(AmaBridge.OnlyAdmin.selector);
+        bridge.setFee(100);
+        vm.startPrank(bridge.admin());
+        vm.expectRevert(AmaBridge.BadAmount.selector);
+        bridge.setFee(10_001);
+        bridge.setFee(100); //1 bp
+        vm.stopPrank();
+        vm.prank(recipient);
+        vm.recordLogs();
+        bridge.send(100e9, bytes32("base-testnet"), abi.encodePacked(address(0xBA5E)), abi.encodePacked(address(0xB0B)), "", 0, 0, 0);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(this.unpackOrder(abi.decode(logs[logs.length - 1].data, (bytes))).amount, 100e9 - 1e7);
+        assertEq(wama.balanceOf(bridge.admin()), 1e7);
+    }
+
+    function test_receives_an_order_amadeus_passed_on_from_another_chain() public {
+        finalize();
+        //Base -> here through Amadeus: proven in Amadeus state like Amadeus' own, no Amadeus fee
+        address deliverer = address(0x7e1a);
+        vm.prank(deliverer);
+        bridge.receiveOrder(vm.parseJsonBytes(json, ".forwarded"), 5000, proof(".forwarded_proof"));
+        assertEq(wama.balanceOf(recipient), 99e9);
+        assertEq(wama.balanceOf(deliverer), 1e9);
     }
 
     function test_send_writes_the_slot_amadeus_proves() public {

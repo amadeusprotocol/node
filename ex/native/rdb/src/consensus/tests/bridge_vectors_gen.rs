@@ -96,6 +96,10 @@ fn bridge_vectors_gen() {
     //delivered by a relay: 5 AMA tip out of the order, 0.002 BNB gas drop to the recipient
     let tipped = Order { nonce: 2, output_amount: order.output_amount - 5_000_000_000, gas_drop: 2_000_000_000_000_000, gas_drop_fee: 5_000_000_000, ..order.clone() };
     let tipped_key = b"bic:bridge:order:00000000000000000002".to_vec();
+    //from another chain through Amadeus: keeps its source chain, and no Amadeus fee (taken at the source)
+    let forwarded = Order { src_chain: chain_name(b"base-testnet").unwrap(), nonce: 3, sender: vec![5; 20], refund_to: vec![5; 20], amount: 100_000_000_000,
+                            output_amount: 99_000_000_000, gas_drop_fee: 1_000_000_000, ..order.clone() };
+    let forwarded_key = b"bic:bridge:order:00000000000000000003".to_vec();
     let record_b = ValidatorSet { validators: roster_b.iter().map(|k| k.pk.to_vec()).collect(), mask_active: mask(&[0, 1, 2, 3, 4, 5], 6) }.encode();
     let record_key = b"bic:epoch:validators:height:000000005001".to_vec();
 
@@ -103,6 +107,7 @@ fn bridge_vectors_gen() {
     let mut ops = vec![
         Op::Insert(Some(b"bic".to_vec()), order_key.clone(), order.pack()),
         Op::Insert(Some(b"bic".to_vec()), tipped_key.clone(), tipped.pack()),
+        Op::Insert(Some(b"bic".to_vec()), forwarded_key.clone(), forwarded.pack()),
         Op::Insert(Some(b"bic".to_vec()), record_key.clone(), record_b.clone()),
     ];
     for i in 0..200u32 {
@@ -119,11 +124,11 @@ fn bridge_vectors_gen() {
     let compressed: Vec<String> = roster_b.iter().map(|k| format!("\"0x{}\"", hex(&k.pk))).collect();
     let json = format!(
         "{{\"roster\":{},\"mask_active\":\"0x{}\",\"claim\":\"0x{}\",\"mask\":\"0x{}\",\"sig\":\"0x{}\",\
-\"order\":\"0x{}\",\"order_key\":\"0x{}\",\"order_proof\":{},\"tipped\":\"0x{}\",\"tipped_proof\":{},\
+\"order\":\"0x{}\",\"order_key\":\"0x{}\",\"order_proof\":{},\"tipped\":\"0x{}\",\"tipped_proof\":{},\"forwarded\":\"0x{}\",\"forwarded_proof\":{},\
 \"record_b\":\"0x{}\",\"record_key\":\"0x{}\",\"record_proof\":{},\"roster_b\":{},\"roster_b_compressed\":[{}],\
 \"claim_b\":\"0x{}\",\"mask_b\":\"0x{}\",\"sig_b\":\"0x{}\",\"wama\":\"0x{}\",\"recipient\":\"0x{}\"}}",
         keys_json(&roster), hex(&active), hex(&claim_a), hex(&mask(&[0, 2, 3, 4, 5, 6, 7], 10)), hex(&sig_a),
-        hex(&order.pack()), hex(&order_key), proof_json(&mut tree, &order_key), hex(&tipped.pack()), proof_json(&mut tree, &tipped_key),
+        hex(&order.pack()), hex(&order_key), proof_json(&mut tree, &order_key), hex(&tipped.pack()), proof_json(&mut tree, &tipped_key), hex(&forwarded.pack()), proof_json(&mut tree, &forwarded_key),
         hex(&record_b), hex(&record_key), proof_json(&mut tree, &record_key), keys_json(&roster_b), compressed.join(","),
         hex(&claim_b), hex(&mask(&[0, 1, 2, 4, 5], 6)), hex(&sig_b), hex(&WAMA), hex(&BSC_RECIPIENT));
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../bridge/evm/test/vectors");

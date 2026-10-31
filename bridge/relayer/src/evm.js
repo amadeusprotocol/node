@@ -34,7 +34,12 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     ? BigInt(await rpc('eth_call', [{ to: '0x420000000000000000000000000000000000000F', data: '0xf1c7a58b' + DELIVERY_BYTES.toString(16).padStart(64, '0') }, 'latest']))
     : 0n
   //orders are scanned only up to here, so a reorg cannot drop one after it was seen
-  const finalizedHead = async () => Number((await block('finalized')).number)
+  //when the chain's blocks stop changing: BSC finalizes in seconds; an OP-stack chain is "safe" once
+  //its batch is on Ethereum (minutes), "finalized" only after Ethereum finality (~20 min)
+  const FINAL = chain.opStack ? 'safe' : 'finalized'
+  const finalizedHead = async () => Number((await block(FINAL)).number)
+  //received as of `tag`; a bridge not deployed yet at that block has received nothing
+  const receivedAt = (n, tag) => bridge.received(n, { blockTag: tag }).catch(e => { if (e.code === 'BAD_DATA' || e.code === 'CALL_EXCEPTION') return false; throw e })
   const finality = finalities[chain.finality]({ ama, chain, block, rpc, log, sleep })
 
   const eipRosterAt = async h => rosterEip(decodeValidatorRecord((await ama.validatorSet(h)).record).validators)
@@ -76,7 +81,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
 
   async function deliverAmadeusOrder(n, packed, o) {
     //done only once final on this chain: a reorg could drop a delivery seen at the head
-    if (await bridge.received(n, { blockTag: 'finalized' })) return
+    if (await receivedAt(n, FINAL)) return
     if (await bridge.received(n)) throw new Error(`amadeus order ${n} received on ${chain.name}, not final yet`)
     const sp = await ama.stateProofAtTip(`bic:bridge:order:${pad20(n)}`)
     const h = sp.entry_height
@@ -98,7 +103,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
       if (i > 60) throw new Error(`amadeus order ${n} delivery ${tx.hash} not final yet`)
       await sleep(1000)
     }
-    if (!(await bridge.received(n, { blockTag: 'finalized' }))) throw new Error(`amadeus order ${n} delivery ${tx.hash} was reorged out`)
+    if (!(await receivedAt(n, FINAL))) throw new Error(`amadeus order ${n} delivery ${tx.hash} was reorged out`)
     log(key, 'delivered amadeus', n, hexlify(o.recipient), o.outputAmount, 'tip', o.gasDropFee, 'gas drop', o.gasDrop, tx.hash)
   }
 

@@ -56,12 +56,17 @@ fn bridge_send_locks_burns_fee_and_records_order() {
 }
 
 #[test]
-fn bridge_route_cap_and_admin_pause() {
+fn bridge_escrow_cap_and_admin_pause() {
     let mut chain = Chain::new();
     let w = chain.wallet(20_000_000 * AMA);
+    //at most 10M AMA outside Amadeus at once: 10M sent leaves 9,999,900 in escrow after the burn
     send(&chain, &w, 10_000_000 * AMA, &[7u8; 20]).unwrap();
-    assert_eq!(send(&chain, &w, 1, &[7u8; 20]), Err("bridge_chain_cap_reached".into()));
+    send(&chain, &w, 100 * AMA, &[7u8; 20]).unwrap();
+    assert_eq!(send(&chain, &w, AMA, &[7u8; 20]), Err("bridge_cap_reached".into()));
+    //not a rate: a new epoch frees nothing, only coins coming back do
     chain.advance_epochs(1);
+    assert_eq!(send(&chain, &w, AMA, &[7u8; 20]), Err("bridge_cap_reached".into()));
+    chain.put(&bcat(&[b"account:", &ESCROW, b":balance:AMA"]), (9_000_000 * AMA).to_string().as_bytes());
     send(&chain, &w, AMA, &[7u8; 20]).unwrap();
 
     assert_eq!(chain.call(&w, b"Bridge", b"pause", &[b"ama-to-bsc", b"true"]), Err("no_permissions".into()));
@@ -496,15 +501,16 @@ fn bridge_receive_forwards_a_bsc_order_for_base_through_amadeus() {
     };
     let relay_before = chain.balance(&relay.pk);
     deliver(&to_base(21, b"base-testnet", vec![9; 20]), 100).unwrap();
-    //passed on as Amadeus order 2 to Base, the fee and gas drop with it for the last leg's deliverer
+    //passed on as Amadeus order 2 to Base, keeping BSC as its source (its fee was taken on BSC), with
+    //the delivery fee and gas drop for the last leg's deliverer
     let onward = order(&chain, 2);
-    assert_eq!(onward.dst_chain, chain_name(b"base-testnet").unwrap());
+    assert_eq!((onward.src_chain, onward.dst_chain), (chain_name(b"bsc-testnet").unwrap(), chain_name(b"base-testnet").unwrap()));
     assert_eq!((onward.dst_coin.clone(), onward.recipient.clone()), (bridge::BASE_TESTNET_WAMA.to_vec(), vec![9; 20]));
-    assert_eq!((onward.amount, onward.output_amount, onward.gas_drop, onward.gas_drop_fee), (amount, amount - amount / 100_000 - fee, 100_000_000_000_000, fee));
+    assert_eq!((onward.amount, onward.output_amount, onward.gas_drop, onward.gas_drop_fee), (amount, amount - fee, 100_000_000_000_000, fee));
     assert_eq!(chain.balance(&relay.pk), relay_before);
-    //the AMA stays in escrow, now backing Base's wAMA, less the usual burn
-    assert_eq!(chain.balance(&ESCROW), escrow - (amount / 100_000) as i128);
-    assert_eq!(chain.balance(&BURN_ADDRESS), burned + (amount / 100_000) as i128);
+    //the AMA stays in escrow, now backing Base's wAMA: nothing burned
+    assert_eq!(chain.balance(&ESCROW), escrow);
+    assert_eq!(chain.balance(&BURN_ADDRESS), burned);
 
     //nowhere to pass it on to: back to BSC (refund_to), like an invalid recipient
     deliver(&to_base(22, b"solana-testnet", vec![9; 20]), 101).unwrap();
@@ -515,20 +521,20 @@ fn bridge_receive_forwards_a_bsc_order_for_base_through_amadeus() {
 }
 
 #[test]
-fn bridge_limits_and_backing_are_per_chain() {
-    let mut chain = Chain::new();
+fn bridge_moves_between_chains_leave_the_cap_alone_and_backing_follows() {
+    let chain = Chain::new();
     let w = chain.wallet(30_000_000 * AMA);
     let relay = chain.wallet(AMA);
     let getn = |k: &str| chain.get(k.as_bytes()).map(|v| String::from_utf8(v).unwrap().parse::<i128>().unwrap()).unwrap_or(0);
-    let flow = |c: &str| getn(&format!("bic:bridge:flow:{c}:{}", chain.epoch()));
     let backing = |c: &str| getn(&format!("bic:bridge:backing:{c}"));
 
-    //BSC's cap is full for this epoch
+    //the cap is full: 10M AMA outside Amadeus
     send(&chain, &w, 10_000_000 * AMA, &[7u8; 20]).unwrap();
-    assert_eq!(send(&chain, &w, 1, &[7u8; 20]), Err("bridge_chain_cap_reached".into()));
-    assert_eq!(backing("bsc-testnet"), (10_000_000 * AMA - 10_000_000 * AMA / 100_000) as i128);
+    send(&chain, &w, 100 * AMA, &[7u8; 20]).unwrap();
+    assert_eq!(send(&chain, &w, AMA, &[7u8; 20]), Err("bridge_cap_reached".into()));
+    let escrow = chain.balance(&ESCROW);
 
-    //4M wAMA moving from BSC to Base frees 4M of BSC's room and takes 4M of Base's, backing moves along
+    //4M wAMA from BSC to Base: still outside Amadeus, so the cap does not move; the backing does
     let amount = (4_000_000 * AMA) as u128;
     let o = Order { src_chain: chain_name(b"bsc-testnet").unwrap(), nonce: 1, sender: vec![5; 20], refund_to: vec![5; 20], src_coin: bridge::BSC_TESTNET_WAMA.to_vec(), amount,
                     dst_chain: chain_name(b"base-testnet").unwrap(), dst_coin: bridge::BASE_TESTNET_WAMA.to_vec(), recipient: vec![9; 20], output_amount: amount, ..Default::default() };
@@ -536,20 +542,33 @@ fn bridge_limits_and_backing_are_per_chain() {
     chain.put(&bcat(&[b"bic:bridge:bsc-testnet:root:", format!("{:020}", 100).as_bytes()]), &root);
     let (bsc_before, base_before) = (backing("bsc-testnet"), backing("base-testnet"));
     chain.call(&relay, b"Bridge", b"receive", &[b"bsc-testnet", b"100", &o.pack(), &a, &st]).unwrap();
-    assert_eq!(flow("bsc-testnet"), (6_000_000 * AMA) as i128);
-    assert_eq!(flow("base-testnet"), amount as i128);
+    assert_eq!(chain.balance(&ESCROW), escrow);
     assert_eq!(backing("bsc-testnet"), bsc_before - amount as i128);
-    assert_eq!(backing("base-testnet"), base_before + (amount - amount / 100_000) as i128);
-    send(&chain, &w, 4_000_000 * AMA, &[7u8; 20]).unwrap(); //the freed room
-    assert_eq!(send(&chain, &w, 1, &[7u8; 20]), Err("bridge_chain_cap_reached".into()));
+    assert_eq!(backing("base-testnet"), base_before + amount as i128);
+    assert_eq!(send(&chain, &w, AMA, &[7u8; 20]), Err("bridge_cap_reached".into()));
 
-    //BSC can take back only what backs BSC: the escrow backing Base stays put
-    let big = (backing("bsc-testnet") + 1) as u128;
-    let o2 = Order { src_chain: chain_name(b"bsc-testnet").unwrap(), nonce: 2, sender: vec![5; 20], refund_to: vec![5; 20], src_coin: bridge::BSC_TESTNET_WAMA.to_vec(), amount: big,
-                     dst_chain: chain_name(b"amadeus-testnet").unwrap(), dst_coin: b"AMA".to_vec(), recipient: relay.pk.to_vec(), output_amount: big, ..Default::default() };
-    let (root2, a2, st2) = bsc_state_with_order(2, &o2.pack());
-    chain.put(&bcat(&[b"bic:bridge:bsc-testnet:root:", format!("{:020}", 101).as_bytes()]), &root2);
-    chain.advance_epochs(1);
-    assert!(chain.balance(&ESCROW) as u128 >= big);
-    assert_eq!(chain.call(&relay, b"Bridge", b"receive", &[b"bsc-testnet", b"101", &o2.pack(), &a2, &st2]), Err("bridge_chain_backing_insufficient".into()));
+    //coming back to Amadeus frees room, but only out of the source chain's own backing
+    let back = |nonce: u64, amount: u128, height: u64| {
+        let o = Order { src_chain: chain_name(b"bsc-testnet").unwrap(), nonce, sender: vec![5; 20], refund_to: vec![5; 20], src_coin: bridge::BSC_TESTNET_WAMA.to_vec(), amount,
+                        dst_chain: chain_name(b"amadeus-testnet").unwrap(), dst_coin: b"AMA".to_vec(), recipient: relay.pk.to_vec(), output_amount: amount, ..Default::default() };
+        let (root, a, st) = bsc_state_with_order(nonce, &o.pack());
+        chain.put(&bcat(&[b"bic:bridge:bsc-testnet:root:", format!("{:020}", height).as_bytes()]), &root);
+        chain.call(&relay, b"Bridge", b"receive", &[b"bsc-testnet", height.to_string().as_bytes(), &o.pack(), &a, &st])
+    };
+    assert_eq!(back(2, (backing("bsc-testnet") + 1) as u128, 101), Err("bridge_chain_backing_insufficient".into()));
+    back(3, (1_000_000 * AMA) as u128, 102).unwrap();
+    send(&chain, &w, 1_000_000 * AMA, &[7u8; 20]).unwrap();
+}
+
+#[test]
+fn bridge_admin_sets_the_fee_on_sends_from_amadeus() {
+    let chain = Chain::new();
+    let w = chain.wallet(1_000 * AMA);
+    assert_eq!(chain.call(&w, b"Bridge", b"set_fee", &[b"100"]), Err("no_permissions".into()));
+    assert_eq!(chain.call_as(&bridge::ADMIN, b"Bridge", b"set_fee", &[b"10001"]), Err("bridge_fee_too_high".into()));
+    chain.call_as(&bridge::ADMIN, b"Bridge", b"set_fee", &[b"100"]).unwrap(); //1 bp
+    let burned = chain.balance(&BURN_ADDRESS);
+    send(&chain, &w, 100 * AMA, &[7u8; 20]).unwrap();
+    assert_eq!(order(&chain, 1).output_amount, (100 * AMA - 100 * AMA / 10_000) as u128);
+    assert_eq!(chain.balance(&BURN_ADDRESS) - burned, 100 * AMA / 10_000);
 }

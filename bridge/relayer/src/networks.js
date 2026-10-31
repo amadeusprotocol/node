@@ -26,7 +26,7 @@ export default {
     chains: {
       bsc: chain({ name: 'bsc', label: 'BNB Smart Chain', chainId: 56, rpc: 'https://bsc-rpc.publicnode.com', explorer: 'https://bscscan.com', gasSymbol: 'BNB', finality: 'bsc', amaPerGasCoin: '9360' }),
       eth: chain({ name: 'eth', label: 'Ethereum', chainId: 1, rpc: 'https://ethereum-rpc.publicnode.com', gasSymbol: 'ETH', finality: 'eth' }),
-      base: chain({ name: 'base', label: 'Base', chainId: 8453, rpc: 'https://base-rpc.publicnode.com', explorer: 'https://basescan.org', gasSymbol: 'ETH', finality: 'base', inbound: false, opStack: true, amaPerGasCoin: '28148' }),
+      base: chain({ name: 'base', label: 'Base', chainId: 8453, rpc: 'https://base-rpc.publicnode.com', explorer: 'https://basescan.org', gasSymbol: 'ETH', finality: 'base', inbound: false, opStack: true, amaPerGasCoin: '28148', gasDrop: '0.00001' }),
     },
   },
   testnet: {
@@ -38,8 +38,8 @@ export default {
     chains: {
       bsc: chain({
         name: 'bsc-testnet', label: 'BSC Testnet', chainId: 97, rpc: 'https://bsc-testnet-rpc.publicnode.com', explorer: 'https://testnet.bscscan.com', gasSymbol: 'tBNB', finality: 'bsc',
-        bridge: '0xc2D2ddB8A8b34313Eba5aacB710401db206ACb81', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
-        wama: '0xd433f85e0B43A6F97E46f1F424FD92dbCCa3d4be', from: '140028000', trustEpoch: '138539000',
+        bridge: '0x9A0b97147DE379D84c45D4E56649bEa6bD7A7B92', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
+        wama: '0xA2B32A87E971E3deE4A895bc4de4f8f4D887Df44', from: '140053000', trustEpoch: '138539000',
         amaPerGasCoin: '9360',
       }),
       eth: chain({ name: 'eth-testnet', label: 'Ethereum Sepolia', chainId: 11155111, rpc: 'https://ethereum-sepolia-rpc.publicnode.com', gasSymbol: 'SepoliaETH', finality: 'eth' }),
@@ -47,9 +47,9 @@ export default {
       //Its bridge's sends stay paused; BSC reaches it through Amadeus
       base: chain({
         name: 'base-testnet', label: 'Base Sepolia', chainId: 84532, rpc: 'https://base-sepolia-rpc.publicnode.com', explorer: 'https://sepolia.basescan.org', gasSymbol: 'ETH', finality: 'base',
-        inbound: false, opStack: true,
-        bridge: '0x9d9Af25190820fdbd18336C00959875AE9517817', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
-        wama: '0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B', from: '52720000',
+        inbound: false, opStack: true, gasDrop: '0.00001',
+        bridge: '0x46D39a5C027d00EbdA7528812bD4a5110b6cDb6D', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
+        wama: '0x02D1E0dB4Df9F03e1E316746292173E7490173c7', from: '52764000',
         amaPerGasCoin: '28148',
       }),
     },

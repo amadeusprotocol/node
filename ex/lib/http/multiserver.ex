@@ -523,6 +523,7 @@ defmodule Ama.MultiServer do
             r.method == "GET" and String.starts_with?(r.path, "/api/bridge/") ->
                 result = case String.split(String.replace(r.path, "/api/bridge/", ""), "/") do
                   ["nonce"] -> API.Bridge.nonce()
+                  ["fee"] -> API.Bridge.fee()
                   ["order", n] -> API.Bridge.order(:erlang.binary_to_integer(n))
                   ["received", chain, contract, n] -> API.Bridge.received(chain, contract, :erlang.binary_to_integer(n))
                   ["validator_set", h] -> API.Bridge.validator_set(:erlang.binary_to_integer(h))
