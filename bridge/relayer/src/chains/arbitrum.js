@@ -76,28 +76,32 @@ export function arbitrumDelivery({ chain, parentChain, ama, provider, rpc, log }
       const proof = await prpc('eth_getProof', [outbox, roots.map(r => keccak256(concat([r, zeroPadValue(toBeHex(ROOTS_SLOT), 32)]))), toBeHex(head)])
       const account = hexlify(vecpak(proof.accountProof.map(x => getBytes(x))))
       for (const { p, m, c } of fresh) {
-        const op = await nodeInterface.constructOutboxProof(c.size, m.position)
-        if (op.root !== c.sendRoot) throw new Error(`${chain.name} outbox proof for ${m.position} is under ${op.root}, not ${c.sendRoot}`)
-        p.it.arb = { h: head, account, storage: hexlify(vecpak(proof.storageProof[roots.indexOf(c.sendRoot)].proof.map(x => getBytes(x)))),
-                     args: [String(m.arbBlockNum), String(m.ethBlockNum), String(m.timestamp), String(m.position)], siblings: concat([...op.proof]) }
+        try {
+          const op = await nodeInterface.constructOutboxProof(c.size, m.position)
+          if (op.root !== c.sendRoot) throw new Error(`${chain.name} outbox proof for ${m.position} is under ${op.root}, not ${c.sendRoot}`)
+          p.it.arb = { h: head, sendRoot: c.sendRoot, account, storage: hexlify(vecpak(proof.storageProof[roots.indexOf(c.sendRoot)].proof.map(x => getBytes(x)))),
+                       args: [String(m.arbBlockNum), String(m.ethBlockNum), String(m.timestamp), String(m.position)], siblings: concat([...op.proof]) }
+        } catch (e) {
+          covering.delete(c.sendRoot)
+          failed.push({ ...p.it, error: e.shortMessage ?? e.message })
+        }
       }
     }
     const ready = todo.filter(p => p.it.arb)
     for (const h of new Set(ready.map(p => p.it.arb.h))) {
       const group = ready.filter(p => p.it.arb.h === h)
       const later = (error, keep = true) => failed.push(...group.map(p => ({ ...p.it, arb: keep ? p.it.arb : undefined, error, wait: keep ? FINAL_WAIT_MS : undefined })))
-      if (!(await ama.remoteRoot(parentChain.name, h))) {
-        let args
-        try {
+      try {
+        if (!(await ama.remoteRoot(parentChain.name, h))) {
           if ((await eth.sync()).behind) { later(`${parentChain.name} light client catching up`); continue }
-          args = await eth.rootArgs(h)
-        } catch (e) {
-          if (e.expired) { later(e.message, false); continue }
-          throw e
+          const args = await eth.rootArgs(h)
+          if (!args) { later(`${parentChain.name} ${h} not final yet`); continue }
+          await ama.callBridge('eth_update', args)
+          log(chain.name, `${parentChain.name} root`, h)
         }
-        if (!args) { later(`${parentChain.name} ${h} not final yet`); continue }
-        await ama.callBridge('eth_update', args)
-        log(chain.name, `${parentChain.name} root`, h)
+      } catch (e) {
+        later(e.shortMessage ?? e.message, !e.expired)
+        continue
       }
       for (const p of group) {
         const a = p.it.arb
@@ -105,7 +109,9 @@ export function arbitrumDelivery({ chain, parentChain, ama, provider, rpc, log }
           await ama.callBridge('receive_arb', [chain.name, String(h), p.packed, getBytes(a.account), getBytes(a.storage), ...a.args, getBytes(a.siblings)])
           log(chain.name, 'delivered', p.it.n, `(message ${a.args[3]}, ${parentChain.name} ${h})`)
         } catch (e) {
-          const r = await ama.receivedFinal(chain.name, chain.bridge, p.it.n)
+          //proven afresh, from a send root found again (a parent reorg may have dropped this one)
+          covering.delete(a.sendRoot)
+          const r = await ama.receivedFinal(chain.name, chain.bridge, p.it.n).catch(() => ({}))
           failed.push({ ...p.it, arb: undefined, seen: r.seen, error: r.received ? `order ${p.it.n} received, not final yet` : e.shortMessage ?? e.message })
         }
       }

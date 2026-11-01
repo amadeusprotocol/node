@@ -171,19 +171,19 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     for (const h of new Set(todo.map(p => p.it.proof.h))) {
       const group = todo.filter(p => p.it.proof.h === h)
       const later = (error, keep = true) => failed.push(...group.map(p => ({ ...p.it, proof: keep ? p.it.proof : undefined, error, wait: keep ? finality.finalWaitMs : undefined })))
-      if (!(await ama.remoteRoot(chain.name, h))) {
-        let args
-        try {
+      try {
+        if (!(await ama.remoteRoot(chain.name, h))) {
           //the stored set must be the one signing h's finality: step through any set change first
           if ((await finality.sync(h)).behind) { later(`${chain.name} light client still catching up`); continue }
-          args = await finality.rootArgs(h)
-        } catch (e) {
-          if (e.expired) { later(e.message, false); continue }
-          throw e
+          const args = await finality.rootArgs(h)
+          if (!args) { later(`${chain.name} ${h} not final yet`); continue }
+          await ama.callBridge(finality.updateMethod ?? 'update', args)
+          log(key, 'root', h, args.length === 4 ? '(caught up past the stored set)' : '')
         }
-        if (!args) { later(`${chain.name} ${h} not final yet`); continue }
-        await ama.callBridge(finality.updateMethod ?? 'update', args)
-        log(key, 'root', h, args.length === 4 ? '(caught up past the stored set)' : '')
+      } catch (e) {
+        //kept unless it can never be used: a failure here is retried with the proof already taken
+        later(e.shortMessage ?? e.message, !e.expired)
+        continue
       }
       for (const p of group) {
         try {
@@ -192,7 +192,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
         } catch (e) {
           //received by someone else meanwhile: done once final, retried like any failure until then
           //(proven afresh: a proof Amadeus refused is not kept)
-          const r = await ama.receivedFinal(chain.name, chain.bridge, p.it.n)
+          const r = await ama.receivedFinal(chain.name, chain.bridge, p.it.n).catch(() => ({}))
           failed.push({ ...p.it, proof: undefined, seen: r.seen, error: r.received ? `order ${p.it.n} received, not final yet` : e.shortMessage ?? e.message })
         }
       }
