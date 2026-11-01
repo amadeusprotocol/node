@@ -36,7 +36,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
   //orders are scanned only up to here, so a reorg cannot drop one after it was seen
   //when the chain's blocks stop changing: BSC finalizes in seconds; an OP-stack chain is "safe" once
   //its batch is on Ethereum (minutes), "finalized" only after Ethereum finality (~20 min)
-  const FINAL = chain.opStack ? 'safe' : 'finalized'
+  const FINAL = chain.finalTag ?? 'finalized'
   const finalizedHead = async () => Number((await block(FINAL)).number)
   //received as of `tag`; a bridge not deployed yet at that block has received nothing
   const receivedAt = (n, tag) => bridge.received(n, { blockTag: tag }).catch(e => { if (e.code === 'BAD_DATA' || e.code === 'CALL_EXCEPTION') return false; throw e })

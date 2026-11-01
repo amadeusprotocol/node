@@ -7,9 +7,11 @@ import { costToChain, costToAmadeus, costThroughAmadeus, AVG_TX_GAS, AMA_FOR_TWO
 import amaLogo from './logos/ama.svg'
 import bnbLogo from './logos/bnb.svg'
 import baseLogo from './logos/base.svg'
+import ethLogo from './logos/eth.svg'
+import robinhoodLogo from './logos/robinhood.png'
 
 const settings = JSON.parse(document.getElementById('config').textContent)
-const chainLogos = { bsc: bnbLogo, base: baseLogo }
+const chainLogos = { bsc: bnbLogo, base: baseLogo, eth: ethLogo, robinhood: robinhoodLogo }
 const SEND_TO = 'send(uint128,bytes32,bytes,bytes,bytes,uint64,uint128,uint128)'
 const SEND = 'send(uint128,bytes,bytes,uint64,uint128,uint128)'
 
@@ -40,9 +42,15 @@ const side = k => k === AMA
   ? { chainName: settings.network === 'mainnet' ? 'Amadeus' : 'Amadeus Testnet', chainLogo: amaLogo, coin: 'AMA', coinLogo: amaLogo, badge: null }
   : { chainName: chainOf(k).label, chainLogo: chainLogos[k] ?? amaLogo, coin: 'wAMA', coinLogo: amaLogo, badge: chainLogos[k] }
 
+//every chain shows on the From side; those Amadeus cannot verify yet can only receive for now
+const allSides = () => [AMA, ...settings.chains.map(c => c.key)]
+
 function pick(k, options, id) {
   const s = side(k)
-  const names = options.map(o => `<option value="${o}"${o === k ? ' selected' : ''}>${side(o).chainName}</option>`).join('')
+  const names = options.map(o => {
+    const off = !sources().includes(o) && id === 'from-select'
+    return `<option value="${o}"${o === k ? ' selected' : ''}${off ? ' disabled' : ''}>${side(o).chainName}${off ? ' (receive only, for now)' : ''}</option>`
+  }).join('')
   const chainName = options.length > 1 ? `<select id="${id}">${names}</select>` : s.chainName
   return `<span class="chainbig"><img src="${s.chainLogo}" alt=""><span><span class="k">chain</span>${chainName}</span></span>
           <span class="pill"><span class="coin"><img src="${s.coinLogo}" alt="">${s.badge ? `<img class="small" src="${s.badge}" alt="">` : ''}</span><span><span class="k">coin</span> ${s.coin}</span></span>`
@@ -73,7 +81,7 @@ function cost() {
 /// everything that follows from the route, amount and wallets
 function render() {
   const f = side(from), t = side(to)
-  $('from-pick').innerHTML = pick(from, sources(), 'from-select')
+  $('from-pick').innerHTML = pick(from, allSides(), 'from-select')
   $('to-pick').innerHTML = pick(to, destinations(from), 'to-select')
   if ($('from-select')) $('from-select').onchange = e => setRoute(e.target.value, to)
   if ($('to-select')) $('to-select').onchange = e => setRoute(from, e.target.value)

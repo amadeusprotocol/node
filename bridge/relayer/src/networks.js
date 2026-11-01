@@ -12,6 +12,8 @@
 //                        '' = not priced, no relay delivery). 9360 = BNB $749 / AMA $0.08, 28148 = ETH $2252 / AMA $0.08
 //   inbound / opStack    false: Amadeus cannot verify the chain yet, the relay only delivers to it /
 //                        an OP-stack chain (L1 data fee per delivery from its GasPriceOracle)
+//   finalTag             the block tag a delivery counts as done at ('finalized' default; 'safe' where
+//                        finalized lags far behind: OP-stack and Arbitrum chains, Ethereum)
 //   gasDrop(Ama)         the gas drop the site offers when the recipient could not pay for ~2 txs
 //   maxGasDrop(Ama)      largest gas drop the relay funds (chain wei / AMA base units)
 const chain = c => ({ bridge: '', lightClient: '', wama: '', from: '', trustEpoch: '', amaPerGasCoin: '', deliveryGas: 800000, maxGasDrop: '1000000000000000', gasDrop: '0.0001', ...c })
@@ -42,12 +44,29 @@ export default {
         wama: '0xA2B32A87E971E3deE4A895bc4de4f8f4D887Df44', from: '140053000', trustEpoch: '138539000',
         amaPerGasCoin: '9360',
       }),
-      eth: chain({ name: 'eth-testnet', label: 'Ethereum Sepolia', chainId: 11155111, rpc: 'https://ethereum-sepolia-rpc.publicnode.com', gasSymbol: 'SepoliaETH', finality: 'eth' }),
+      //Amadeus -> Sepolia only (inbound: false) until Amadeus follows Ethereum; its bridge's sends stay
+      //paused. Sepolia prices new state far higher (new storage slot ~+245k gas): deliveries measured
+      //845k (existing recipient) to 1.44M (new recipient, new state root), so a 1.6M ceiling
+      eth: chain({
+        name: 'eth-testnet', label: 'Ethereum Sepolia', chainId: 11155111, rpc: 'https://ethereum-sepolia-rpc.publicnode.com', explorer: 'https://sepolia.etherscan.io', gasSymbol: 'ETH', finality: 'eth',
+        inbound: false, finalTag: 'safe', deliveryGas: 1600000,
+        bridge: '0x989D3047bB7C9f4cdE03F579C1dA82a2e1AD8A9e', lightClient: '0x73aA4b7c71Dfc5CA95d2244b24095B6e4A703557',
+        wama: '0x70b2e7ca598101f0D1aDD4602085aCD4413ffA27', from: '12036000',
+        amaPerGasCoin: '28148',
+      }),
+      //an Arbitrum Orbit chain: its L1 cost is charged as extra gas, so deliveries use more gas units
+      robinhood: chain({
+        name: 'robinhood-testnet', label: 'Robinhood Chain Testnet', chainId: 46630, rpc: 'https://rpc.testnet.chain.robinhood.com', explorer: 'https://explorer.testnet.chain.robinhood.com', gasSymbol: 'ETH', finality: 'robinhood',
+        inbound: false, finalTag: 'safe', deliveryGas: 1500000, gasDrop: '0.00001',
+        bridge: '0x9d9Af25190820fdbd18336C00959875AE9517817', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
+        wama: '0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B', from: '146553000',
+        amaPerGasCoin: '28148',
+      }),
       //Amadeus -> Base only (inbound: false): Amadeus cannot verify Base until it follows Ethereum.
       //Its bridge's sends stay paused; BSC reaches it through Amadeus
       base: chain({
         name: 'base-testnet', label: 'Base Sepolia', chainId: 84532, rpc: 'https://base-sepolia-rpc.publicnode.com', explorer: 'https://sepolia.basescan.org', gasSymbol: 'ETH', finality: 'base',
-        inbound: false, opStack: true, gasDrop: '0.00001',
+        inbound: false, opStack: true, finalTag: 'safe', gasDrop: '0.00001',
         bridge: '0x46D39a5C027d00EbdA7528812bD4a5110b6cDb6D', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
         wama: '0x02D1E0dB4Df9F03e1E316746292173E7490173c7', from: '52764000',
         amaPerGasCoin: '28148',

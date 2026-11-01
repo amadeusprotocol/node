@@ -98,6 +98,8 @@ pub const ROUTES_TESTNET: &[Route] = &[
     Route { id: b"ama-to-bsc", outbound: true, remote_chain: b"bsc", local_coin: b"AMA", remote_coin: &BSC_TESTNET_WAMA, kind: Kind::Native },
     Route { id: b"bsc-to-ama", outbound: false, remote_chain: b"bsc", local_coin: b"AMA", remote_coin: &BSC_TESTNET_WAMA, kind: Kind::Native },
     Route { id: b"ama-to-base", outbound: true, remote_chain: b"base", local_coin: b"AMA", remote_coin: &BASE_TESTNET_WAMA, kind: Kind::Native },
+    Route { id: b"ama-to-eth", outbound: true, remote_chain: b"eth", local_coin: b"AMA", remote_coin: &ETH_TESTNET_WAMA, kind: Kind::Native },
+    Route { id: b"ama-to-robinhood", outbound: true, remote_chain: b"robinhood", local_coin: b"AMA", remote_coin: &ROBINHOOD_TESTNET_WAMA, kind: Kind::Native },
 ];
 
 //Base: Amadeus -> Base only, until Amadeus verifies Base (an Ethereum light client, as Base's state
@@ -115,6 +117,29 @@ fn routes(env: &ApplyEnv) -> &'static [Route] {
 
 pub fn bsc(env: &ApplyEnv) -> &'static Remote {
     if env.testnet { &BSC_TESTNET } else { &BSC }
+}
+
+//Ethereum and Robinhood Chain (an Arbitrum chain): Amadeus -> them only, like Base, until Amadeus
+//verifies Ethereum; sends from their bridges stay paused
+pub const ETH: Remote = Remote { name: b"eth", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
+pub const ROBINHOOD: Remote = Remote { name: b"robinhood", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
+//Ethereum Sepolia (chain id 11155111)
+//AmaBridge 0x989D3047bB7C9f4cdE03F579C1dA82a2e1AD8A9e
+pub const ETH_TESTNET: Remote = Remote { name: b"eth", address_len: 20, contract: [0x98, 0x9d, 0x30, 0x47, 0xbb, 0x7c, 0x9f, 0x4c, 0xde, 0x03, 0xf5, 0x79, 0xc1, 0xda, 0x82, 0xa2, 0xe1, 0xad, 0x8a, 0x9e], orders_slot: 0 };
+//WAMA 0x70b2e7ca598101f0D1aDD4602085aCD4413ffA27
+pub const ETH_TESTNET_WAMA: [u8; 20] = [0x70, 0xb2, 0xe7, 0xca, 0x59, 0x81, 0x01, 0xf0, 0xd1, 0xad, 0xd4, 0x60, 0x20, 0x85, 0xac, 0xd4, 0x41, 0x3f, 0xfa, 0x27];
+//Robinhood Chain testnet (chain id 46630)
+//AmaBridge 0x9d9Af25190820fdbd18336C00959875AE9517817
+pub const ROBINHOOD_TESTNET: Remote = Remote { name: b"robinhood", address_len: 20, contract: [0x9d, 0x9a, 0xf2, 0x51, 0x90, 0x82, 0x0f, 0xdb, 0xd1, 0x83, 0x36, 0xc0, 0x09, 0x59, 0x87, 0x5a, 0xe9, 0x51, 0x78, 0x17], orders_slot: 0 };
+//WAMA 0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B
+pub const ROBINHOOD_TESTNET_WAMA: [u8; 20] = [0xc1, 0x56, 0x44, 0xe8, 0x88, 0x5f, 0x9e, 0xdb, 0x05, 0xf0, 0xd6, 0xea, 0xbe, 0x17, 0x01, 0xc7, 0xd8, 0x0d, 0x13, 0x2b];
+
+pub fn eth(env: &ApplyEnv) -> &'static Remote {
+    if env.testnet { &ETH_TESTNET } else { &ETH }
+}
+
+pub fn robinhood(env: &ApplyEnv) -> &'static Remote {
+    if env.testnet { &ROBINHOOD_TESTNET } else { &ROBINHOOD }
 }
 
 pub fn base(env: &ApplyEnv) -> &'static Remote {
@@ -135,7 +160,7 @@ pub fn local_chain(env: &ApplyEnv) -> [u8; 32] {
 }
 
 fn remote(env: &ApplyEnv, name: &[u8]) -> &'static Remote {
-    [bsc(env), base(env)].into_iter().find(|r| network_name(env, r.name) == name).unwrap_or_else(|| panic_any("bridge_unknown_chain"))
+    [bsc(env), base(env), eth(env), robinhood(env)].into_iter().find(|r| network_name(env, r.name) == name).unwrap_or_else(|| panic_any("bridge_unknown_chain"))
 }
 
 fn route(env: &ApplyEnv, outbound: bool, remote_chain: &[u8], local_coin: &[u8], remote_coin: &[u8]) -> &'static Route {
