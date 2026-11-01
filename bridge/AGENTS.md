@@ -5,7 +5,8 @@ You send, then either claim yourself or pay a relay its delivery cost in the ord
 Working code for every step: `relayer/src/evm.js` (delivery) and `relayer/frontend/app.js` (send, claim).
 
 Relay and frontend: https://mainnet-bridge.ama.one, https://testnet-bridge.ama.one
-(networks, chains and addresses: `relayer/src/networks.js`). BSC is live on testnet; ETH and Base are planned.
+(networks, chains and addresses: `relayer/src/networks.js`). On testnet BSC, Ethereum Sepolia and Robinhood
+send and receive; Base receives only.
 The steps below are the same on every EVM chain; examples use BSC testnet (`bsc-testnet`).
 
 Testnet (Amadeus testnet ⇄ BSC Chapel, chain id 97):
@@ -22,7 +23,7 @@ Every order has `gasDrop` and `gasDropFee`:
   The deliverer must also hand the recipient `gasDrop` of the destination chain's gas coin
   (wei of BNB on BSC, AMA base units on Amadeus). The relay charges cost only (`relayer/src/tips.js`):
   to BSC, `deliveryGas` (800k) at BSC's current gas price plus the gas drop, at `amaPerGasCoin` AMA per BNB;
-  to Amadeus, `amadeusCost` (0.02 AMA) plus the gas drop. Gas drops at most 0.001 BNB / 0.1 AMA
+  to Amadeus, `amadeusCost` (0.02 AMA; a chain's own where set: Sepolia 0.15, Robinhood 0.1) plus the gas drop. Gas drops at most 0.001 BNB / 0.1 AMA
   (`relayer/src/networks.js`). If BSC gas rises above what the order paid for, it waits until gas allows;
   the recipient can always claim it instead.
 - Anyone may deliver an order and keep its fee; each order is received once.
@@ -72,6 +73,29 @@ Every order has `gasDrop` and `gasDropFee`:
      (`codec.js rawHeaderOf`); `chains/bsc.js updateArgs` picks the form
    - `Bridge.receive(["bsc-testnet", h, order, vecpak(accountProof), vecpak(storageProof)])`
    - `GET /bridge/received/bsc-testnet/<AmaBridge address>/<nonce>` turns true.
+
+## Ethereum (Sepolia) → AMA
+Same send and receive as BSC; only the root differs. Amadeus follows the beacon chain's sync
+committees (`GET /bridge/remote_set/eth-testnet`: period, current and next committee roots).
+   - at the Sepolia head h: take the `eth_getProof` as above (public RPCs prove only ~recent blocks)
+   - once Ethereum finalized h (~15 min): from a beacon node's `/eth/v1/beacon/light_client/finality_update`,
+     `Bridge.eth_update(["eth-testnet", attested, finalized, finality_branch, execution_block_hash,
+     execution_branch, vecpak(headers h..F), committee, sync_bits, sync_signature, signature_slot, "", ""])`
+     with F the finalized execution block; the committee is the signing period's (512 uncompressed
+     keys + aggregate). Stores the roots of h and F. `chains/eth.js updateArgs` builds it; the relay
+     also steps the committees forward each period (best update per period, with next committee)
+   - `Bridge.receive(["eth-testnet", h, ...])` as above.
+
+## Robinhood (Arbitrum) → AMA
+The bridge also sends the order's hash as an L2 -> L1 message (`ArbSys.sendTxToL1(0, keccak256(order))`).
+Once the rollup confirms it (~1 h), the Sepolia Outbox holds its send root (`roots[sendRoot]`, slot 3).
+   - the message: the `L2ToL1Tx` log of the send tx (position, arbBlockNum, ethBlockNum, timestamp)
+   - a Sepolia block S with `GET /bridge/remote_root/eth-testnet/<S>` set (store one with `eth_update`)
+     whose Outbox holds a send root over the message (`SendRootUpdated` logs; its L2 block's
+     `mixHash[0:8]` is the message count); the Merkle proof from `NodeInterface(0xc8).constructOutboxProof`
+   - `Bridge.receive_arb(["robinhood-testnet", S, order, vecpak(outbox accountProof), vecpak(storageProof
+     of roots[sendRoot]), arbBlockNum, ethBlockNum, timestamp, position, siblings (32 bytes each)])`;
+     `chains/arbitrum.js` builds it: proof at the Sepolia head S, root stored once S is final (`eth_update` with headers back to S)
 
 ## Checks before sending
 - At most 10M AMA outside Amadeus at once (escrow; coins coming back free room, chain-to-chain moves do

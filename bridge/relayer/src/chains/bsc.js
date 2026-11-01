@@ -127,7 +127,8 @@ export function bscFinality({ ama, chain, block, rpc, log, sleep }) {
 
   async function rootArgs(h) {
     const u = await updateArgs(h)
-    if (u?.why) throw new Error(`${chain.name} ${h}: ${u.why}`)
+    //the stored set moved past h: no vote can store its root any more, the order is proven afresh
+    if (u?.why) throw Object.assign(new Error(`${chain.name} ${h}: ${u.why}`), { expired: /is before set/.test(u.why) })
     return u?.args ?? null
   }
 

@@ -32,7 +32,29 @@
   .chainbig { display: inline-flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 700; }
   .chainbig img { width: 40px; height: 40px; border-radius: 50%; }
   .chainbig .k { display: block; font-size: 11px; font-weight: 400; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
-  .chainbig select { border: 0; background: transparent; font: inherit; padding: 0; cursor: pointer; }
+  .picker { position: relative; }
+  .chainbtn { display: inline-flex; align-items: center; gap: 10px; padding: 6px 12px 6px 6px; border: 1.5px solid #d5dae3; border-radius: 12px; background: #fff; font: inherit; color: var(--text); cursor: pointer; text-align: left; }
+  .chainbtn:hover, .chainbtn.open { border-color: var(--accent); }
+  .chainbtn img { width: 36px; height: 36px; border-radius: 50%; }
+  .chainbtn b { display: block; font-size: 17px; }
+  .chainbtn .k { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .chainbtn .chev { margin-left: 6px; color: var(--muted); font-size: 12px; }
+  .chainbtn.fixed { cursor: default; }
+  .chainbtn.fixed:hover { border-color: #d5dae3; }
+  .menu { position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; min-width: 330px; background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(20, 25, 40, .14); padding: 6px; }
+  .opt { white-space: nowrap; display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: none; font: 600 15px system-ui, sans-serif; color: var(--text); cursor: pointer; text-align: left; }
+  .opt img { width: 28px; height: 28px; border-radius: 50%; }
+  .opt:hover:not(:disabled) { background: #eef3fd; }
+  .opt.sel { background: #e7effd; }
+  .opt .tick { margin-left: auto; color: var(--accent); }
+  .opt small { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--muted); }
+  .opt:disabled { cursor: default; color: var(--muted); }
+  .opt:disabled img { opacity: .45; }
+  .flabel { display: block; font-size: 12px; font-weight: 600; color: #3d4352; margin: 10px 0 5px; }
+  .field { display: flex; align-items: center; gap: 8px; background: #fff; border: 1.5px solid #d5dae3; border-radius: 10px; padding: 8px 12px; }
+  .field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(31, 111, 235, .15); }
+  .field.readonly { background: #f1f3f6; border-style: dashed; }
+  .field .unit { font-weight: 600; color: var(--muted); }
   .pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px 5px 6px; border-radius: 99px; background: #fff; border: 1px solid var(--line); font-size: 14px; font-weight: 600; }
   .pill img { width: 22px; height: 22px; border-radius: 50%; }
   .pill .coin { margin-right: 9px; }
@@ -41,17 +63,19 @@
   .coin { position: relative; width: 28px; height: 28px; }
   .coin img:first-child { width: 28px; height: 28px; }
   .coin img.small { position: absolute; right: -10px; bottom: -8px; width: 22px; height: 22px; border-radius: 5px; border: 2px solid #fff; background: #fff; }
-  .amount { display: flex; align-items: center; gap: 8px; }
-  .amount input { flex: 1; min-width: 0; border: 0; background: transparent; font: 600 26px system-ui, sans-serif; color: var(--text); outline: none; padding: 2px 0; }
-  .amount .out { flex: 1; font: 600 26px system-ui, sans-serif; color: var(--text); }
-  .bal { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; margin-top: 4px; }
-  .bal button { border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0; }
+  .amount input { flex: 1; min-width: 0; border: 0; background: transparent; font: 600 24px system-ui, sans-serif; color: var(--text); outline: none; padding: 0; }
+  .amount input::placeholder { color: #b3b9c5; }
+  .amount .out { flex: 1; font: 600 24px system-ui, sans-serif; color: var(--text); }
+  .amount #max { border: 1px solid #c9d7f3; border-radius: 6px; background: #eef3fd; color: var(--accent); font: 600 12px system-ui, sans-serif; padding: 3px 8px; cursor: pointer; }
+  .bal { font-size: 12px; color: var(--muted); margin-top: 5px; min-height: 16px; }
   .flip { display: flex; justify-content: center; margin: -6px 0; position: relative; z-index: 1; }
   .flip button { width: 38px; height: 38px; border-radius: 10px; border: 4px solid var(--card); background: #e9edf5; font-size: 18px; cursor: pointer; }
   .flip button:hover { background: #dbe3f1; }
-  .recipient { width: 100%; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: 13px ui-monospace, monospace; background: #fff; }
+  .recipient { flex: 1; min-width: 0; border: 0; outline: none; padding: 2px 0; font: 13px ui-monospace, monospace; background: transparent; color: var(--text); }
+  .recipient::placeholder { color: #9aa1ae; }
   .delivery { margin: 12px 0 4px; display: grid; gap: 6px; }
-  .drop { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 14px; cursor: pointer; }
+  .drop { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 14px; cursor: pointer; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fafbfc; }
+  .drop input { width: 17px; height: 17px; accent-color: var(--accent); }
   .drop small { color: var(--muted); font-size: 12px; }
   .summary { font-size: 13px; color: var(--muted); margin: 10px 2px 0; display: grid; gap: 2px; }
   .summary div { display: flex; justify-content: space-between; }
@@ -63,7 +87,7 @@
   td, th { padding: 7px 8px; border-bottom: 1px solid #eef0f3; text-align: left; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
   td img { width: 16px; height: 16px; vertical-align: -3px; border-radius: 50%; }
-  .st { font-size: 12px; padding: 1px 7px; border-radius: 99px; }
+  .st { display: inline-block; font-size: 12px; line-height: 1.35; padding: 2px 8px; border-radius: 8px; }
   .st.done { background: #e6f4ea; color: var(--ok); } .st.wait { background: #fff3cd; color: var(--warn); }
   td button { border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; padding: 3px 9px; cursor: pointer; }
   .relay { font-size: 12px; color: var(--muted); margin-top: 8px; }
@@ -93,15 +117,18 @@
     <div class="side">
       <div class="label">From</div>
       <div class="pick" id="from-pick"></div>
-      <div class="amount"><input id="amount" inputmode="decimal" placeholder="0.0" autocomplete="off"></div>
-      <div class="bal"><span id="from-balance">&nbsp;</span><button id="max">Max</button></div>
+      <label class="flabel" for="amount">Amount</label>
+      <div class="field amount"><input id="amount" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="amount-unit"></span><button id="max" type="button">Max</button></div>
+      <div class="bal" id="from-balance"></div>
     </div>
     <div class="flip"><button id="flip" title="Switch direction">⇅</button></div>
     <div class="side">
       <div class="label">To</div>
       <div class="pick" id="to-pick"></div>
-      <div class="amount"><div class="out" id="receive">0.0</div></div>
-      <input class="recipient" id="recipient" autocomplete="off">
+      <div class="flabel">You receive</div>
+      <div class="field amount readonly"><div class="out" id="receive">0.0</div><span class="unit" id="receive-unit"></span></div>
+      <label class="flabel" for="recipient">Recipient address</label>
+      <div class="field"><input class="recipient" id="recipient" autocomplete="off" spellcheck="false"></div>
     </div>
 
     <div class="delivery" id="delivery"></div>

@@ -21,11 +21,12 @@ const save = () => writeFileSync(STATE, JSON.stringify(state, null, 1))
 //never given up (caps reset, pauses lift, RPCs come back): it backs off up to an hour
 const RETRY_MAX_MS = 3_600_000
 state.retry ??= []
-function retryLater(item, e) {
+//`wait`: an order waiting for its chain's finality is looked at again after that long, not backed off
+function retryLater({ wait, ...item }, e) {
   const tries = (item.tries ?? 0) + 1
   const error = e.error ?? e.shortMessage ?? e.message ?? String(e)
   log('delivery', item.from, item.n, 'failed', `(try ${tries})`, error)
-  state.retry.push({ ...item, tries, error, due: Date.now() + Math.min(5000 * 2 ** tries, RETRY_MAX_MS) })
+  state.retry.push({ ...item, tries, error, due: Date.now() + (wait ?? Math.min(5000 * 2 ** tries, RETRY_MAX_MS)) })
 }
 
 async function fromAmadeus() {

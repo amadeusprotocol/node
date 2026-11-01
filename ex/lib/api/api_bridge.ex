@@ -39,6 +39,14 @@ defmodule API.Bridge do
   end
 
   #the BIC keys its light clients by chain, without the network suffix
+  #Ethereum: the sync committee period and committee roots (hex; next nil until known)
+  def remote_set(chain) when chain in ["eth", "eth-testnet"] do
+    hex = fn r -> if r == <<0::256>>, do: nil, else: "0x" <> Base.encode16(r, case: :lower) end
+    case get("bic:bridge:eth:lc") do
+      nil -> %{error: :ok, period: nil}
+      <<period::64, current::binary-size(32), next::binary-size(32)>> -> %{error: :ok, period: period, current: hex.(current), next: hex.(next)}
+    end
+  end
   def remote_set(chain) do
     chain = String.replace_suffix(chain, "-testnet", "")
     set = get("bic:bridge:#{chain}:set")

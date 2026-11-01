@@ -66,7 +66,8 @@ export function rawHeaderOf(blk) {
   const f = [blk.parentHash, blk.sha3Uncles, blk.miner, blk.stateRoot, blk.transactionsRoot, blk.receiptsRoot, blk.logsBloom,
              int(blk.difficulty), int(blk.number), int(blk.gasLimit), int(blk.gasUsed), int(blk.timestamp),
              blk.extraData, blk.mixHash, blk.nonce]
-  for (const [k, isInt] of [['baseFeePerGas', 1], ['withdrawalsRoot', 0], ['blobGasUsed', 1], ['excessBlobGas', 1], ['parentBeaconBlockRoot', 0], ['requestsHash', 0]]) {
+  for (const [k, isInt] of [['baseFeePerGas', 1], ['withdrawalsRoot', 0], ['blobGasUsed', 1], ['excessBlobGas', 1], ['parentBeaconBlockRoot', 0], ['requestsHash', 0],
+                               ['blockAccessListHash', 0], ['slotNumber', 1]]) { //Glamsterdam: EIP-7928, EIP-7843
     if (blk[k] != null) f.push(isInt ? int(blk[k]) : blk[k])
   }
   const raw = encodeRlp(f)

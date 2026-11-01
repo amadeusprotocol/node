@@ -7,6 +7,10 @@ import {Order} from "./Order.sol";
 import {WAMA} from "./WAMA.sol";
 import {Decimal} from "./Decimal.sol";
 
+interface ArbSys {
+    function sendTxToL1(address destination, bytes calldata data) external payable returns (uint256);
+}
+
 /// EVM side of the Amadeus bridge, the same on every EVM chain (Amadeus: ex/native/rdb/src/consensus/bic/bridge.rs).
 /// AMA is native to Amadeus: it arrives here as wAMA (minted once the Amadeus order is
 /// proven) and leaves by burning wAMA; Amadeus releases it from escrow after proving
@@ -33,6 +37,9 @@ contract AmaBridge {
     address public immutable admin;
     AmadeusLightClient public immutable lightClient;
     WAMA public immutable wama;
+    /// on an Arbitrum chain each order's hash also goes out as an L2 -> L1 message: Amadeus proves it
+    /// in the parent chain's Outbox once the rollup confirms it (no L2 state proof needed)
+    bool public immutable arbitrum;
 
     event OrderCreated(uint64 indexed nonce, bytes order);
     event OrderReceived(uint64 indexed nonce, address indexed recipient, uint256 amount, address deliverer, uint256 gasDrop);
@@ -51,8 +58,9 @@ contract AmaBridge {
 
     /// `wama_` must be deployed with this bridge as its minter (see script/Deploy.s.sol).
     /// orders start after `lastNonce` (nonzero only when replacing a deployment Amadeus already received from)
-    constructor(AmadeusLightClient lightClient_, WAMA wama_, bytes32 localChain_, bytes32 amadeusChain_, address admin_, uint64 lastNonce) {
+    constructor(AmadeusLightClient lightClient_, WAMA wama_, bytes32 localChain_, bytes32 amadeusChain_, address admin_, uint64 lastNonce, bool arbitrum_) {
         nonce = lastNonce;
+        arbitrum = arbitrum_;
         lightClient = lightClient_;
         wama = wama_;
         localChain = localChain_;
@@ -125,6 +133,7 @@ contract AmaBridge {
         o.gasDropFee = gasDropFee;
         bytes memory packed = Order.pack(o);
         orders[n] = keccak256(packed);
+        if (arbitrum) ArbSys(address(100)).sendTxToL1(address(0), abi.encodePacked(orders[n]));
         emit OrderCreated(n, packed);
     }
 

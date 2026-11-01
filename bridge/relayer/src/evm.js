@@ -5,6 +5,7 @@ import { encode as vecpak, fromBase58 } from '@amadeus-protocol/sdk'
 import { bridgeAbi, lightClientAbi } from './abi.js'
 import { decodeValidatorRecord, rosterEip, g2Eip, pad20, unpackOrder } from './codec.js'
 import { finalities } from './chains/index.js'
+import { arbitrumDelivery } from './chains/arbitrum.js'
 import { paysToChain, costToChain, DELIVERY_BYTES } from './tips.js'
 
 const LOG_QUERY_BLOCKS = 1000
@@ -19,7 +20,7 @@ export async function retryRateLimited(f, tries = 5) {
   }
 }
 
-export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToAmadeus, log }) {
+export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToAmadeus, log, parentChain }) {
   const provider = new JsonRpcProvider(chain.rpc, chain.chainId, { staticNetwork: true })
   const wallet = new Wallet(privateKey, provider)
   const lc = new Contract(chain.lightClient, lightClientAbi, wallet)
@@ -41,6 +42,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
   //received as of `tag`; a bridge not deployed yet at that block has received nothing
   const receivedAt = (n, tag) => bridge.received(n, { blockTag: tag }).catch(e => { if (e.code === 'BAD_DATA' || e.code === 'CALL_EXCEPTION') return false; throw e })
   const finality = finalities[chain.finality]({ ama, chain, block, rpc, log, sleep })
+  const arbitrum = chain.arbitrum && arbitrumDelivery({ chain, parentChain, ama, provider, rpc, log })
 
   const eipRosterAt = async h => rosterEip(decodeValidatorRecord((await ama.validatorSet(h)).record).validators)
   const toSolidityProof = p => ({ siblings: p.siblings.map(s => hexlify(fromBase58(s))), leafPath: hexlify(fromBase58(p.terminus.path)), identity: hexlify(fromBase58(p.terminus.identity_hash)), valueHash: hexlify(fromBase58(p.terminus.value_hash)) })
@@ -138,8 +140,8 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     return null
   }
 
-  /// deliver tipped orders to Amadeus with one root; returns the items that failed on their own
-  /// (a failing root or proof throws: that hits all of them alike)
+  /// deliver tipped orders to Amadeus, one root per proof block; returns the items that failed on
+  /// their own or wait for finality (a failing proof or light client sync throws: that hits all alike)
   async function deliverToAmadeus(items) {
     const todo = []
     const failed = []
@@ -152,29 +154,47 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
       const r = await ama.receivedFinal(chain.name, chain.bridge, it.n, it.seen)
       if (r.final) continue
       if (r.received) { failed.push({ ...it, seen: r.seen, error: `order ${it.n} received, not final yet` }); continue }
-      todo.push({ it: { ...it, seen: undefined }, packed })
+      todo.push({ it: { ...it, seen: undefined }, packed, ev })
     }
     if (todo.length === 0) return failed
-    //public RPCs prove only at the head: take the proofs now, submit once that block is final
-    const h = await head()
-    const proof = await rpc('eth_getProof', [chain.bridge, todo.map(p => slot(p.it.n)), `0x${h.toString(16)}`])
-    if (!(await ama.remoteRoot(chain.name, h))) {
-      //the stored set must be the one signing h's finality: step through any set change first
-      if ((await finality.sync(h)).behind) throw new Error(`${chain.name} light client still catching up`)
-      const args = await finality.rootArgs(h)
-      if (!args) throw new Error(`${chain.name} ${h} not final yet`)
-      await ama.callBridge('update', args)
-      log(key, 'root', h, args.length === 4 ? '(caught up past the stored set)' : '')
+    if (arbitrum) return arbitrum.deliver(todo, failed)
+    //public RPCs prove only near the head: proofs are taken there and kept with the order (returned
+    //with it as failed, so the queue stores them) until Amadeus stores that block's root, once the
+    //chain finalized it (BSC: seconds; Ethereum: ~15 min)
+    const fresh = todo.filter(p => !p.it.proof)
+    if (fresh.length > 0) {
+      const h = await head()
+      const proof = await rpc('eth_getProof', [chain.bridge, fresh.map(p => slot(p.it.n)), `0x${h.toString(16)}`])
+      const account = hexlify(vecpak(proof.accountProof.map(x => getBytes(x))))
+      fresh.forEach((p, i) => { p.it.proof = { h, account, storage: hexlify(vecpak(proof.storageProof[i].proof.map(x => getBytes(x)))) } })
     }
-    const accountProof = vecpak(proof.accountProof.map(x => getBytes(x)))
-    for (const [i, p] of todo.entries()) {
-      try {
-        await ama.callBridge('receive', [chain.name, String(h), p.packed, accountProof, vecpak(proof.storageProof[i].proof.map(x => getBytes(x)))])
-        log(key, 'delivered', p.it.n, 'at', h)
-      } catch (e) {
-        //received by someone else meanwhile: done once final, retried like any failure until then
-        const r = await ama.receivedFinal(chain.name, chain.bridge, p.it.n)
-        failed.push({ ...p.it, seen: r.seen, error: r.received ? `order ${p.it.n} received, not final yet` : e.shortMessage ?? e.message })
+    for (const h of new Set(todo.map(p => p.it.proof.h))) {
+      const group = todo.filter(p => p.it.proof.h === h)
+      const later = (error, keep = true) => failed.push(...group.map(p => ({ ...p.it, proof: keep ? p.it.proof : undefined, error, wait: keep ? finality.finalWaitMs : undefined })))
+      if (!(await ama.remoteRoot(chain.name, h))) {
+        let args
+        try {
+          //the stored set must be the one signing h's finality: step through any set change first
+          if ((await finality.sync(h)).behind) { later(`${chain.name} light client still catching up`); continue }
+          args = await finality.rootArgs(h)
+        } catch (e) {
+          if (e.expired) { later(e.message, false); continue }
+          throw e
+        }
+        if (!args) { later(`${chain.name} ${h} not final yet`); continue }
+        await ama.callBridge(finality.updateMethod ?? 'update', args)
+        log(key, 'root', h, args.length === 4 ? '(caught up past the stored set)' : '')
+      }
+      for (const p of group) {
+        try {
+          await ama.callBridge('receive', [chain.name, String(h), p.packed, getBytes(p.it.proof.account), getBytes(p.it.proof.storage)])
+          log(key, 'delivered', p.it.n, 'at', h)
+        } catch (e) {
+          //received by someone else meanwhile: done once final, retried like any failure until then
+          //(proven afresh: a proof Amadeus refused is not kept)
+          const r = await ama.receivedFinal(chain.name, chain.bridge, p.it.n)
+          failed.push({ ...p.it, proof: undefined, seen: r.seen, error: r.received ? `order ${p.it.n} received, not final yet` : e.shortMessage ?? e.message })
+        }
       }
     }
     return failed

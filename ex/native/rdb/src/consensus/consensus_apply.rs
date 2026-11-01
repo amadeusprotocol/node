@@ -951,9 +951,12 @@ pub fn call_bic(
 
         (b"Bridge", b"send") => consensus::bic::bridge::call_send(env, args),
         (b"Bridge", b"receive") => consensus::bic::bridge::call_receive(env, args),
+        (b"Bridge", b"receive_arb") => consensus::bic::bridge::call_receive_arb(env, args),
         (b"Bridge", b"update") => consensus::bic::bridge::call_update(env, args),
         (b"Bridge", b"vote_key") => consensus::bic::bridge::call_vote_key(env, args),
         (b"Bridge", b"seal_update") => consensus::bic::bridge::call_seal_update(env, args),
+        (b"Bridge", b"eth_init") => consensus::bic::bridge::call_eth_init(env, args),
+        (b"Bridge", b"eth_update") => consensus::bic::bridge::call_eth_update(env, args),
         (b"Bridge", b"pause") => consensus::bic::bridge::call_pause(env, args),
         (b"Bridge", b"set_fee") => consensus::bic::bridge::call_set_fee(env, args),
 

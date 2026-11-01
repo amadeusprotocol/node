@@ -17,10 +17,10 @@ export function createRelay(net, privateKey, log = console.log) {
   const ama = new Amadeus({ url: net.amadeus.url, seed: amadeusSeedFromRelayKey(privateKey), network: net.amadeus.network })
   //for Amadeus: its cost and drop there; for another chain through Amadeus: the Amadeus leg here, the
   //rest when Amadeus passes it on (checked again at that delivery, like any Amadeus order)
-  const paysForDeliveryToAmadeus = o => o.dstChain === net.amadeus.chain ? paysToAmadeus(net, o)
-    : Boolean(byName[o.dstChain]) && forRelay(byName[o.dstChain].chain, o) && o.gasDropFee >= costToAmadeus(net, 0n)
+  const paysForDeliveryToAmadeus = o => o.dstChain === net.amadeus.chain ? paysToAmadeus(net, o, byName[o.srcChain]?.chain)
+    : Boolean(byName[o.dstChain]) && forRelay(byName[o.dstChain].chain, o) && o.gasDropFee >= costToAmadeus(net, 0n, byName[o.srcChain]?.chain)
   const chains = Object.fromEntries(chainsLive.map(([key, chain]) =>
-    [key, createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToAmadeus, log })]))
+    [key, createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToAmadeus, log, parentChain: chain.arbitrum && net.chains[chain.arbitrum.parent] })]))
   const byName = Object.fromEntries(chainsLive.map(([key, chain]) => [chain.name, { evm: chains[key], chain }]))
 
   //decided on final state only: a rollback could replace an order at the same nonce

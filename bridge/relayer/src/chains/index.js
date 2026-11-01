@@ -7,8 +7,9 @@
 import { bscFinality } from './bsc.js'
 import { ethFinality } from './eth.js'
 import { baseFinality } from './base.js'
+import { arbitrumFinality } from './arbitrum.js'
 
 //chains Amadeus cannot verify yet: the relay only delivers to them (inbound: false)
 const deliveryOnly = ({ chain }) => { const missing = () => { throw new Error(`${chain.name}: Amadeus has no light client for it yet`) }; return { rootArgs: missing, sync: missing, trust: missing } }
 
-export const finalities = { bsc: bscFinality, eth: ethFinality, base: baseFinality, robinhood: deliveryOnly }
+export const finalities = { bsc: bscFinality, eth: ethFinality, base: baseFinality, arbitrum: arbitrumFinality, robinhood: deliveryOnly }

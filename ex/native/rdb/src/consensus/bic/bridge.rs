@@ -14,6 +14,7 @@
 use crate::bcat;
 use crate::consensus::bic::{coin, protocol};
 use crate::consensus::bridge::bsc::{finality, header, keccak256, mpt};
+use crate::consensus::bridge::{arb, eth};
 use crate::consensus::bridge::order::{chain_name, Order};
 use crate::consensus::consensus_apply::ApplyEnv;
 use crate::consensus::consensus_kv::{exec_budget_decr, kv_delete, kv_exists, kv_get, kv_increment, kv_put};
@@ -99,7 +100,9 @@ pub const ROUTES_TESTNET: &[Route] = &[
     Route { id: b"bsc-to-ama", outbound: false, remote_chain: b"bsc", local_coin: b"AMA", remote_coin: &BSC_TESTNET_WAMA, kind: Kind::Native },
     Route { id: b"ama-to-base", outbound: true, remote_chain: b"base", local_coin: b"AMA", remote_coin: &BASE_TESTNET_WAMA, kind: Kind::Native },
     Route { id: b"ama-to-eth", outbound: true, remote_chain: b"eth", local_coin: b"AMA", remote_coin: &ETH_TESTNET_WAMA, kind: Kind::Native },
+    Route { id: b"eth-to-ama", outbound: false, remote_chain: b"eth", local_coin: b"AMA", remote_coin: &ETH_TESTNET_WAMA, kind: Kind::Native },
     Route { id: b"ama-to-robinhood", outbound: true, remote_chain: b"robinhood", local_coin: b"AMA", remote_coin: &ROBINHOOD_TESTNET_WAMA, kind: Kind::Native },
+    Route { id: b"robinhood-to-ama", outbound: false, remote_chain: b"robinhood", local_coin: b"AMA", remote_coin: &ROBINHOOD_TESTNET_WAMA, kind: Kind::Native },
 ];
 
 //Base: Amadeus -> Base only, until Amadeus verifies Base (an Ethereum light client, as Base's state
@@ -119,8 +122,6 @@ pub fn bsc(env: &ApplyEnv) -> &'static Remote {
     if env.testnet { &BSC_TESTNET } else { &BSC }
 }
 
-//Ethereum and Robinhood Chain (an Arbitrum chain): Amadeus -> them only, like Base, until Amadeus
-//verifies Ethereum; sends from their bridges stay paused
 pub const ETH: Remote = Remote { name: b"eth", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
 pub const ROBINHOOD: Remote = Remote { name: b"robinhood", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
 //Ethereum Sepolia (chain id 11155111)
@@ -129,13 +130,25 @@ pub const ETH_TESTNET: Remote = Remote { name: b"eth", address_len: 20, contract
 //WAMA 0x70b2e7ca598101f0D1aDD4602085aCD4413ffA27
 pub const ETH_TESTNET_WAMA: [u8; 20] = [0x70, 0xb2, 0xe7, 0xca, 0x59, 0x81, 0x01, 0xf0, 0xd1, 0xad, 0xd4, 0x60, 0x20, 0x85, 0xac, 0xd4, 0x41, 0x3f, 0xfa, 0x27];
 //Robinhood Chain testnet (chain id 46630)
-//AmaBridge 0x9d9Af25190820fdbd18336C00959875AE9517817
-pub const ROBINHOOD_TESTNET: Remote = Remote { name: b"robinhood", address_len: 20, contract: [0x9d, 0x9a, 0xf2, 0x51, 0x90, 0x82, 0x0f, 0xdb, 0xd1, 0x83, 0x36, 0xc0, 0x09, 0x59, 0x87, 0x5a, 0xe9, 0x51, 0x78, 0x17], orders_slot: 0 };
-//WAMA 0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B
-pub const ROBINHOOD_TESTNET_WAMA: [u8; 20] = [0xc1, 0x56, 0x44, 0xe8, 0x88, 0x5f, 0x9e, 0xdb, 0x05, 0xf0, 0xd6, 0xea, 0xbe, 0x17, 0x01, 0xc7, 0xd8, 0x0d, 0x13, 0x2b];
+//AmaBridge 0xfD0a63B491662ddd37c86D68948E6793300C3E8e
+pub const ROBINHOOD_TESTNET: Remote = Remote { name: b"robinhood", address_len: 20, contract: [0xfd, 0x0a, 0x63, 0xb4, 0x91, 0x66, 0x2d, 0xdd, 0x37, 0xc8, 0x6d, 0x68, 0x94, 0x8e, 0x67, 0x93, 0x30, 0x0c, 0x3e, 0x8e], orders_slot: 0 };
+//WAMA 0x989D3047bB7C9f4cdE03F579C1dA82a2e1AD8A9e
+pub const ROBINHOOD_TESTNET_WAMA: [u8; 20] = [0x98, 0x9d, 0x30, 0x47, 0xbb, 0x7c, 0x9f, 0x4c, 0xde, 0x03, 0xf5, 0x79, 0xc1, 0xda, 0x82, 0xa2, 0xe1, 0xad, 0x8a, 0x9e];
 
 pub fn eth(env: &ApplyEnv) -> &'static Remote {
     if env.testnet { &ETH_TESTNET } else { &ETH }
+}
+
+/// an Arbitrum chain: its orders are proven as L2 -> L1 messages in the parent chain's Outbox
+pub struct Arbitrum {
+    pub parent: &'static [u8],
+    pub outbox: [u8; 20],
+}
+//Outbox 0x8D180Caf588f3Da027BEf1F42a106Da93F90b166 on Sepolia
+pub const ROBINHOOD_TESTNET_ARB: Arbitrum = Arbitrum { parent: b"eth", outbox: [0x8d, 0x18, 0x0c, 0xaf, 0x58, 0x8f, 0x3d, 0xa0, 0x27, 0xbe, 0xf1, 0xf4, 0x2a, 0x10, 0x6d, 0xa9, 0x3f, 0x90, 0xb1, 0x66] };
+
+fn arbitrum(env: &ApplyEnv, chain: &[u8]) -> &'static Arbitrum {
+    if env.testnet && chain == network_name(env, b"robinhood") { &ROBINHOOD_TESTNET_ARB } else { panic_any("bridge_not_arbitrum") }
 }
 
 pub fn robinhood(env: &ApplyEnv) -> &'static Remote {
@@ -335,13 +348,60 @@ fn proof_list(arg: &[u8]) -> Vec<Vec<u8>> {
 
 /// receive(src_chain, height, order, account_proof, storage_proof); proofs are vecpak lists of nodes
 pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
-    check_active(env);
-    backing_init(env);
     let [src_chain, height, packed, account_proof, storage_proof] =
         <[Vec<u8>; 5]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
-    let remote = remote(env, &src_chain);
-    let order = Order::unpack(&packed).unwrap_or_else(|| panic_any("bridge_invalid_order"));
-    if order.src_chain != chain_name(&src_chain).unwrap() { panic_any("bridge_wrong_chain") }
+    receive_order(env, &src_chain, &packed, |env, remote, order| {
+        let root: [u8; 32] = kv_get(env, &key_root(&src_chain, parse_u64(&height)))
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or_else(|| panic_any("bridge_unknown_root"));
+        let (account_proof, storage_proof) = (proof_list(&account_proof), proof_list(&storage_proof));
+        exec_budget_decr(env, COST_PROOF_NODE * (account_proof.len() + storage_proof.len()) as i128);
+        let account = mpt::verify_account(&root, &remote.contract, &refs(&account_proof))
+            .ok().flatten().unwrap_or_else(|| panic_any("bridge_invalid_account_proof"));
+        let mut slot_preimage = [0u8; 64];
+        slot_preimage[24..32].copy_from_slice(&order.nonce.to_be_bytes());
+        slot_preimage[56..64].copy_from_slice(&remote.orders_slot.to_be_bytes());
+        let word = mpt::verify_storage(&account.storage_root, &keccak256(&slot_preimage), &refs(&storage_proof))
+            .unwrap_or_else(|_| panic_any("bridge_invalid_storage_proof"));
+        if word != keccak256(&packed) { panic_any("bridge_order_not_found") }
+    });
+}
+
+/// receive_arb(chain, l1_height, order, outbox_account_proof, roots_storage_proof, l2_block,
+/// l1_block, timestamp, index, merkle_proof): the order's hash went out from the bridge as an
+/// L2 -> L1 message (leaf `index` of the send tree, `merkle_proof` 32-byte siblings) under a send
+/// root that the parent chain's Outbox holds at its stored root for l1_height
+pub fn call_receive_arb(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    let [src_chain, l1_height, packed, account_proof, storage_proof, l2_block, l1_block, timestamp, index, merkle] =
+        <[Vec<u8>; 10]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
+    receive_order(env, &src_chain, &packed, |env, remote, _| {
+        let a = arbitrum(env, &src_chain);
+        if merkle.len() % 32 != 0 { panic_any("invalid_args") }
+        let siblings: Vec<[u8; 32]> = merkle.chunks_exact(32).map(|c| c.try_into().unwrap()).collect();
+        let data = keccak256(&packed);
+        let msg = arb::Message { caller: remote.contract, destination: [0u8; 20], l2_block: parse_u64(&l2_block), l1_block: parse_u64(&l1_block),
+                                 timestamp: parse_u64(&timestamp), callvalue: [0u8; 32], data: &data };
+        let send_root = arb::send_root(&msg.item_hash(), parse_u64(&index), &siblings).unwrap_or_else(|| panic_any("bridge_invalid_message_proof"));
+        let root: [u8; 32] = kv_get(env, &key_root(&network_name(env, a.parent), parse_u64(&l1_height)))
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or_else(|| panic_any("bridge_unknown_root"));
+        let (account_proof, storage_proof) = (proof_list(&account_proof), proof_list(&storage_proof));
+        exec_budget_decr(env, COST_PROOF_NODE * (account_proof.len() + storage_proof.len() + 1) as i128);
+        let account = mpt::verify_account(&root, &a.outbox, &refs(&account_proof))
+            .ok().flatten().unwrap_or_else(|| panic_any("bridge_invalid_account_proof"));
+        let word = mpt::verify_storage(&account.storage_root, &arb::roots_slot(&send_root), &refs(&storage_proof))
+            .unwrap_or_else(|_| panic_any("bridge_invalid_storage_proof"));
+        if word == [0u8; 32] { panic_any("bridge_order_not_found") }
+    });
+}
+
+/// checks and effects shared by every way of proving an order; `verify` proves it on its chain
+fn receive_order(env: &mut ApplyEnv, src_chain: &[u8], packed: &[u8], verify: impl FnOnce(&mut ApplyEnv, &'static Remote, &Order)) {
+    check_active(env);
+    backing_init(env);
+    let remote = remote(env, src_chain);
+    let order = Order::unpack(packed).unwrap_or_else(|| panic_any("bridge_invalid_order"));
+    if order.src_chain != chain_name(src_chain).unwrap() { panic_any("bridge_wrong_chain") }
     //for Amadeus, or for another chain through Amadeus (forward)
     let onward = order.dst_chain != local_chain(env);
     let r = routes(env).iter()
@@ -350,22 +410,10 @@ pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if !onward && order.dst_coin != r.local_coin { panic_any("bridge_no_route") }
     if order.output_amount.checked_add(order.gas_drop_fee) != Some(order.amount) { panic_any("bridge_invalid_output_amount") }
     if !(order.exclusive_filler.is_empty() && order.message.is_empty()) { panic_any("bridge_unsupported_order") }
-    let received = key_received(&src_chain, &remote.contract, order.nonce);
+    let received = key_received(src_chain, &remote.contract, order.nonce);
     if kv_exists(env, &received) { panic_any("bridge_already_received") }
 
-    let root: [u8; 32] = kv_get(env, &key_root(&src_chain, parse_u64(&height)))
-        .and_then(|v| v.try_into().ok())
-        .unwrap_or_else(|| panic_any("bridge_unknown_root"));
-    let (account_proof, storage_proof) = (proof_list(&account_proof), proof_list(&storage_proof));
-    exec_budget_decr(env, COST_PROOF_NODE * (account_proof.len() + storage_proof.len()) as i128);
-    let account = mpt::verify_account(&root, &remote.contract, &refs(&account_proof))
-        .ok().flatten().unwrap_or_else(|| panic_any("bridge_invalid_account_proof"));
-    let mut slot_preimage = [0u8; 64];
-    slot_preimage[24..32].copy_from_slice(&order.nonce.to_be_bytes());
-    slot_preimage[56..64].copy_from_slice(&remote.orders_slot.to_be_bytes());
-    let word = mpt::verify_storage(&account.storage_root, &keccak256(&slot_preimage), &refs(&storage_proof))
-        .unwrap_or_else(|_| panic_any("bridge_invalid_storage_proof"));
-    if word != keccak256(&packed) { panic_any("bridge_order_not_found") }
+    verify(env, remote, &order);
 
     check_open(env, r);
     if onward {
@@ -404,6 +452,107 @@ pub fn call_receive(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         kv_increment(env, &balance_key(&order.recipient, b"AMA"), drop);
     }
     kv_put(env, &received, b"");
+}
+
+/// Ethereum Sepolia's beacon chain: what its sync committees sign under (Gloas)
+const ETH_TESTNET_NETWORK: eth::Network = eth::Network {
+    genesis_validators_root: [0xd8, 0xea, 0x17, 0x1f, 0x3c, 0x94, 0xae, 0xa2, 0x1e, 0xbc, 0x42, 0xa1, 0xed, 0x61, 0x05, 0x2a, 0xcf, 0x3f, 0x92, 0x09, 0xc0, 0x0e, 0x4e, 0xfb, 0xaa, 0xdd, 0xac, 0x09, 0xed, 0x9b, 0x80, 0x78],
+    forks: &[(0, [0x90, 0x00, 0x00, 0x75]), (353024, [0x90, 0x00, 0x00, 0x76])],
+};
+/// the trust anchor: a finalized Sepolia beacon block root (eth_init proves its sync committee)
+const ETH_TESTNET_TRUST_ROOT: [u8; 32] = [0x67, 0x9e, 0x8d, 0x73, 0xbd, 0x67, 0x4a, 0x73, 0xc4, 0x02, 0x27, 0x02, 0xbe, 0xbf, 0xf0, 0x18, 0x46, 0x1f, 0x96, 0xf6, 0xe1, 0x6b, 0xf3, 0x13, 0x83, 0x2f, 0x5b, 0x2b, 0x34, 0xee, 0x71, 0x7d];
+/// sync committee period u64 | current committee root 32 | next committee root 32 (zero: not known yet)
+const KEY_ETH_LC: &[u8] = b"bic:bridge:eth:lc";
+/// parsing a committee's 512 keys and hashing it
+pub const COST_ETH_COMMITTEE: i128 = 150_000;
+
+fn eth_network(env: &ApplyEnv) -> (&'static eth::Network, [u8; 32]) {
+    if env.testnet { (&ETH_TESTNET_NETWORK, ETH_TESTNET_TRUST_ROOT) } else { panic_any("bridge_unknown_chain") }
+}
+
+fn eth_committee(env: &mut ApplyEnv, raw: &[u8]) -> eth::Committee {
+    exec_budget_decr(env, COST_ETH_COMMITTEE);
+    eth::Committee::parse(raw).unwrap_or_else(|_| panic_any("bridge_invalid_committee"))
+}
+
+fn eth_beacon(raw: &[u8]) -> eth::BeaconHeader {
+    eth::BeaconHeader::parse(raw).unwrap_or_else(|_| panic_any("bridge_invalid_header"))
+}
+
+/// eth_init(chain, beacon_header, committee, branch): the light client's first sync committee,
+/// proven in the state of the baked trust anchor
+pub fn call_eth_init(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    check_active(env);
+    let [chain, beacon, committee, branch] = <[Vec<u8>; 4]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
+    if chain != network_name(env, b"eth") { panic_any("invalid_args") }
+    if kv_exists(env, KEY_ETH_LC) { panic_any("bridge_already_initialized") }
+    let (_, trust) = eth_network(env);
+    let h = eth_beacon(&beacon);
+    if h.root() != trust { panic_any("bridge_not_the_trust_anchor") }
+    let c = eth_committee(env, &committee);
+    if eth::verify_branch(&c.root, &branch, eth::CURRENT_SYNC_COMMITTEE_GINDEX, &h.state_root).is_err() { panic_any("bridge_invalid_branch") }
+    let mut st = h.period().to_be_bytes().to_vec();
+    st.extend_from_slice(&c.root);
+    st.extend_from_slice(&[0u8; 32]);
+    kv_put(env, KEY_ETH_LC, &st);
+}
+
+/// eth_update(chain, attested, finalized, finality_branch, exec_hash, exec_branch, exec_header,
+///            committee, bits, signature, signature_slot, next_committee, next_branch).
+/// The stored committee of the signature's period (the next one moves in once signatures come from
+/// its period: periods are never skipped) signed `attested` with >= 2/3 of its members; the finality
+/// branch proves `finalized` in it, the execution branch the hash of the execution block it builds
+/// on. `exec_header` is that block, or a vecpak list of parent-linked headers ending at it (an
+/// order proven at an earlier block): the state roots of the first and last are stored (finalized empty:
+/// no root, the update only moves committees). next_committee (may be empty) is the next period's,
+/// proven in the attested state
+pub fn call_eth_update(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    check_active(env);
+    let [chain, attested, finalized, finality_branch, exec_hash, exec_branch, exec_header, committee, bits, signature, signature_slot, next_committee, next_branch] =
+        <[Vec<u8>; 13]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
+    if chain != network_name(env, b"eth") { panic_any("invalid_args") }
+    let (net, _) = eth_network(env);
+    let st = kv_get(env, KEY_ETH_LC).unwrap_or_else(|| panic_any("bridge_not_initialized"));
+    let (mut period, mut current, mut next) = (u64::from_be_bytes(st[..8].try_into().unwrap()), st[8..40].to_vec(), st[40..72].to_vec());
+    let attested = eth_beacon(&attested);
+    let signature_slot = parse_u64(&signature_slot);
+    if signature_slot <= attested.slot { panic_any("bridge_invalid_slots") }
+
+    //the next committee takes over once signatures come from its period
+    let signing_period = signature_slot / eth::SLOTS_PER_PERIOD;
+    if signing_period == period + 1 && next != [0u8; 32] {
+        (period, current, next) = (period + 1, next, vec![0u8; 32]);
+    }
+    if signing_period != period { panic_any("bridge_committee_unknown") }
+    let c = eth_committee(env, &committee);
+    if c.root.as_slice() != current.as_slice() { panic_any("bridge_wrong_committee") }
+    exec_budget_decr(env, COST_BLS_VERIFY);
+    if eth::verify_sync_aggregate(net, &c, &bits, &signature, &attested, signature_slot).is_err() { panic_any("bridge_invalid_attestation") }
+
+    //an update may only move the committees (a period's best update can lack finality)
+    if !finalized.is_empty() {
+        let finalized = eth_beacon(&finalized);
+        if finalized.slot > attested.slot { panic_any("bridge_invalid_slots") }
+        if eth::verify_branch(&finalized.root(), &finality_branch, eth::FINALIZED_ROOT_GINDEX, &attested.state_root).is_err() { panic_any("bridge_invalid_branch") }
+        let exec_hash: [u8; 32] = exec_hash.try_into().unwrap_or_else(|_| panic_any("invalid_args"));
+        if eth::verify_branch(&exec_hash, &exec_branch, eth::EXECUTION_BLOCK_HASH_GINDEX, &finalized.body_root).is_err() { panic_any("bridge_invalid_branch") }
+        let raw = header_list(&exec_header);
+        let headers = ancestry(env, &raw, &exec_hash);
+        for h in [&headers[0], headers.last().unwrap()] {
+            let root = key_root(&chain, h.number);
+            if !kv_exists(env, &root) { kv_put(env, &root, &h.state_root); }
+        }
+    }
+
+    if !next_committee.is_empty() && attested.period() == period {
+        let n = eth_committee(env, &next_committee);
+        if eth::verify_branch(&n.root, &next_branch, eth::NEXT_SYNC_COMMITTEE_GINDEX, &attested.state_root).is_err() { panic_any("bridge_invalid_branch") }
+        next = n.root.to_vec();
+    }
+    let mut st = period.to_be_bytes().to_vec();
+    st.extend_from_slice(&current);
+    st.extend_from_slice(&next);
+    kv_put(env, KEY_ETH_LC, &st);
 }
 
 /// vote_key(chain, height, vote_key, account_proof, storage_proof): learn a BSC vote key from
@@ -627,6 +776,30 @@ fn remember_vote_keys(env: &mut ApplyEnv, set: &finality::ValidatorSet) {
     }
 }
 
+/// `source`: one header, or a vecpak list of parent-linked headers (at most BSC_MAX_ANCESTRY)
+fn header_list(source: &[u8]) -> Vec<Vec<u8>> {
+    let raw: Vec<Vec<u8>> = match vecpak::decode(source) {
+        Ok(vecpak::Term::List(items)) => items.into_iter().map(|t| match t {
+            vecpak::Term::Binary(b) => b,
+            _ => panic_any("bridge_invalid_header"),
+        }).collect(),
+        _ => vec![source.to_vec()],
+    };
+    if raw.is_empty() || raw.len() > BSC_MAX_ANCESTRY { panic_any("bridge_invalid_ancestry") }
+    raw
+}
+
+/// the headers of a header_list, linked and ending at the final block `hash`: all final with it
+fn ancestry<'a>(env: &mut ApplyEnv, raw: &'a [Vec<u8>], hash: &[u8; 32]) -> Vec<header::Header<'a>> {
+    exec_budget_decr(env, COST_HEADER * raw.len() as i128);
+    let headers: Vec<header::Header> = raw.iter()
+        .map(|r| header::parse(r).unwrap_or_else(|_| panic_any("bridge_invalid_header")))
+        .collect();
+    if headers.last().unwrap().hash != *hash { panic_any("bridge_wrong_source_header") }
+    if finality::verify_ancestry(&headers, hash).is_err() { panic_any("bridge_invalid_ancestry") }
+    headers
+}
+
 /// update(chain, attesting_header, source[, signing_epoch_header]); source is the finalized
 /// header, or a vecpak list of parent-linked headers ending at it.
 /// Without the 4th arg the vote must come from the stored set. With it (a catch-up over any
@@ -640,23 +813,11 @@ fn update_bsc(env: &mut ApplyEnv, attesting: &[u8], source: &[u8], signing_epoch
     let attesting = header::parse(attesting).unwrap_or_else(|_| panic_any("bridge_invalid_header"));
     let att = header::attestation(&attesting).ok().flatten().unwrap_or_else(|| panic_any("bridge_no_attestation"));
     let (number, hash) = finality::finalized(&att).unwrap_or_else(|| panic_any("bridge_not_finalizing"));
-    //the source: one header, or a vecpak list of parent-linked headers ending at it, all final
-    //with it (BSC finalizes some blocks only through a descendant, epoch blocks included)
-    let raw_headers = match vecpak::decode(source) {
-        Ok(vecpak::Term::List(items)) => items.into_iter().map(|t| match t {
-            vecpak::Term::Binary(b) => b,
-            _ => panic_any("bridge_invalid_header"),
-        }).collect(),
-        _ => vec![source.to_vec()],
-    };
-    if raw_headers.is_empty() || raw_headers.len() > BSC_MAX_ANCESTRY { panic_any("bridge_invalid_ancestry") }
-    exec_budget_decr(env, COST_HEADER * raw_headers.len() as i128);
-    let headers: Vec<header::Header> = raw_headers.iter()
-        .map(|r| header::parse(r).unwrap_or_else(|_| panic_any("bridge_invalid_header")))
-        .collect();
+    //BSC finalizes some blocks only through a descendant, epoch blocks included
+    let raw = header_list(source);
+    let headers = ancestry(env, &raw, &hash);
     let source = headers.last().unwrap();
-    if source.number != number || source.hash != hash { panic_any("bridge_wrong_source_header") }
-    if finality::verify_ancestry(&headers, &hash).is_err() { panic_any("bridge_invalid_ancestry") }
+    if source.number != number { panic_any("bridge_wrong_source_header") }
     let target = att.data.target_number;
 
     if init_once(env) { return; }

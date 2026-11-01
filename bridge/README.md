@@ -19,8 +19,9 @@ Each side's admin sets its own fee (Amadeus `Bridge.set_fee`, EVM `setFee`, part
 | Chain | Amadeus follows | Status |
 |---|---|---|
 | BSC | Parlia fast finality (`consensus/bridge/bsc`) | testnet live |
-| Ethereum | beacon sync committee | planned (`relayer/src/chains/eth.js`) |
-| Base | OP-stack output roots via Ethereum | testnet: Amadeus -> Base and BSC -> Base; Base -> anything needs the Ethereum light client (its sends stay paused) |
+| Ethereum | beacon sync committees, ≥ 2/3 signing (`consensus/bridge/eth`) | testnet (Sepolia) live both ways |
+| Base | — | testnet: to Base only (its dispute games take ~5 days; its sends stay paused) |
+| Robinhood Chain | L2 -> L1 messages in the Ethereum Outbox, once the rollup confirms them (`consensus/bridge/arb`) | testnet live both ways (~1 h from Robinhood) |
 
 ```
 bridge/
@@ -30,7 +31,7 @@ bridge/
     src/networks.js   networks, chains, addresses, tips
     src/core.js       one network: Amadeus side, which orders to deliver
     src/evm.js        one EVM chain: delivery both ways, proofs
-    src/chains/       how Amadeus learns each chain's state roots (bsc.js; eth.js, base.js planned)
+    src/chains/       how Amadeus learns each chain's state roots (bsc.js, eth.js, arbitrum.js)
     worker/           Cloudflare worker: site, /deliver, /status, one Durable Object per network
     frontend/         the page (Vite)
 ```

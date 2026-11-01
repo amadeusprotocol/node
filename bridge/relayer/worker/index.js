@@ -132,11 +132,12 @@ export class Relay extends DurableObject {
   }
 
   //never given up: caps reset, pauses lift, RPCs come back. Backs off up to RETRY_MAX_MS
-  async retryLater(key, item, e) {
+  //`wait`: an order waiting for its chain's finality is looked at again after that long, not backed off
+  async retryLater(key, { wait, ...item }, e) {
     const tries = item.tries + 1
     const error = e.shortMessage ?? e.message
     this.note('delivery', key.slice(2), 'failed', `(try ${tries})`, error)
-    await this.ctx.storage.put(key, { ...item, tries, error, due: Date.now() + Math.min(5000 * 2 ** tries, RETRY_MAX_MS) })
+    await this.ctx.storage.put(key, { ...item, tries, error, due: Date.now() + (wait ?? Math.min(5000 * 2 ** tries, RETRY_MAX_MS)) })
   }
 
   async work() {
@@ -194,9 +195,9 @@ const json = (body, status = 200) => new Response(JSON.stringify(body, (_, v) =>
 function pageSettings(net) {
   const n = networks[net]
   const chains = Object.entries(n.chains).filter(([, c]) => live(c)).map(([key, c]) => ({
-    key, name: c.name, label: c.label, chainId: c.chainId, rpc: c.rpc, explorer: c.explorer, gasSymbol: c.gasSymbol, inbound: c.inbound !== false, opStack: Boolean(c.opStack),
+    key, name: c.name, label: c.label, chainId: c.chainId, rpc: c.rpc, explorer: c.explorer, gasSymbol: c.gasSymbol, inbound: c.inbound !== false, opStack: Boolean(c.opStack), arbitrum: c.arbitrum ?? null,
     bridge: c.bridge, lightClient: c.lightClient, wama: c.wama, from: Number(c.from || 0),
-    amaPerGasCoin: c.amaPerGasCoin, deliveryGas: c.deliveryGas, gasDrop: c.gasDrop, maxGasDrop: c.maxGasDrop,
+    amaPerGasCoin: c.amaPerGasCoin, amadeusCost: c.amadeusCost, deliveryGas: c.deliveryGas, gasDrop: c.gasDrop, maxGasDrop: c.maxGasDrop,
   }))
   return { network: net, amadeusApi: n.amadeus.url, amaChain: n.amadeus.chain, amadeusCost: n.amadeusCost, gasDropAma: n.gasDropAma, maxGasDropAma: n.maxGasDropAma, chains }
 }

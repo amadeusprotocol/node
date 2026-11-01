@@ -45,16 +45,31 @@ const side = k => k === AMA
 //every chain shows on the From side; those Amadeus cannot verify yet can only receive for now
 const allSides = () => [AMA, ...settings.chains.map(c => c.key)]
 
+//the chain picker: a button with the chain's logo, its menu open while `menuOpen` names it
+let menuOpen = null
 function pick(k, options, id) {
   const s = side(k)
-  const names = options.map(o => {
-    const off = !sources().includes(o) && id === 'from-select'
-    return `<option value="${o}"${o === k ? ' selected' : ''}${off ? ' disabled' : ''}>${side(o).chainName}${off ? ' (receive only, for now)' : ''}</option>`
-  }).join('')
-  const chainName = options.length > 1 ? `<select id="${id}">${names}</select>` : s.chainName
-  return `<span class="chainbig"><img src="${s.chainLogo}" alt=""><span><span class="k">chain</span>${chainName}</span></span>
+  const button = `<button type="button" class="chainbtn${options.length > 1 ? '' : ' fixed'}${menuOpen === id ? ' open' : ''}" data-menu="${id}">
+    <img src="${s.chainLogo}" alt=""><span><span class="k">Chain</span><b>${s.chainName}</b></span>${options.length > 1 ? '<span class="chev">▼</span>' : ''}</button>`
+  const menu = menuOpen !== id ? '' : `<div class="menu">${options.map(o => {
+    const off = !sources().includes(o) && id === 'from'
+    return `<button type="button" class="opt${o === k ? ' sel' : ''}" data-pick="${id}:${o}"${off ? ' disabled' : ''}><img src="${side(o).chainLogo}" alt="">${side(o).chainName}${off ? '<small>receive only, for now</small>' : o === k ? '<span class="tick">✓</span>' : ''}</button>`
+  }).join('')}</div>`
+  return `<span class="picker">${button}${menu}</span>
           <span class="pill"><span class="coin"><img src="${s.coinLogo}" alt="">${s.badge ? `<img class="small" src="${s.badge}" alt="">` : ''}</span><span><span class="k">coin</span> ${s.coin}</span></span>`
 }
+
+document.addEventListener('click', e => {
+  const opt = e.target.closest('[data-pick]'), btn = e.target.closest('[data-menu]')
+  if (opt) {
+    const [id, k] = opt.dataset.pick.split(':')
+    menuOpen = null
+    return id === 'from' ? setRoute(k, to) : setRoute(from, k)
+  }
+  const next = btn && !btn.classList.contains('fixed') && menuOpen !== btn.dataset.menu ? btn.dataset.menu : null
+  if (next !== menuOpen) { menuOpen = next; render() }
+})
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && menuOpen) { menuOpen = null; render() } })
 
 function setRoute(f, t) {
   from = f
@@ -73,25 +88,25 @@ const dropOn = () => to === AMA ? parseUnits(settings.gasDropAma, 9) : parseEthe
 /// the relay's cost for this route, in the coin sent (null while gas prices load)
 function cost() {
   const d = drop ? dropOn() : 0n
-  if (to === AMA) return costToAmadeus(settings, d)
+  if (to === AMA) return costToAmadeus(settings, d, chainOf(from))
   if (gasPrice === null) return null
-  return from === AMA ? costToChain(chainOf(to), gasPrice, d, l1Fee) : costThroughAmadeus(settings, chainOf(to), gasPrice, d, l1Fee)
+  return from === AMA ? costToChain(chainOf(to), gasPrice, d, l1Fee) : costThroughAmadeus(settings, chainOf(from), chainOf(to), gasPrice, d, l1Fee)
 }
 
 /// everything that follows from the route, amount and wallets
 function render() {
   const f = side(from), t = side(to)
-  $('from-pick').innerHTML = pick(from, allSides(), 'from-select')
-  $('to-pick').innerHTML = pick(to, destinations(from), 'to-select')
-  if ($('from-select')) $('from-select').onchange = e => setRoute(e.target.value, to)
-  if ($('to-select')) $('to-select').onchange = e => setRoute(from, e.target.value)
+  $('from-pick').innerHTML = pick(from, allSides(), 'from')
+  $('to-pick').innerHTML = pick(to, destinations(from), 'to')
+  $('amount-unit').textContent = f.coin
+  $('receive-unit').textContent = t.coin
   const back = sources().includes(to)
   $('flip').disabled = !back
   $('flip').title = back ? 'Switch direction' : `${t.chainName} → ${f.chainName} needs Amadeus to verify ${t.chainName} (coming)`
 
   const bal = from === AMA ? balances.ama : balances.wama
-  $('from-balance').textContent = bal === null ? ' ' : `Balance: ${fmt(bal)} ${f.coin}`
-  $('recipient').placeholder = to === AMA ? 'Amadeus address (default: your Amadeus wallet)' : `${t.chainName} address (default: your MetaMask account)`
+  $('from-balance').textContent = bal === null ? '' : `Balance: ${fmt(bal)} ${f.coin}`
+  $('recipient').placeholder = to === AMA ? (amaAddress ? `${short(amaAddress)} (your Amadeus wallet)` : 'Amadeus address') : (evmAddress ? `${short(evmAddress)} (your MetaMask account)` : `${t.chainName} address (0x…)`)
 
   const gasCoin = to === AMA ? 'AMA' : chainOf(to).gasSymbol
   const dropText = to === AMA ? `${settings.gasDropAma} AMA` : `${chainOf(to).gasDrop} ${gasCoin}`
@@ -111,6 +126,8 @@ function render() {
     rows.push(ppm === 0n ? ['Bridge fee', 'none this way'] : [from === AMA ? `Bridge fee (${rate}, burned on Amadeus)` : `Bridge fee (${rate}, to the bridge on ${f.chainName})`, `${fmt(bp)} ${f.coin}`])
     const via = from !== AMA && to !== AMA ? ' (both legs, via Amadeus)' : ''
     rows.push([`Relay delivery${drop ? ` + ${dropText} gas drop` : ''}${via}, at cost`, `${fmt(c)} ${f.coin}`])
+    //Amadeus waits for the source chain's finality; from Amadeus it takes seconds
+    if (from !== AMA && finalityLag[from] != null) rows.push([`Arrives after ${chainOf(from).arbitrum ? `${f.chainName} settles on ${chainOf(chainOf(from).arbitrum.parent).label}` : `${f.chainName} finality`}`, eta(finalityLag[from] + 60)])
   }
   $('receive').textContent = receive === null ? '0.0' : receive > 0n ? fmt(receive) : '–'
   $('summary').innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('')
@@ -153,7 +170,7 @@ async function checkRecipientGas() {
       if (!who) { recipientGas = null; return }
       recipientGas = await amaBalance(who)
       //what arrives is AMA itself, which pays Amadeus fees: count it net of the relay's cost
-      const arriving = (amount() ?? 0n) - costToAmadeus(settings, 0n)
+      const arriving = (amount() ?? 0n) - costToAmadeus(settings, 0n, chainOf(from))
       if (!dropTouched) drop = recipientGas + (arriving > 0n ? arriving : 0n) < AMA_FOR_TWO_TXS
     } else {
       const who = $('recipient').value || evmAddress
@@ -176,7 +193,10 @@ async function readGas() {
 async function refresh() {
   await readGas()
   amaFeePpm = BigInt((await amaGet('/bridge/fee')).fee_ppm)
-  if (from !== AMA) chainFeePpm = BigInt(await new Contract(chainOf(from).bridge, bridgeAbi, rpcOf(chainOf(from))).feePpm())
+  if (from !== AMA) {
+    chainFeePpm = BigInt(await new Contract(chainOf(from).bridge, bridgeAbi, rpcOf(chainOf(from))).feePpm())
+    await readFinalityLag(chainOf(from))
+  }
   if (amaAddress) balances.ama = await amaBalance(amaAddress)
   balances.wama = null
   if (evmAddress && from !== AMA) balances.wama = await new Contract(chainOf(from).wama, tokenAbi, rpcOf(chainOf(from))).balanceOf(evmAddress)
@@ -187,6 +207,41 @@ async function refresh() {
   await checkRecipientGas()
   await showOrders()
   await showRelayStatus()
+}
+
+//Amadeus verifies an order once its block is final on the source chain: finality trails the head by
+//about as long as it did for the newest finalized block, so an order is final in ~(its time - that block's)
+const eta = s => s < 90 ? `~${Math.max(5, Math.round(s / 5) * 5)} s` : `~${Math.round(s / 60)} min`
+const finalityLag = {}
+const SEND_ROOT_UPDATED = keccak256(new TextEncoder().encode('SendRootUpdated(bytes32,bytes32)'))
+//an Arbitrum chain is final for Amadeus once its parent's Outbox holds a send root past the order,
+//as of the parent's finalized block
+async function settled(c) {
+  const p = rpcOf(chainOf(c.arbitrum.parent)), top = (await p.getBlock('finalized')).number
+  for (let to = top; to > top - 5000; to -= 1000) {
+    const logs = await p.getLogs({ address: c.arbitrum.outbox, topics: [SEND_ROOT_UPDATED], fromBlock: to - 999, toBlock: to })
+    if (logs.length) return rpcOf(c).getBlock(logs.at(-1).topics[2])
+  }
+  return null
+}
+async function readFinalityLag(c) {
+  const now = Math.floor(Date.now() / 1000)
+  if (c.arbitrum) {
+    const s = await settled(c)
+    finalityLag[c.key] = Math.max(0, now - (s?.timestamp ?? now))
+    return s ?? { number: 0, timestamp: now }
+  }
+  const fin = await rpcOf(c).getBlock('finalized')
+  finalityLag[c.key] = Math.max(0, now - fin.timestamp)
+  return fin
+}
+//an order Amadeus has not received yet: waiting for its block's finality, or being proven
+async function inboundStatus(c, ev, o) {
+  const fin = await readFinalityLag(c)
+  if (fin.number >= ev.blockNumber) return status(false, o.gasDropFee > 0n ? 'final · relay proving on Amadeus' : 'final · ready to claim')
+  const t = (await rpcOf(c).getBlock(ev.blockNumber)).timestamp
+  const what = c.arbitrum ? `${c.label} to settle on ${chainOf(c.arbitrum.parent).label}` : `${c.label} finality`
+  return status(false, `waiting for ${what} · ${eta(Math.max(0, t - fin.timestamp))} left`)
 }
 
 const delivery = o => o.gasDropFee > 0n ? `relay${o.gasDrop > 0n ? ' + gas drop' : ''}` : 'self'
@@ -205,7 +260,7 @@ async function showOrders() {
     const c = chainOf(k), recipient = hexlify(o.recipient)
     const done = await new Contract(c.bridge, bridgeAbi, rpcOf(c)).received(n)
     const claim = !done && evmAddress && recipient === evmAddress.toLowerCase() ? `<button data-claim="${n}" data-chain="${k}">Claim</button>` : ''
-    rows.push([route(AMA, k), n, `${fmt(o.outputAmount)} wAMA`, short(recipient), delivery(o), done ? status(true) : claim || status(false)])
+    rows.push([route(AMA, k), n, `${fmt(o.outputAmount)} wAMA`, short(recipient), delivery(o), done ? status(true) : claim || status(false, o.gasDropFee > 0n ? 'relay delivering' : 'to claim')])
   }
   for (const c of settings.chains.filter(c => c.inbound)) {
     const bridge = new Contract(c.bridge, bridgeAbi, rpcOf(c))
@@ -215,8 +270,8 @@ async function showOrders() {
       const k = keyByName(o.dstChain) ?? AMA
       const { received } = await amaGet(`/bridge/received/${c.name}/${c.bridge}/${o.nonce}`)
       const onward = k !== AMA
-      rows.push([route(c.key, k), o.nonce, `${fmt(o.outputAmount)} ${onward ? 'wAMA' : 'AMA'}`, short(onward ? hexlify(o.recipient) : toBase58(o.recipient)), delivery(o),
-                 onward ? status(received, received ? 'passed on' : 'pending') : status(received)])
+      const st = received ? status(true, onward ? 'passed on' : undefined) : await inboundStatus(c, ev, o)
+      rows.push([route(c.key, k), o.nonce, `${fmt(o.outputAmount)} ${onward ? 'wAMA' : 'AMA'}`, short(onward ? hexlify(o.recipient) : toBase58(o.recipient)), delivery(o), st])
     }
   }
   $('orders').innerHTML = rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('') || '<tr><td colspan="6">No recent orders</td></tr>'

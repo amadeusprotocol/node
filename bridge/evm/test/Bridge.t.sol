@@ -3,10 +3,21 @@ pragma solidity ^0.8.30;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {AmadeusLightClient} from "../src/AmadeusLightClient.sol";
-import {AmaBridge} from "../src/AmaBridge.sol";
+import {AmaBridge, ArbSys} from "../src/AmaBridge.sol";
 import {WAMA} from "../src/WAMA.sol";
 import {Hbsmt} from "../src/Hbsmt.sol";
 import {Order} from "../src/Order.sol";
+
+contract MockArbSys {
+    uint256 public calls;
+    address public to;
+    bytes public data;
+
+    function sendTxToL1(address destination, bytes calldata data_) external payable returns (uint256) {
+        (calls, to, data) = (calls + 1, destination, data_);
+        return calls;
+    }
+}
 
 /// Vectors come from Amadeus itself (ex/native/rdb/src/consensus/tests/bridge_vectors_gen.rs):
 /// real BLS aggregate signatures over claims and hbsmt proofs from the node's own tree.
@@ -41,7 +52,7 @@ contract BridgeTest is Test {
         address bridgeAt = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         deployCodeTo("WAMA.sol", abi.encode(bridgeAt), wamaAt);
         wama = WAMA(wamaAt);
-        bridge = new AmaBridge(lc, wama, "bsc-testnet", "amadeus-testnet", admin, 0);
+        bridge = new AmaBridge(lc, wama, "bsc-testnet", "amadeus-testnet", admin, 0, false);
         assertEq(address(bridge), bridgeAt);
     }
 
@@ -209,6 +220,27 @@ contract BridgeTest is Test {
         vm.expectRevert(AmaBridge.WrongCoin.selector);
         bridge.send(1e9, bytes32("amadeus-testnet"), baseWama, vm.parseJsonBytesArray(json, ".roster_b_compressed")[0], "", 0, 0, 0);
         vm.stopPrank();
+    }
+
+    function test_arbitrum_send_posts_the_order_hash_to_l1() public {
+        vm.etch(address(100), address(new MockArbSys()).code);
+        MockArbSys arbSys = MockArbSys(address(100));
+        address arbAt = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        WAMA w = new WAMA(arbAt);
+        AmaBridge arb = new AmaBridge(lc, w, "robinhood-testnet", "amadeus-testnet", admin, 0, true);
+        vm.prank(address(arb));
+        w.mint(recipient, 10e9);
+        bytes memory key = vm.parseJsonBytesArray(json, ".roster_b_compressed")[0];
+        vm.prank(recipient);
+        uint64 n = arb.send(5e9, key, "", 0, 0, 0);
+        assertEq(arbSys.calls(), 1);
+        assertEq(arbSys.to(), address(0));
+        assertEq(arbSys.data(), abi.encodePacked(arb.orders(n)));
+        finalize();
+        bridge.receiveOrder(vm.parseJsonBytes(json, ".order"), 5000, proof(".order_proof"));
+        vm.prank(recipient);
+        bridge.send(1e9, key, "", 0, 0, 0);
+        assertEq(arbSys.calls(), 1);
     }
 
     function test_admin_sets_the_fee_on_sends_to_another_chain() public {
