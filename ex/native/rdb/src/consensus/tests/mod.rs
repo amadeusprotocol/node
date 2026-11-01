@@ -20,3 +20,5 @@ pub mod read_sets;
 pub mod tree_apply;
 pub mod wasm_attachments;
 pub mod validator_set;
+pub mod muts_vecpak;
+pub mod chain_index;

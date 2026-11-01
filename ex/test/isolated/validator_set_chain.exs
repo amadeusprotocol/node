@@ -287,7 +287,8 @@ defmodule ValidatorSetChainTest do
     block = entry(2, keys) |> Map.put(:txs, [txu])
     %{db: db} = :persistent_term.get({:rocksdb, Fabric})
     RDB.hbsmt_seed_contractstate(db, RocksDB.get_prefix("", DB.API.db_handle(%{}, :contractstate)))
-    {rtx, _muts, _reverse, receipts, _, _} = RDB.apply_entry(db, Entry.pack_for_db(block), carrier.pk, carrier.seed, true)
+    DB.Entry.insert(block)
+    {rtx, receipts, _, _} = RDB.apply_entry(db, block.hash, carrier.pk, carrier.seed, true, false, true)
     try do
       assert [%{success: true, result: "ok"}] = receipts
       assert DB.Chain.validator_set_for_height(2, %{rtx: rtx}) == set

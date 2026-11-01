@@ -512,34 +512,21 @@ defmodule FabricGen do
       end
   end
   def apply_entry_1(next_entry) do
-      %{db: db, cf: cf} = :persistent_term.get({:rocksdb, Fabric})
+      %{db: db} = :persistent_term.get({:rocksdb, Fabric})
 
       start_contract_exec = :os.system_time(1000)
 
       entry = next_entry
-      {rtx, m, m_rev, receipts, root_receipts, root_contractstate} = RDB.apply_entry(db, RDB.vecpak_encode(entry),
+      {rtx, receipts, root_receipts, root_contractstate} = RDB.apply_entry(db, entry.hash,
         Application.fetch_env!(:ama, :trainer_pk), Application.fetch_env!(:ama, :trainer_sk),
-        !!Application.fetch_env!(:ama, :testnet)
+        !!Application.fetch_env!(:ama, :testnet), !!Application.fetch_env!(:ama, :archival_node),
+        !!Application.fetch_env!(:ama, :rpc_events)
       )
 
       took_contract_exec = :os.system_time(1000) - start_contract_exec
       if took_contract_exec > 100 do
         IO.puts "Contract Exec took #{took_contract_exec}ms #{next_entry.header.height}"
       end
-
-      rebuild_m_fn = fn(m)->
-        Enum.map(m, fn(inner)->
-          op = :"#{IO.iodata_to_binary(inner[~c"op"])}"
-          case op do
-            :set_bit -> %{op: op, table: IO.iodata_to_binary(inner[~c"table"]), key: IO.iodata_to_binary(inner[~c"key"]), value: :erlang.binary_to_integer("#{inner[~c"value"]}"), bloomsize: :erlang.binary_to_integer("#{inner[~c"bloomsize"]}")}
-            :clear_bit -> %{op: op, table: IO.iodata_to_binary(inner[~c"table"]), key: IO.iodata_to_binary(inner[~c"key"]), value: :erlang.binary_to_integer("#{inner[~c"value"]}")}
-            :delete -> %{op: op, table: IO.iodata_to_binary(inner[~c"table"]), key: IO.iodata_to_binary(inner[~c"key"])}
-            :put -> %{op: op, table: IO.iodata_to_binary(inner[~c"table"]), key: IO.iodata_to_binary(inner[~c"key"]), value: IO.iodata_to_binary(inner[~c"value"])}
-          end
-        end)
-      end
-      m = rebuild_m_fn.(m)
-      m_rev = rebuild_m_fn.(m_rev)
 
       #receipts != [] && IO.inspect receipts
       #IO.inspect {entry.header.height, :erlang.crc32(root_receipts), :erlang.crc32(root_contractstate)}
@@ -554,12 +541,7 @@ defmodule FabricGen do
       height = Entry.height(next_entry)
       claim = Claim.build(height, next_entry.hash, root_contractstate, root_receipts)
 
-      RocksDB.put("temporal_tip", next_entry.hash, %{rtx: rtx, cf: cf.sysconf})
-
-      DB.Entry.apply_into_main_chain(next_entry, m_rev, receipts, root_receipts, root_contractstate, %{rtx: rtx})
-      if Application.fetch_env!(:ama, :archival_node) do
-          DB.Entry.apply_into_main_chain_muts(next_entry.hash, m, %{rtx: rtx})
-      end
+      DB.Entry.apply_mmr(next_entry, root_receipts, root_contractstate, %{rtx: rtx})
 
       set = DB.Chain.validator_set_for_height(height, %{rtx: rtx})
       validators = ValidatorSet.active(set)
@@ -592,6 +574,6 @@ defmodule FabricGen do
       :ok = RocksDB.transaction_commit(rtx)
       DB.Entry.store_validator_record_proof(next_entry)
 
-      %{error: :ok, claim_hash: Claim.hash(claim), muts: m, receipts: receipts}
+      %{error: :ok, claim_hash: Claim.hash(claim), muts: nil, receipts: receipts}
   end
 end

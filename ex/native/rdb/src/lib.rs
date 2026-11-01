@@ -734,13 +734,23 @@ pub fn fixed<const N: usize>(t: Term<'_>) -> Result<[u8; N], Error> {
 fn apply_entry<'a>(
     env: Env<'a>,
     db: ResourceArc<DbResource>,
-    entry_vecpak: Binary,
+    entry_hash: Binary,
     pk: Binary,
     sk: Binary,
     testnet: bool,
+    archival: bool,
+    want_receipts: bool,
 ) -> Result<Term<'a>, Error> {
     let __res: std::thread::Result<Result<Term<'a>, Error>> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let entry = crate::model::entry::from_bytes(entry_vecpak.as_slice()).map_err(|_| Error::BadArg)?;
+        let entry_hash = entry_hash.as_slice().to_vec();
+        let entry_cf = db.db.cf_handle("entry").ok_or(Error::BadArg)?;
+        let entry_bytes = db.db.get_cf(&entry_cf, &entry_hash).map_err(|_| Error::BadArg)?.ok_or_else(|| Error::Term(Box::new("entry_not_found")))?;
+        drop(entry_cf);
+        let entry = crate::model::entry::from_bytes(&entry_bytes).map_err(|_| Error::BadArg)?;
+        if entry.hash != entry_hash {
+            return Err(Error::Term(Box::new("entry_hash_mismatch")));
+        }
+        let chain_index = consensus::chain_index::prepare(&entry_bytes, &entry).map_err(|e| Error::Term(Box::new(e)))?;
 
         let txn_opts = TransactionOptions::default();
         let write_opts = WriteOptions::default();
@@ -755,6 +765,15 @@ fn apply_entry<'a>(
             testnet,
         );
 
+        let entry_meta = db.db.cf_handle("entry_meta").ok_or(Error::BadArg)?;
+        let meta_key = |suffix: &[u8]| crate::bcat(&[b"entry:", &entry_hash, suffix]);
+        txn.put_cf(&entry_meta, meta_key(b":muts_rev"), consensus_muts::mutations_to_vecpak(&muts_rev)).map_err(|_| Error::BadArg)?;
+        if archival {
+            txn.put_cf(&entry_meta, meta_key(b":muts"), consensus_muts::mutations_to_vecpak(&muts)).map_err(|_| Error::BadArg)?;
+        }
+        drop(entry_meta);
+        consensus::chain_index::write(&db.db, &txn, &chain_index, &receipts, &root_receipts, &root_contractstate).map_err(|e| Error::Term(Box::new(e)))?;
+
         let tx_static: Tx<'static> = unsafe { std::mem::transmute::<Tx<'_>, Tx<'static>>(txn) };
         let term_txn = ResourceArc::new(TxResource { _db: db, tx: Mutex::new(Some(tx_static)) }).encode(env);
 
@@ -764,7 +783,7 @@ fn apply_entry<'a>(
         ob2.as_mut_slice().copy_from_slice(&root_contractstate);
 
         let mut receipts_list = Vec::new();
-        for r in receipts {
+        for r in receipts.into_iter().filter(|_| want_receipts) {
             let mut map = Term::map_new(env);
             map = map.map_put(atoms::success(), r.success).ok().unwrap();
             map = map.map_put(atoms::txid(), to_binary2(env, &r.txid)).ok().unwrap();
@@ -777,8 +796,6 @@ fn apply_entry<'a>(
 
         Ok((
             term_txn,
-            consensus_muts::mutations_to_map(muts),
-            consensus_muts::mutations_to_map(muts_rev),
             receipts_list,
             Binary::from_owned(ob1, env).encode(env),
             Binary::from_owned(ob2, env).encode(env),

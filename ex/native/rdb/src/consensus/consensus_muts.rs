@@ -51,3 +51,30 @@ pub fn mutations_to_map(muts: Vec<Mutation>) -> Vec<HashMap<Vec<u8>, Vec<u8>>> {
 
     out
 }
+
+pub fn mutations_to_vecpak(muts: &[Mutation]) -> Vec<u8> {
+    use vecpak::Term;
+    let bin = |b: &[u8]| Term::Binary(b.to_vec());
+    let field = |k: &[u8], v: Term| (Term::Binary(k.to_vec()), v);
+    let list = muts
+        .iter()
+        .map(|m| {
+            Term::PropList(match m {
+                Mutation::Put { op, table, key, value } => vec![field(b"op", bin(op)), field(b"table", bin(table)), field(b"key", bin(key)), field(b"value", bin(value))],
+                Mutation::Delete { op, table, key } => vec![field(b"op", bin(op)), field(b"table", bin(table)), field(b"key", bin(key))],
+                Mutation::SetBit { op, table, key, value, bloomsize } => vec![
+                    field(b"op", bin(op)),
+                    field(b"table", bin(table)),
+                    field(b"key", bin(key)),
+                    field(b"value", Term::VarInt(*value as i128)),
+                    field(b"bloomsize", Term::VarInt(*bloomsize as i128)),
+                ],
+                Mutation::ClearBit { op, table, key, value } => {
+                    vec![field(b"op", bin(op)), field(b"table", bin(table)), field(b"key", bin(key)), field(b"value", Term::VarInt(*value as i128))]
+                }
+            })
+        })
+        .collect();
+    vecpak::encode(Term::List(list)).unwrap_or_else(|e| std::panic::panic_any(e))
+}
+

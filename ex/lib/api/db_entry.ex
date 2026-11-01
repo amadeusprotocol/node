@@ -123,16 +123,7 @@ defmodule DB.Entry do
   end
 
   def apply_into_main_chain(entry, muts_rev, receipts, root_receipts, root_contractstate, db_opts = %{rtx: _}) do
-    prev_mmr = DB.MMR.load_or_empty(db_opts)
-    if prev_mmr.size != entry.header.height do
-      raise "apply_into_main_chain: MMR size #{prev_mmr.size} != entry height #{entry.header.height}; entry is not the next block above the root, refusing to append"
-    end
-    claim = Claim.build(entry.header.height, entry.hash, root_contractstate, root_receipts)
-    DB.MMR.snapshot_before(entry.hash, prev_mmr, db_opts)
-    new_mmr = MMR.append(prev_mmr, Claim.mmr_leaf(claim))
-    DB.MMR.save(new_mmr, db_opts)
-
-    # IO.puts "MMR h=#{entry.header.height} root_chain=#{Base.encode16(MMR.root_chain(DB.MMR.chain_id(), new_mmr), case: :lower)}"
+    apply_mmr(entry, root_receipts, root_contractstate, db_opts)
 
     entry_packed = Entry.pack_for_db(entry)
     RocksDB.put(entry.hash, entry_packed, db_handle(db_opts, :entry, %{}))
@@ -169,6 +160,17 @@ defmodule DB.Entry do
     end)
   end
 
+  def apply_mmr(entry, root_receipts, root_contractstate, db_opts = %{rtx: _}) do
+    prev_mmr = DB.MMR.load_or_empty(db_opts)
+    if prev_mmr.size != entry.header.height do
+      raise "apply_into_main_chain: MMR size #{prev_mmr.size} != entry height #{entry.header.height}; entry is not the next block above the root, refusing to append"
+    end
+    claim = Claim.build(entry.header.height, entry.hash, root_contractstate, root_receipts)
+    DB.MMR.snapshot_before(entry.hash, prev_mmr, db_opts)
+    new_mmr = MMR.append(prev_mmr, Claim.mmr_leaf(claim))
+    DB.MMR.save(new_mmr, db_opts)
+  end
+
   #a block that writes the validator record for height+1 keeps that record's proof against
   #its own state root (the tree is not kept per height): bridges adopt new sets from it.
   #call after the block is committed, so the tip tree is exactly this block's state
@@ -184,10 +186,6 @@ defmodule DB.Entry do
   def validator_record_proof(hash, db_opts \\ %{}) do
     proof = RocksDB.get("entry:#{hash}:validator_record_proof", db_handle(db_opts, :entry_meta, %{}))
     proof && RDB.vecpak_decode(proof)
-  end
-
-  def apply_into_main_chain_muts(hash, muts, db_opts = %{rtx: _}) do
-    RocksDB.put("entry:#{hash}:muts", RDB.vecpak_encode(muts), db_handle(db_opts, :entry_meta, %{}))
   end
 
   def delete_UNSAFE(_a, _db_opts \\ %{})

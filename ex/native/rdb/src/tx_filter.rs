@@ -29,6 +29,37 @@ pub fn create_filter_key(parts: &[&[u8]]) -> [u8; 16] {
     output
 }
 
+pub fn filter_rows(full_hash: &[u8], nonce: u64, signer: &[u8], contract: &[u8], func: &[u8], arg0: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut hash8 = [0u8; 8];
+    let len = full_hash.len().min(8);
+    hash8[0..len].copy_from_slice(&full_hash[0..len]);
+    let nonce_bytes = nonce.to_be_bytes();
+    let row = |parts: &[&[u8]]| ([create_filter_key(parts).as_slice(), &nonce_bytes].concat(), hash8.to_vec());
+
+    match (contract, func) {
+        (b"Epoch", b"submit_sol") => vec![
+            row(&[signer, ZERO, ZERO, ZERO]),
+            row(&[ZERO, arg0, ZERO, ZERO]),
+            row(&[signer, ZERO, contract, ZERO]),
+            row(&[signer, ZERO, contract, func]),
+            row(&[ZERO, ZERO, contract, ZERO]),
+            row(&[ZERO, ZERO, contract, func]),
+        ],
+        _ => vec![
+            row(&[signer, ZERO, ZERO, ZERO]),
+            row(&[ZERO, arg0, ZERO, ZERO]),
+            row(&[signer, arg0, ZERO, ZERO]),
+            row(&[ZERO, ZERO, contract, ZERO]),
+            row(&[ZERO, ZERO, contract, func]),
+            row(&[signer, ZERO, contract, ZERO]),
+            row(&[signer, ZERO, contract, func]),
+            row(&[ZERO, arg0, contract, ZERO]),
+            row(&[ZERO, arg0, contract, func]),
+            row(&[signer, arg0, contract, func]),
+        ],
+    }
+}
+
 pub fn build_tx_hashfilters<'a>(env: Env<'a>, txus: Vec<Term<'a>>) -> NifResult<Vec<(Binary<'a>, Binary<'a>)>> {
     let mut all_filters = Vec::with_capacity(txus.len() * 8);
 
@@ -36,18 +67,9 @@ pub fn build_tx_hashfilters<'a>(env: Env<'a>, txus: Vec<Term<'a>>) -> NifResult<
         let full_tx_hash: Binary = txu.map_get(hash())?.decode()?;
         let full_hash_slice = full_tx_hash.as_slice();
 
-        //take only 8 bytes of the 32byte hash
-        let mut prefix_bytes = [0u8; 8];
-        let len = full_hash_slice.len().min(8);
-        prefix_bytes[0..len].copy_from_slice(&full_hash_slice[0..len]);
-        let mut tx_val_bin = NewBinary::new(env, 8);
-        tx_val_bin.as_mut_slice().copy_from_slice(&prefix_bytes);
-        let tx_hash8: Binary = tx_val_bin.into();
-
         let tx = txu.map_get(tx())?;
 
         let nonce_u64: u64 = tx.map_get(nonce())?.decode()?;
-        let nonce_bytes = nonce_u64.to_be_bytes();
 
         let signer_bin: Binary = tx.map_get(signer())?.decode()?;
         let signer = signer_bin.as_slice();
@@ -66,42 +88,12 @@ pub fn build_tx_hashfilters<'a>(env: Env<'a>, txus: Vec<Term<'a>>) -> NifResult<
             ZERO
         };
 
-        let mut push_key = |parts: &[&[u8]]| {
-            let raw_hash = create_filter_key(parts);
-
-            let mut bin = NewBinary::new(env, 24);
-            let s = bin.as_mut_slice();
-
-            s[0..16].copy_from_slice(&raw_hash);
-            s[16..24].copy_from_slice(&nonce_bytes);
-
-            all_filters.push((bin.into(), tx_hash8));
-        };
-
-        match (contract, func) {
-            (b"Epoch", b"submit_sol") => {
-                push_key(&[signer, ZERO, ZERO, ZERO]);
-                push_key(&[ZERO, arg0, ZERO, ZERO]);
-                // Do we care about this?
-                // tx_filter CF goes from 10G to 22G if we add this back
-                // reevaluate later difference is OK
-                push_key(&[signer, ZERO, contract, ZERO]);
-                push_key(&[signer, ZERO, contract, func]);
-                push_key(&[ZERO, ZERO, contract, ZERO]);
-                push_key(&[ZERO, ZERO, contract, func]);
-            }
-            _ => {
-                push_key(&[signer, ZERO, ZERO, ZERO]);
-                push_key(&[ZERO, arg0, ZERO, ZERO]);
-                push_key(&[signer, arg0, ZERO, ZERO]);
-                push_key(&[ZERO, ZERO, contract, ZERO]);
-                push_key(&[ZERO, ZERO, contract, func]);
-                push_key(&[signer, ZERO, contract, ZERO]);
-                push_key(&[signer, ZERO, contract, func]);
-                push_key(&[ZERO, arg0, contract, ZERO]);
-                push_key(&[ZERO, arg0, contract, func]);
-                push_key(&[signer, arg0, contract, func]);
-            }
+        for (key, value) in filter_rows(full_hash_slice, nonce_u64, signer, contract, func, arg0) {
+            let mut key_bin = NewBinary::new(env, key.len());
+            key_bin.as_mut_slice().copy_from_slice(&key);
+            let mut value_bin = NewBinary::new(env, value.len());
+            value_bin.as_mut_slice().copy_from_slice(&value);
+            all_filters.push((key_bin.into(), value_bin.into()));
         }
     }
 

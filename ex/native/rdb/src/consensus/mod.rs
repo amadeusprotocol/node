@@ -8,6 +8,7 @@ pub mod hbsmt_rdb;
 pub mod bls12_381;
 pub mod bridge;
 
+pub mod chain_index;
 pub mod consensus_apply;
 pub mod consensus_kv;
 pub mod consensus_muts;
