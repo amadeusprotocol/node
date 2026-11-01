@@ -30,6 +30,10 @@ export default {
     chains: {
       bsc: chain({ name: 'bsc', label: 'BNB Smart Chain', chainId: 56, rpc: 'https://bsc-rpc.publicnode.com', explorer: 'https://bscscan.com', gasSymbol: 'BNB', finality: 'bsc', amaPerGasCoin: '9360' }),
       eth: chain({ name: 'eth', label: 'Ethereum', chainId: 1, rpc: 'https://ethereum-rpc.publicnode.com', gasSymbol: 'ETH', finality: 'eth' }),
+      arbitrum: chain({ name: 'arbitrum', label: 'Arbitrum One', chainId: 42161, rpc: 'https://arb1.arbitrum.io/rpc', explorer: 'https://arbiscan.io', gasSymbol: 'ETH', finality: 'arbitrum',
+        arbitrum: { parent: 'eth', outbox: '0x0B9857ae2D4A3DBe74ffE1d7DF045bb7F96E4840' }, finalTag: 'safe', amaPerGasCoin: '28148', gasDrop: '0.00001' }),
+      polygon: chain({ name: 'polygon', label: 'Polygon', chainId: 137, rpc: 'https://polygon-bor-rpc.publicnode.com', explorer: 'https://polygonscan.com', gasSymbol: 'POL', finality: 'polygon',
+        polygon: { parent: 'eth', rootChain: '0x86E4Dc95c7FBdBf52e33D563BbDB00823894C287' }, amaPerGasCoin: '1.13', gasDrop: '0.02' }),
       base: chain({ name: 'base', label: 'Base', chainId: 8453, rpc: 'https://base-rpc.publicnode.com', explorer: 'https://basescan.org', gasSymbol: 'ETH', finality: 'base', inbound: false, opStack: true, amaPerGasCoin: '28148', gasDrop: '0.00001' }),
     },
   },
@@ -68,6 +72,23 @@ export default {
         bridge: '0xfD0a63B491662ddd37c86D68948E6793300C3E8e', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
         wama: '0x989D3047bB7C9f4cdE03F579C1dA82a2e1AD8A9e', from: '146599135',
         amaPerGasCoin: '28148',
+      }),
+      arbitrum: chain({
+        name: 'arbitrum-testnet', label: 'Arbitrum Sepolia', chainId: 421614, rpc: 'https://sepolia-rollup.arbitrum.io/rpc', explorer: 'https://sepolia.arbiscan.io', gasSymbol: 'ETH', finality: 'arbitrum',
+        arbitrum: { parent: 'eth', outbox: '0x65f07C7D521164a4d5DaC6eB8Fac8DA067A3B78F' },
+        finalTag: 'safe', deliveryGas: 900000, gasDrop: '0.00001', amadeusCost: '100000000',
+        bridge: '0x9d9Af25190820fdbd18336C00959875AE9517817', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
+        wama: '0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B', from: '325113799',
+        amaPerGasCoin: '28148',
+      }),
+      //Polygon PoS on Sepolia: orders reach Amadeus once a checkpoint covers them (~10 min apart) and
+      //Sepolia finalized it (chains/polygon.js). 1.13 = POL $0.0905 / AMA $0.08
+      polygon: chain({
+        name: 'polygon-testnet', label: 'Polygon Amoy', chainId: 80002, rpc: 'https://polygon-amoy-bor-rpc.publicnode.com', explorer: 'https://amoy.polygonscan.com', gasSymbol: 'POL', finality: 'polygon',
+        polygon: { parent: 'eth', rootChain: '0xbd07D7E1E93c8d4b2a261327F3C28a8EA7167209' },
+        deliveryGas: 900000, gasDrop: '0.02', maxGasDrop: '200000000000000000', amadeusCost: '100000000',
+        bridge: '', lightClient: '', wama: '', from: '',
+        amaPerGasCoin: '1.13',
       }),
       //Amadeus -> Base only (inbound: false): Amadeus cannot verify Base until it follows Ethereum.
       //Its bridge's sends stay paused; BSC reaches it through Amadeus

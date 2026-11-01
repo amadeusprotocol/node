@@ -14,7 +14,7 @@
 use crate::bcat;
 use crate::consensus::bic::{coin, protocol};
 use crate::consensus::bridge::bsc::{finality, header, keccak256, mpt};
-use crate::consensus::bridge::{arb, eth};
+use crate::consensus::bridge::{arb, eth, polygon};
 use crate::consensus::bridge::order::{chain_name, Order};
 use crate::consensus::consensus_apply::ApplyEnv;
 use crate::consensus::consensus_kv::{exec_budget_decr, kv_delete, kv_exists, kv_get, kv_increment, kv_put};
@@ -103,6 +103,10 @@ pub const ROUTES_TESTNET: &[Route] = &[
     Route { id: b"eth-to-ama", outbound: false, remote_chain: b"eth", local_coin: b"AMA", remote_coin: &ETH_TESTNET_WAMA, kind: Kind::Native },
     Route { id: b"ama-to-robinhood", outbound: true, remote_chain: b"robinhood", local_coin: b"AMA", remote_coin: &ROBINHOOD_TESTNET_WAMA, kind: Kind::Native },
     Route { id: b"robinhood-to-ama", outbound: false, remote_chain: b"robinhood", local_coin: b"AMA", remote_coin: &ROBINHOOD_TESTNET_WAMA, kind: Kind::Native },
+    Route { id: b"ama-to-arbitrum", outbound: true, remote_chain: b"arbitrum", local_coin: b"AMA", remote_coin: &ARBITRUM_TESTNET_WAMA, kind: Kind::Native },
+    Route { id: b"arbitrum-to-ama", outbound: false, remote_chain: b"arbitrum", local_coin: b"AMA", remote_coin: &ARBITRUM_TESTNET_WAMA, kind: Kind::Native },
+    Route { id: b"ama-to-polygon", outbound: true, remote_chain: b"polygon", local_coin: b"AMA", remote_coin: &POLYGON_TESTNET_WAMA, kind: Kind::Native },
+    Route { id: b"polygon-to-ama", outbound: false, remote_chain: b"polygon", local_coin: b"AMA", remote_coin: &POLYGON_TESTNET_WAMA, kind: Kind::Native },
 ];
 
 //Base: Amadeus -> Base only, until Amadeus verifies Base (an Ethereum light client, as Base's state
@@ -124,6 +128,8 @@ pub fn bsc(env: &ApplyEnv) -> &'static Remote {
 
 pub const ETH: Remote = Remote { name: b"eth", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
 pub const ROBINHOOD: Remote = Remote { name: b"robinhood", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
+pub const ARBITRUM: Remote = Remote { name: b"arbitrum", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
+pub const POLYGON: Remote = Remote { name: b"polygon", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
 //Ethereum Sepolia (chain id 11155111)
 //AmaBridge 0x989D3047bB7C9f4cdE03F579C1dA82a2e1AD8A9e
 pub const ETH_TESTNET: Remote = Remote { name: b"eth", address_len: 20, contract: [0x98, 0x9d, 0x30, 0x47, 0xbb, 0x7c, 0x9f, 0x4c, 0xde, 0x03, 0xf5, 0x79, 0xc1, 0xda, 0x82, 0xa2, 0xe1, 0xad, 0x8a, 0x9e], orders_slot: 0 };
@@ -147,8 +153,45 @@ pub struct Arbitrum {
 //Outbox 0x8D180Caf588f3Da027BEf1F42a106Da93F90b166 on Sepolia
 pub const ROBINHOOD_TESTNET_ARB: Arbitrum = Arbitrum { parent: b"eth", outbox: [0x8d, 0x18, 0x0c, 0xaf, 0x58, 0x8f, 0x3d, 0xa0, 0x27, 0xbe, 0xf1, 0xf4, 0x2a, 0x10, 0x6d, 0xa9, 0x3f, 0x90, 0xb1, 0x66] };
 
-fn arbitrum(env: &ApplyEnv, chain: &[u8]) -> &'static Arbitrum {
-    if env.testnet && chain == network_name(env, b"robinhood") { &ROBINHOOD_TESTNET_ARB } else { panic_any("bridge_not_arbitrum") }
+fn arbitrum_config(env: &ApplyEnv, chain: &[u8]) -> &'static Arbitrum {
+    if !env.testnet { panic_any("bridge_not_arbitrum") }
+    if chain == network_name(env, b"robinhood") { &ROBINHOOD_TESTNET_ARB }
+    else if chain == network_name(env, b"arbitrum") { &ARBITRUM_TESTNET_ARB }
+    else { panic_any("bridge_not_arbitrum") }
+}
+
+//Arbitrum Sepolia (chain id 421614)
+//AmaBridge 0x9d9Af25190820fdbd18336C00959875AE9517817
+pub const ARBITRUM_TESTNET: Remote = Remote { name: b"arbitrum", address_len: 20, contract: [0x9d, 0x9a, 0xf2, 0x51, 0x90, 0x82, 0x0f, 0xdb, 0xd1, 0x83, 0x36, 0xc0, 0x09, 0x59, 0x87, 0x5a, 0xe9, 0x51, 0x78, 0x17], orders_slot: 0 };
+//WAMA 0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B
+pub const ARBITRUM_TESTNET_WAMA: [u8; 20] = [0xc1, 0x56, 0x44, 0xe8, 0x88, 0x5f, 0x9e, 0xdb, 0x05, 0xf0, 0xd6, 0xea, 0xbe, 0x17, 0x01, 0xc7, 0xd8, 0x0d, 0x13, 0x2b];
+//Outbox 0x65f07C7D521164a4d5DaC6eB8Fac8DA067A3B78F on Sepolia
+pub const ARBITRUM_TESTNET_ARB: Arbitrum = Arbitrum { parent: b"eth", outbox: [0x65, 0xf0, 0x7c, 0x7d, 0x52, 0x11, 0x64, 0xa4, 0xd5, 0xda, 0xc6, 0xeb, 0x8f, 0xac, 0x8d, 0xa0, 0x67, 0xa3, 0xb7, 0x8f] };
+
+//Polygon Amoy (chain id 80002)
+//AmaBridge POLYGON_TESTNET_BRIDGE
+pub const POLYGON_TESTNET: Remote = Remote { name: b"polygon", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
+//WAMA POLYGON_TESTNET_WAMA
+pub const POLYGON_TESTNET_WAMA: [u8; 20] = [0u8; 20];
+
+/// a Polygon PoS chain: its blocks are proven by checkpoints in the parent chain's RootChain
+pub struct PolygonPos {
+    pub parent: &'static [u8],
+    pub root_chain: [u8; 20],
+}
+//RootChain 0xbd07D7E1E93c8d4b2a261327F3C28a8EA7167209 on Sepolia
+pub const POLYGON_TESTNET_POS: PolygonPos = PolygonPos { parent: b"eth", root_chain: [0xbd, 0x07, 0xd7, 0xe1, 0xe9, 0x3c, 0x8d, 0x4b, 0x2a, 0x26, 0x13, 0x27, 0xf3, 0xc2, 0x8a, 0x8e, 0xa7, 0x16, 0x72, 0x09] };
+
+pub fn polygon(env: &ApplyEnv) -> &'static Remote {
+    if env.testnet { &POLYGON_TESTNET } else { &POLYGON }
+}
+
+fn polygon_config(env: &ApplyEnv, chain: &[u8]) -> &'static PolygonPos {
+    if env.testnet && chain == network_name(env, b"polygon") { &POLYGON_TESTNET_POS } else { panic_any("bridge_not_polygon") }
+}
+
+pub fn arbitrum(env: &ApplyEnv) -> &'static Remote {
+    if env.testnet { &ARBITRUM_TESTNET } else { &ARBITRUM }
 }
 
 pub fn robinhood(env: &ApplyEnv) -> &'static Remote {
@@ -173,7 +216,7 @@ pub fn local_chain(env: &ApplyEnv) -> [u8; 32] {
 }
 
 fn remote(env: &ApplyEnv, name: &[u8]) -> &'static Remote {
-    [bsc(env), base(env), eth(env), robinhood(env)].into_iter().find(|r| network_name(env, r.name) == name).unwrap_or_else(|| panic_any("bridge_unknown_chain"))
+    [bsc(env), base(env), eth(env), robinhood(env), arbitrum(env), polygon(env)].into_iter().find(|r| network_name(env, r.name) == name).unwrap_or_else(|| panic_any("bridge_unknown_chain"))
 }
 
 fn route(env: &ApplyEnv, outbound: bool, remote_chain: &[u8], local_coin: &[u8], remote_coin: &[u8]) -> &'static Route {
@@ -375,7 +418,7 @@ pub fn call_receive_arb(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let [src_chain, l1_height, packed, account_proof, storage_proof, l2_block, l1_block, timestamp, index, merkle] =
         <[Vec<u8>; 10]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
     receive_order(env, &src_chain, &packed, |env, remote, _| {
-        let a = arbitrum(env, &src_chain);
+        let a = arbitrum_config(env, &src_chain);
         if merkle.len() % 32 != 0 { panic_any("invalid_args") }
         let siblings: Vec<[u8; 32]> = merkle.chunks_exact(32).map(|c| c.try_into().unwrap()).collect();
         let data = keccak256(&packed);
@@ -392,6 +435,45 @@ pub fn call_receive_arb(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
         let word = mpt::verify_storage(&account.storage_root, &arb::roots_slot(&send_root), &refs(&storage_proof))
             .unwrap_or_else(|_| panic_any("bridge_invalid_storage_proof"));
         if word == [0u8; 32] { panic_any("bridge_order_not_found") }
+    });
+}
+
+/// receive_polygon(chain, l1_height, order, root_chain_account_proof, root_storage_proof,
+/// start_storage_proof, checkpoint_id, block_number, timestamp, transactions_root, receipts_root,
+/// block_proof, tx_index, receipt_proof, log_index): the order's OrderCreated log, from the bridge,
+/// is in a receipt of a block that checkpoint `checkpoint_id` covers, which the parent chain's
+/// RootChain holds at its stored root for l1_height (block_proof: 32-byte siblings)
+pub fn call_receive_polygon(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    let [src_chain, l1_height, packed, account_proof, root_proof, start_proof, checkpoint_id, number, timestamp, transactions_root, receipts_root, block_proof, tx_index, receipt_proof, log_index] =
+        <[Vec<u8>; 15]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
+    receive_order(env, &src_chain, &packed, |env, remote, order| {
+        let pos = polygon_config(env, &src_chain);
+        let root: [u8; 32] = kv_get(env, &key_root(&network_name(env, pos.parent), parse_u64(&l1_height)))
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or_else(|| panic_any("bridge_unknown_root"));
+        let (account_proof, root_proof, start_proof, receipt_proof) = (proof_list(&account_proof), proof_list(&root_proof), proof_list(&start_proof), proof_list(&receipt_proof));
+        exec_budget_decr(env, COST_PROOF_NODE * (account_proof.len() + root_proof.len() + start_proof.len() + receipt_proof.len() + 1) as i128);
+        let account = mpt::verify_account(&root, &pos.root_chain, &refs(&account_proof))
+            .ok().flatten().unwrap_or_else(|| panic_any("bridge_invalid_account_proof"));
+        let id = parse_u64(&checkpoint_id);
+        let storage = |slot: [u8; 32], proof: &Vec<Vec<u8>>| mpt::verify_storage(&account.storage_root, &slot, &refs(proof)).unwrap_or_else(|_| panic_any("bridge_invalid_storage_proof"));
+        let checkpoint = storage(polygon::header_block_slot(id, 0), &root_proof);
+        let start_word = storage(polygon::header_block_slot(id, 1), &start_proof);
+        if checkpoint == [0u8; 32] || start_word[..24] != [0u8; 24] { panic_any("bridge_unknown_checkpoint") }
+        let (start, number) = (u64::from_be_bytes(start_word[24..].try_into().unwrap()), parse_u64(&number));
+        let roots: [[u8; 32]; 2] = [&transactions_root, &receipts_root].map(|r| r.as_slice().try_into().unwrap_or_else(|_| panic_any("invalid_args")));
+        if block_proof.len() % 32 != 0 || number < start { panic_any("bridge_invalid_block_proof") }
+        let siblings: Vec<[u8; 32]> = block_proof.chunks_exact(32).map(|c| c.try_into().unwrap()).collect();
+        let leaf = polygon::checkpoint_leaf(number, parse_u64(&timestamp), &roots[0], &roots[1]);
+        if polygon::checkpoint_root(&leaf, number - start, &siblings) != Some(checkpoint) { panic_any("bridge_invalid_block_proof") }
+        let receipt = mpt::verify_key(&roots[1], &polygon::receipt_key(parse_u64(&tx_index)), &refs(&receipt_proof))
+            .ok().flatten().unwrap_or_else(|| panic_any("bridge_invalid_receipt_proof"));
+        let (ok, logs) = polygon::receipt_logs(&receipt).unwrap_or_else(|_| panic_any("bridge_invalid_receipt"));
+        let log = logs.get(parse_u64(&log_index) as usize).filter(|_| ok).unwrap_or_else(|| panic_any("bridge_order_not_found"));
+        let mut nonce = [0u8; 32];
+        nonce[24..].copy_from_slice(&order.nonce.to_be_bytes());
+        if log.address != remote.contract || log.topics.len() != 2 || log.topics[0] != keccak256(b"OrderCreated(uint64,bytes)") || log.topics[1] != nonce
+            || polygon::abi_bytes(log.data) != Some(packed.as_slice()) { panic_any("bridge_order_not_found") }
     });
 }
 

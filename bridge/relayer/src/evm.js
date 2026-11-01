@@ -6,6 +6,8 @@ import { bridgeAbi, lightClientAbi } from './abi.js'
 import { decodeValidatorRecord, rosterEip, g2Eip, pad20, unpackOrder } from './codec.js'
 import { finalities } from './chains/index.js'
 import { arbitrumDelivery } from './chains/arbitrum.js'
+import { polygonDelivery } from './chains/polygon.js'
+import { parentChainOf } from './chains/parent.js'
 import { paysToChain, costToChain, DELIVERY_BYTES } from './tips.js'
 
 const LOG_QUERY_BLOCKS = 1000
@@ -42,7 +44,10 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
   //received as of `tag`; a bridge not deployed yet at that block has received nothing
   const receivedAt = (n, tag) => bridge.received(n, { blockTag: tag }).catch(e => { if (e.code === 'BAD_DATA' || e.code === 'CALL_EXCEPTION') return false; throw e })
   const finality = finalities[chain.finality]({ ama, chain, block, rpc, log, sleep })
-  const arbitrum = chain.arbitrum && arbitrumDelivery({ chain, parentChain, ama, provider, rpc, log })
+  //chains Amadeus verifies through their parent (Ethereum)
+  const parent = parentChain && parentChainOf(parentChain, ama, log)
+  const viaParent = chain.arbitrum ? arbitrumDelivery({ chain, parentChain, parent, ama, provider, rpc, log })
+    : chain.polygon ? polygonDelivery({ chain, parentChain, parent, ama, rpc, log }) : null
 
   const eipRosterAt = async h => rosterEip(decodeValidatorRecord((await ama.validatorSet(h)).record).validators)
   const toSolidityProof = p => ({ siblings: p.siblings.map(s => hexlify(fromBase58(s))), leafPath: hexlify(fromBase58(p.terminus.path)), identity: hexlify(fromBase58(p.terminus.identity_hash)), valueHash: hexlify(fromBase58(p.terminus.value_hash)) })
@@ -157,7 +162,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
       todo.push({ it: { ...it, seen: undefined }, packed, ev })
     }
     if (todo.length === 0) return failed
-    if (arbitrum) return arbitrum.deliver(todo, failed)
+    if (viaParent) return viaParent.deliver(todo, failed)
     //public RPCs prove only near the head: proofs are taken there and kept with the order (returned
     //with it as failed, so the queue stores them) until Amadeus stores that block's root, once the
     //chain finalized it (BSC: seconds; Ethereum: ~15 min)

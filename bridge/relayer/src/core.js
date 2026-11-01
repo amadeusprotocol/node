@@ -20,7 +20,7 @@ export function createRelay(net, privateKey, log = console.log) {
   const paysForDeliveryToAmadeus = o => o.dstChain === net.amadeus.chain ? paysToAmadeus(net, o, byName[o.srcChain]?.chain)
     : Boolean(byName[o.dstChain]) && forRelay(byName[o.dstChain].chain, o) && o.gasDropFee >= costToAmadeus(net, 0n, byName[o.srcChain]?.chain)
   const chains = Object.fromEntries(chainsLive.map(([key, chain]) =>
-    [key, createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToAmadeus, log, parentChain: chain.arbitrum && net.chains[chain.arbitrum.parent] })]))
+    [key, createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToAmadeus, log, parentChain: net.chains[(chain.arbitrum ?? chain.polygon)?.parent] })]))
   const byName = Object.fromEntries(chainsLive.map(([key, chain]) => [chain.name, { evm: chains[key], chain }]))
 
   //decided on final state only: a rollback could replace an order at the same nonce

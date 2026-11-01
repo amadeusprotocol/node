@@ -49,6 +49,11 @@ fn decode_path(encoded: &[u8]) -> Result<(bool, Vec<u8>), Error> {
 /// Value stored under `key` (32-byte keccak path) in the trie with root `root`, or None if
 /// the proof shows it is absent. Every proof node must be used, in order.
 pub fn verify(root: &[u8; 32], key: &[u8; 32], proof: &[&[u8]]) -> Result<Option<Vec<u8>>, Error> {
+    verify_key(root, key, proof)
+}
+
+/// as verify, for a key of any length (receipt and transaction tries key by rlp(index))
+pub fn verify_key(root: &[u8; 32], key: &[u8], proof: &[&[u8]]) -> Result<Option<Vec<u8>>, Error> {
     let path: Vec<u8> = key.iter().flat_map(|b| [b >> 4, b & 0x0f]).collect();
     let mut pos = 0;
     let mut nodes = proof.iter();

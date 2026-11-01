@@ -195,7 +195,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body, (_, v) =>
 function pageSettings(net) {
   const n = networks[net]
   const chains = Object.entries(n.chains).filter(([, c]) => live(c)).map(([key, c]) => ({
-    key, name: c.name, label: c.label, chainId: c.chainId, rpc: c.rpc, explorer: c.explorer, gasSymbol: c.gasSymbol, inbound: c.inbound !== false, opStack: Boolean(c.opStack), arbitrum: c.arbitrum ?? null,
+    key, name: c.name, label: c.label, chainId: c.chainId, rpc: c.rpc, explorer: c.explorer, gasSymbol: c.gasSymbol, inbound: c.inbound !== false, opStack: Boolean(c.opStack), arbitrum: c.arbitrum ?? null, polygon: c.polygon ?? null,
     bridge: c.bridge, lightClient: c.lightClient, wama: c.wama, from: Number(c.from || 0),
     amaPerGasCoin: c.amaPerGasCoin, amadeusCost: c.amadeusCost, deliveryGas: c.deliveryGas, gasDrop: c.gasDrop, maxGasDrop: c.maxGasDrop,
   }))

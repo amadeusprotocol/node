@@ -5,8 +5,8 @@ You send, then either claim yourself or pay a relay its delivery cost in the ord
 Working code for every step: `relayer/src/evm.js` (delivery) and `relayer/frontend/app.js` (send, claim).
 
 Relay and frontend: https://mainnet-bridge.ama.one, https://testnet-bridge.ama.one
-(networks, chains and addresses: `relayer/src/networks.js`). On testnet BSC, Ethereum Sepolia and Robinhood
-send and receive; Base receives only.
+(networks, chains and addresses: `relayer/src/networks.js`). On testnet BSC, Ethereum Sepolia, Robinhood,
+Arbitrum Sepolia and Polygon Amoy send and receive; Base receives only.
 The steps below are the same on every EVM chain; examples use BSC testnet (`bsc-testnet`).
 
 Testnet (Amadeus testnet ⇄ BSC Chapel, chain id 97):
@@ -86,9 +86,10 @@ committees (`GET /bridge/remote_set/eth-testnet`: period, current and next commi
      also steps the committees forward each period (best update per period, with next committee)
    - `Bridge.receive(["eth-testnet", h, ...])` as above.
 
-## Robinhood (Arbitrum) → AMA
+## Robinhood, Arbitrum (any Arbitrum chain) → AMA
 The bridge also sends the order's hash as an L2 -> L1 message (`ArbSys.sendTxToL1(0, keccak256(order))`).
-Once the rollup confirms it (~1 h), the Sepolia Outbox holds its send root (`roots[sendRoot]`, slot 3).
+Once the rollup confirms it (~1-1.5 h), the Sepolia Outbox holds its send root (`roots[sendRoot]`, slot 3).
+Outboxes: Robinhood `0x8D180Caf588f3Da027BEf1F42a106Da93F90b166`, Arbitrum Sepolia `0x65f07C7D521164a4d5DaC6eB8Fac8DA067A3B78F`.
    - the message: the `L2ToL1Tx` log of the send tx (position, arbBlockNum, ethBlockNum, timestamp)
    - a Sepolia block S with `GET /bridge/remote_root/eth-testnet/<S>` set (store one with `eth_update`)
      whose Outbox holds a send root over the message (`SendRootUpdated` logs; its L2 block's
@@ -96,6 +97,19 @@ Once the rollup confirms it (~1 h), the Sepolia Outbox holds its send root (`roo
    - `Bridge.receive_arb(["robinhood-testnet", S, order, vecpak(outbox accountProof), vecpak(storageProof
      of roots[sendRoot]), arbBlockNum, ethBlockNum, timestamp, position, siblings (32 bytes each)])`;
      `chains/arbitrum.js` builds it: proof at the Sepolia head S, root stored once S is final (`eth_update` with headers back to S)
+
+## Polygon (PoS) → AMA
+Polygon's checkpoints on Sepolia (`RootChain 0xbd07D7E1E93c8d4b2a261327F3C28a8EA7167209`, `headerBlocks` at
+slot 5: root, start, end, ...) commit a Merkle tree of blocks, leaf `keccak256(number, timestamp,
+transactionsRoot, receiptsRoot)`, padded with zero leaves to a power of two. The order is proven by
+its `OrderCreated` log:
+   - a Sepolia block S with a stored root (`eth_update`), proofs of `headerBlocks[id].root` and `.start` there
+   - the block's siblings in checkpoint `id` (index = number - start), the receipt's proof in the
+     block's receipt trie (key rlp(tx index), built from `eth_getBlockReceipts`; Bor's state-sync
+     receipt is not in it), and the log's index within the receipt
+   - `Bridge.receive_polygon(["polygon-testnet", S, order, vecpak(RootChain accountProof), vecpak(root
+     storageProof), vecpak(start storageProof), id, number, timestamp, transactionsRoot, receiptsRoot,
+     siblings, txIndex, vecpak(receiptProof), logIndex])`; `chains/polygon.js` builds it
 
 ## Checks before sending
 - At most 10M AMA outside Amadeus at once (escrow; coins coming back free room, chain-to-chain moves do

@@ -9,9 +9,11 @@ import bnbLogo from './logos/bnb.svg'
 import baseLogo from './logos/base.svg'
 import ethLogo from './logos/eth.svg'
 import robinhoodLogo from './logos/robinhood.png'
+import arbitrumLogo from './logos/arbitrum.png'
+import polygonLogo from './logos/polygon.png'
 
 const settings = JSON.parse(document.getElementById('config').textContent)
-const chainLogos = { bsc: bnbLogo, base: baseLogo, eth: ethLogo, robinhood: robinhoodLogo }
+const chainLogos = { bsc: bnbLogo, base: baseLogo, eth: ethLogo, robinhood: robinhoodLogo, arbitrum: arbitrumLogo, polygon: polygonLogo }
 const SEND_TO = 'send(uint128,bytes32,bytes,bytes,bytes,uint64,uint128,uint128)'
 const SEND = 'send(uint128,bytes,bytes,uint64,uint128,uint128)'
 
@@ -25,7 +27,8 @@ const fmt = (v, d = 9) => { const s = formatUnits(v, d); return s.includes('.') 
 const AMA = 'ama'
 const chainOf = k => settings.chains.find(c => c.key === k)
 const sources = () => [AMA, ...settings.chains.filter(c => c.inbound).map(c => c.key)]
-const destinations = f => f === AMA ? settings.chains.map(c => c.key) : [AMA, ...settings.chains.filter(c => c.key !== f).map(c => c.key)]
+const byName = ks => ks.sort((a, b) => side(a).chainName.localeCompare(side(b).chainName))
+const destinations = f => byName(f === AMA ? settings.chains.map(c => c.key) : [AMA, ...settings.chains.filter(c => c.key !== f).map(c => c.key)])
 let from = AMA, to = null
 
 const rpcs = {}
@@ -43,7 +46,7 @@ const side = k => k === AMA
   : { chainName: chainOf(k).label, chainLogo: chainLogos[k] ?? amaLogo, coin: 'wAMA', coinLogo: amaLogo, badge: chainLogos[k] }
 
 //every chain shows on the From side; those Amadeus cannot verify yet can only receive for now
-const allSides = () => [AMA, ...settings.chains.map(c => c.key)]
+const allSides = () => byName([AMA, ...settings.chains.map(c => c.key)])
 
 //the chain picker: a button with the chain's logo, its menu open while `menuOpen` names it
 let menuOpen = null
@@ -93,6 +96,16 @@ function cost() {
   return from === AMA ? costToChain(chainOf(to), gasPrice, d, l1Fee) : costThroughAmadeus(settings, chainOf(from), chainOf(to), gasPrice, d, l1Fee)
 }
 
+/// how long until the coins arrive: Amadeus proves an order once its source chain made it final (an
+/// Arbitrum chain: once Ethereum confirmed and finalized its state), then the relay delivers (~1 min)
+function arrival() {
+  if (from === AMA) return '~1 min (Amadeus finality: seconds)'
+  const c = chainOf(from)
+  if (finalityLag[from] == null) return 'estimating…'
+  const what = c.arbitrum ? `${c.label} settling on ${chainOf(c.arbitrum.parent).label}` : c.polygon ? `${c.label} checkpoint on ${chainOf(c.polygon.parent).label}` : `${c.label} finality`
+  return `${eta(finalityLag[from] + 60)} (${what})`
+}
+
 /// everything that follows from the route, amount and wallets
 function render() {
   const f = side(from), t = side(to)
@@ -126,9 +139,8 @@ function render() {
     rows.push(ppm === 0n ? ['Bridge fee', 'none this way'] : [from === AMA ? `Bridge fee (${rate}, burned on Amadeus)` : `Bridge fee (${rate}, to the bridge on ${f.chainName})`, `${fmt(bp)} ${f.coin}`])
     const via = from !== AMA && to !== AMA ? ' (both legs, via Amadeus)' : ''
     rows.push([`Relay delivery${drop ? ` + ${dropText} gas drop` : ''}${via}, at cost`, `${fmt(c)} ${f.coin}`])
-    //Amadeus waits for the source chain's finality; from Amadeus it takes seconds
-    if (from !== AMA && finalityLag[from] != null) rows.push([`Arrives after ${chainOf(from).arbitrum ? `${f.chainName} settles on ${chainOf(chainOf(from).arbitrum.parent).label}` : `${f.chainName} finality`}`, eta(finalityLag[from] + 60)])
   }
+  rows.push(['Estimated time', arrival()])
   $('receive').textContent = receive === null ? '0.0' : receive > 0n ? fmt(receive) : '–'
   $('summary').innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('')
     + (receive !== null ? `<div class="total"><span>You receive</span><span>${receive > 0n ? `${fmt(receive)} ${t.coin}` : 'amount too small'}</span></div>` : '')
@@ -224,8 +236,20 @@ async function settled(c) {
   }
   return null
 }
+//a Polygon PoS chain is final for Amadeus once a checkpoint covers the order, as of the parent's
+//finalized block
+async function checkpointed(c) {
+  const rc = new Contract(c.polygon.rootChain, ['function currentHeaderBlock() view returns (uint256)', 'function headerBlocks(uint256) view returns (bytes32, uint256, uint256 end, uint256, address)'], rpcOf(chainOf(c.polygon.parent)))
+  const tag = { blockTag: 'finalized' }
+  return rpcOf(c).getBlock(Number((await rc.headerBlocks(await rc.currentHeaderBlock(tag), tag)).end))
+}
 async function readFinalityLag(c) {
   const now = Math.floor(Date.now() / 1000)
+  if (c.polygon) {
+    const s = await checkpointed(c)
+    finalityLag[c.key] = Math.max(0, now - s.timestamp)
+    return s
+  }
   if (c.arbitrum) {
     const s = await settled(c)
     finalityLag[c.key] = Math.max(0, now - (s?.timestamp ?? now))
@@ -240,7 +264,7 @@ async function inboundStatus(c, ev, o) {
   const fin = await readFinalityLag(c)
   if (fin.number >= ev.blockNumber) return status(false, o.gasDropFee > 0n ? 'final · relay proving on Amadeus' : 'final · ready to claim')
   const t = (await rpcOf(c).getBlock(ev.blockNumber)).timestamp
-  const what = c.arbitrum ? `${c.label} to settle on ${chainOf(c.arbitrum.parent).label}` : `${c.label} finality`
+  const what = c.arbitrum ? `${c.label} to settle on ${chainOf(c.arbitrum.parent).label}` : c.polygon ? `a ${c.label} checkpoint on ${chainOf(c.polygon.parent).label}` : `${c.label} finality`
   return status(false, `waiting for ${what} · ${eta(Math.max(0, t - fin.timestamp))} left`)
 }
 

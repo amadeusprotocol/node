@@ -8,6 +8,8 @@ pub mod bsc_vectors;
 pub mod arb;
 pub mod arb_robinhood_vectors;
 pub mod eth;
+pub mod polygon;
+pub mod polygon_amoy_vectors;
 pub mod eth_sepolia_vectors;
 pub mod apply_golden;
 pub mod chain_harness;
