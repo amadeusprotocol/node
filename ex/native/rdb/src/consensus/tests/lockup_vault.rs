@@ -1447,3 +1447,249 @@ fn testnet_genesis_vault_backs_validator_without_promotion() {
         "vault-backed key must be in the post-boundary validator set on stake alone"
     );
 }
+
+fn create_mainnet(chain: &Chain, w: &Wallet, amount: i128, tier: &[u8]) -> Result<(), String> {
+    let blob = vp_map(vec![(b"amount", Term::VarInt(amount)), (b"tier", Term::Binary(tier.to_vec()))]);
+    chain.with_env(&w.pk, |env| {
+        env.testnet = false;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::consensus::bic::lockup_vault::call_create(env, vec![blob])))
+            .map_err(|e| e.downcast_ref::<&str>().map(|s| s.to_string()).unwrap_or_default())
+    })
+}
+
+#[test]
+fn mainnet_vault_creation_closes_at_sunset_epoch() {
+    use crate::consensus::bic::lockup_vault::VAULT_SUNSET_EPOCH;
+    let mut chain = Chain::new();
+    let w = chain.wallet(to_flat(10_000));
+
+    chain.advance_epochs(VAULT_SUNSET_EPOCH - 1);
+    chain.advance_blocks(99_999);
+    assert_eq!(create_mainnet(&chain, &w, to_flat(1000), b"og"), Ok(()));
+    assert!(vault_exists(&chain, &w.pk, 1));
+
+    for advance in [1, 1, 100] {
+        chain.advance_blocks(advance);
+        for tier in [b"og" as &[u8], b"3m", b"6m", b"12m"] {
+            assert_eq!(create_mainnet(&chain, &w, to_flat(1000), tier), Err("vault_creation_disabled".to_string()));
+        }
+    }
+    assert_eq!(chain.balance(&w.pk), to_flat(9000));
+    assert_eq!(chain.get(b"bic:lockup_vault:unique_index"), Some(b"1".to_vec()));
+    assert!(!vault_exists(&chain, &w.pk, 2));
+
+    create(&chain, &w, to_flat(1000), b"12m").unwrap();
+    assert!(vault_exists(&chain, &w.pk, 2));
+}
+
+fn run_boundary_into(chain: &mut Chain, epoch_next: u64, testnet: bool) {
+    chain.put(b"bic:epoch:diff_bits", b"24");
+    chain.height = epoch_next * 100_000 - 1;
+    chain.with_env(&[0u8; 48], |env| {
+        env.testnet = testnet;
+        crate::consensus::bic::epoch::next(env)
+    });
+}
+
+fn run_sunset_boundary(chain: &mut Chain, testnet: bool) {
+    run_boundary_into(chain, crate::consensus::bic::lockup_vault::VAULT_SUNSET_EPOCH, testnet);
+}
+fn seed_sunset_vaults(chain: &Chain) -> (Wallet, Wallet) {
+    let a = chain.wallet(to_flat(10_000));
+    let b = chain.wallet(to_flat(5_000));
+    chain.put(b"bic:lockup_vault:unique_index", b"20");
+    create(chain, &a, to_flat(1000), b"og").unwrap();
+    create(chain, &a, to_flat(2000), b"3m").unwrap();
+    create(chain, &a, to_flat(3000), b"12m").unwrap();
+    create(chain, &b, to_flat(4000), b"6m").unwrap();
+    chain.call(&a, LV, b"set_payout_address", &[b"23", &b.pk]).unwrap();
+    for (owner, index, accrued) in [(&a.pk, 22u64, to_flat(7)), (&b.pk, 24u64, to_flat(11))] {
+        let mut v = get_vault(chain, owner, index);
+        v.accrued = accrued;
+        chain.put(&vault_key(owner, index), &encode(v.to_term()).unwrap());
+    }
+    (a, b)
+}
+
+#[test]
+fn sunset_boundary_refunds_every_non_og_vault_to_its_owner() {
+    let mut chain = Chain::new();
+    let (a, b) = seed_sunset_vaults(&chain);
+    assert_eq!(chain.balance(&a.pk), to_flat(4000));
+    assert_eq!(chain.balance(&b.pk), to_flat(1000));
+
+    run_sunset_boundary(&mut chain, false);
+
+    assert!(vault_exists(&chain, &a.pk, 21));
+    assert_eq!(get_vault(&chain, &a.pk, 21).amount, to_flat(1000));
+    assert!(!vault_exists(&chain, &a.pk, 22));
+    assert!(!vault_exists(&chain, &a.pk, 23));
+    assert!(!vault_exists(&chain, &b.pk, 24));
+    assert_eq!(chain.balance(&a.pk), to_flat(4000 + 2000 + 7 + 3000));
+    assert_eq!(chain.balance(&b.pk), to_flat(1000 + 4000 + 11));
+}
+
+#[test]
+fn sunset_boundary_is_mainnet_only() {
+    let mut chain = Chain::new();
+    let (a, b) = seed_sunset_vaults(&chain);
+
+    run_sunset_boundary(&mut chain, true);
+
+    for (owner, index) in [(&a.pk, 21u64), (&a.pk, 22), (&a.pk, 23), (&b.pk, 24)] {
+        assert!(vault_exists(&chain, owner, index));
+    }
+    assert_eq!(chain.balance(&a.pk), to_flat(4000));
+    assert_eq!(chain.balance(&b.pk), to_flat(1000));
+}
+
+#[test]
+fn sunset_refund_fires_only_on_the_896_boundary() {
+    use crate::consensus::bic::lockup_vault::VAULT_SUNSET_EPOCH;
+    let mut chain = Chain::new();
+    let (a, b) = seed_sunset_vaults(&chain);
+
+    run_boundary_into(&mut chain, VAULT_SUNSET_EPOCH - 1, false);
+    for (owner, index) in [(&a.pk, 21u64), (&a.pk, 22), (&a.pk, 23), (&b.pk, 24)] {
+        assert!(vault_exists(&chain, owner, index));
+    }
+    assert_eq!(chain.balance(&a.pk), to_flat(4000));
+
+    run_sunset_boundary(&mut chain, false);
+    let (bal_a, bal_b) = (chain.balance(&a.pk), chain.balance(&b.pk));
+    assert_eq!(bal_a, to_flat(4000 + 2000 + 7 + 3000));
+    assert_eq!(bal_b, to_flat(1000 + 4000 + 11));
+
+    run_boundary_into(&mut chain, VAULT_SUNSET_EPOCH + 1, false);
+    assert!(vault_exists(&chain, &a.pk, 21));
+    assert_eq!((chain.balance(&a.pk), chain.balance(&b.pk)), (bal_a, bal_b));
+}
+
+#[test]
+fn sunset_refunds_unlocking_and_transferred_vaults_exactly_once() {
+    use crate::consensus::bic::lockup_vault::VAULT_SUNSET_EPOCH;
+    let mut chain = Chain::new();
+    let a = chain.wallet(to_flat(5000));
+    let r = new_wallet();
+    create(&chain, &a, to_flat(2000), b"3m").unwrap();
+    create(&chain, &a, to_flat(3000), b"6m").unwrap();
+    chain.call(&a, LV, b"change_owner", &[b"2", &r.pk]).unwrap();
+
+    chain.height = (VAULT_SUNSET_EPOCH - 10) * 100_000;
+    chain.call(&a, LV, b"unlock", &[b"1"]).unwrap();
+    let unlock_at = get_vault(&chain, &a.pk, 1).unlock_at_epoch.unwrap();
+    assert!(unlock_at > VAULT_SUNSET_EPOCH + 1);
+
+    run_sunset_boundary(&mut chain, false);
+    assert!(!vault_exists(&chain, &a.pk, 1));
+    assert!(!vault_exists(&chain, &r.pk, 2));
+    assert_eq!(chain.balance(&a.pk), to_flat(2000));
+    assert_eq!(chain.balance(&r.pk), to_flat(3000));
+
+    run_boundary_into(&mut chain, unlock_at, false);
+    assert_eq!(chain.balance(&a.pk), to_flat(2000));
+    assert_eq!(chain.balance(&r.pk), to_flat(3000));
+}
+
+#[test]
+fn sunset_pays_final_yield_then_refunds_and_drops_vault_validator() {
+    use crate::consensus::bic::lockup_vault::{APY_EPOCH_DENOM, VALIDATOR_MIN_STAKE, VAULT_SUNSET_EPOCH};
+    let mut chain = Chain::new();
+    let v = chain.wallet(VALIDATOR_MIN_STAKE);
+    let p = chain.wallet(to_flat(2000));
+    let q = new_wallet();
+    let o = chain.wallet(VALIDATOR_MIN_STAKE);
+    let w = new_wallet();
+
+    let with_validator = |amount: i128, tier: &[u8], validator: &[u8]| {
+        vec![
+            (b"amount" as &[u8], Term::VarInt(amount)),
+            (b"tier", Term::Binary(tier.to_vec())),
+            (b"validator", Term::Binary(validator.to_vec())),
+        ]
+    };
+    create_call(&chain, &v, with_validator(VALIDATOR_MIN_STAKE, b"12m", &v.pk)).unwrap();
+    let mut pairs = with_validator(to_flat(2000), b"3m", &v.pk);
+    pairs.push((b"payout_address", Term::Binary(q.pk.to_vec())));
+    create_call(&chain, &p, pairs).unwrap();
+    chain.put(b"bic:lockup_vault:unique_index", b"29");
+    create_call(&chain, &o, with_validator(VALIDATOR_MIN_STAKE, b"og", &w.pk)).unwrap();
+    chain.call(&v, LV, b"set_commission", &[b"1000"]).unwrap();
+
+    chain.put(
+        &bcat(&[b"bic:epoch:validators:height:", format!("{:012}", 0).as_bytes()]),
+        &crate::consensus::bic::list_of_binaries_to_vecpak(vec![v.pk.to_vec(), w.pk.to_vec()]),
+    );
+    run_sunset_boundary(&mut chain, false);
+
+    let due_v = VALIDATOR_MIN_STAKE * 2000 / APY_EPOCH_DENOM;
+    let due_p = to_flat(2000) * 500 / APY_EPOCH_DENOM;
+    let (comm_v, comm_p) = (due_v * 1000 / 10_000, due_p * 1000 / 10_000);
+    assert!(due_v > 0 && due_p > 0 && comm_p > 0);
+
+    assert!(!vault_exists(&chain, &v.pk, 1));
+    assert!(!vault_exists(&chain, &p.pk, 2));
+    assert!(vault_exists(&chain, &o.pk, 30));
+    assert_eq!(chain.balance(&v.pk), VALIDATOR_MIN_STAKE + (due_v - comm_v) + comm_v + comm_p);
+    assert_eq!(chain.balance(&p.pk), to_flat(2000));
+    assert_eq!(chain.balance(&q.pk), due_p - comm_p);
+
+    let set_bytes = chain
+        .get(&bcat(&[b"bic:epoch:validators:height:", format!("{:012}", VAULT_SUNSET_EPOCH * 100_000).as_bytes()]))
+        .expect("post-boundary validator set missing");
+    let set = crate::consensus::validator_set::ValidatorSet::decode(&set_bytes).active();
+    assert!(set.iter().any(|pk| pk.as_slice() == w.pk.as_slice()));
+    assert!(!set.iter().any(|pk| pk.as_slice() == v.pk.as_slice()));
+}
+
+#[test]
+fn sunset_keeps_only_whitelisted_og_vaults() {
+    use crate::consensus::bic::lockup_vault::VAULT_SUNSET_OG_WHITELIST;
+    let mut chain = Chain::new();
+    let a = chain.wallet(to_flat(4000));
+    let r = new_wallet();
+    for (seed, tier) in [(7u64, b"og" as &[u8]), (10, b"og"), (142, b"og"), (129, b"6m")] {
+        chain.put(b"bic:lockup_vault:unique_index", seed.to_string().as_bytes());
+        create(&chain, &a, to_flat(1000), tier).unwrap();
+    }
+    assert!(VAULT_SUNSET_OG_WHITELIST.contains(&8) && VAULT_SUNSET_OG_WHITELIST.contains(&130));
+    assert!(!VAULT_SUNSET_OG_WHITELIST.contains(&11) && !VAULT_SUNSET_OG_WHITELIST.contains(&143));
+    chain.call(&a, LV, b"change_owner", &[b"8", &r.pk]).unwrap();
+
+    run_sunset_boundary(&mut chain, false);
+    assert!(vault_exists(&chain, &r.pk, 8));
+    assert!(!vault_exists(&chain, &a.pk, 11));
+    assert!(!vault_exists(&chain, &a.pk, 143));
+    assert!(!vault_exists(&chain, &a.pk, 130));
+    assert_eq!(chain.balance(&a.pk), to_flat(3000));
+    assert_eq!(chain.balance(&r.pk), 0);
+}
+
+#[test]
+fn sunset_og_whitelist_is_the_111_live_vaults() {
+    use crate::consensus::bic::lockup_vault::VAULT_SUNSET_OG_WHITELIST;
+    let expected: Vec<u64> = std::iter::once(8).chain(21..=130).collect();
+    assert_eq!(VAULT_SUNSET_OG_WHITELIST.to_vec(), expected);
+}
+
+#[test]
+fn sunset_sweeps_vaults_created_in_the_boundary_block() {
+    use crate::consensus::bic::lockup_vault::VAULT_SUNSET_EPOCH;
+    let mut chain = Chain::new();
+    let a = chain.wallet(to_flat(3000));
+    chain.put(b"bic:lockup_vault:unique_index", b"142");
+    chain.put(b"bic:epoch:diff_bits", b"24");
+    chain.height = VAULT_SUNSET_EPOCH * 100_000 - 1;
+    assert_eq!(create_mainnet(&chain, &a, to_flat(1000), b"og"), Ok(()));
+    assert_eq!(create_mainnet(&chain, &a, to_flat(2000), b"12m"), Ok(()));
+    chain.with_env(&[0u8; 48], |env| {
+        env.testnet = false;
+        crate::consensus::bic::epoch::next(env)
+    });
+    assert!(vaults_by_owner_empty(&chain, &a.pk));
+    assert_eq!(chain.balance(&a.pk), to_flat(3000));
+}
+
+fn vaults_by_owner_empty(chain: &Chain, owner: &[u8]) -> bool {
+    chain.with_env(&[0u8; 48], |env| vaults_by_owner(env, owner).is_empty())
+}

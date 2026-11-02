@@ -34,6 +34,16 @@ pub const VALIDATOR_MIN_STAKE: i128 = 1_000_000 * 1_000_000_000; //1m AMA
 
 pub const APY_EPOCH_DENOM: i128 = 6_307_200; //10_000 bps x 630.72 epochs per 365 day year
 
+pub const VAULT_SUNSET_EPOCH: u64 = 896;
+pub const VAULT_SUNSET_OG_WHITELIST: [u64; 111] = [
+    8, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+    40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+    60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+    80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+    100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+    120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130,
+];
+
 const VAULT_KEY_PREFIX: &[u8] = b"bic:lockup_vault:vault:";
 const VALIDATOR_COMMISSION_KEY_PREFIX: &[u8] = b"bic:lockup_vault:validator_commission:";
 
@@ -368,6 +378,32 @@ pub fn promote_pending_validators(env: &mut ApplyEnv, epoch: u64) {
     }
 }
 
+pub fn vault_creation_closed(env: &ApplyEnv) -> bool {
+    !env.testnet && env.caller_env.entry_epoch >= VAULT_SUNSET_EPOCH
+}
+
+pub fn refund_non_og_vaults(env: &mut ApplyEnv, report: &mut crate::consensus::bic::epoch_report::Report) {
+    let mut cursor: Vec<u8> = Vec::new();
+    while let Some((suffix, bytes)) = kv_get_next(env, VAULT_KEY_PREFIX, &cursor) {
+        cursor = suffix.clone();
+        let term = decode(&bytes).unwrap_or_else(|_| panic_any("invalid_vault_data"));
+        let vault = Vault::from_term(&term);
+        if suffix.len() < 50 || suffix[48] != b':' {
+            panic_any("invalid_vault_key")
+        }
+        let index = std::str::from_utf8(&suffix[49..]).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| panic_any("invalid_vault_key"));
+        if vault.vault_type.as_slice() == b"og" && VAULT_SUNSET_OG_WHITELIST.binary_search(&index).is_ok() {
+            continue;
+        }
+        let total = vault.amount.checked_add(vault.accrued).unwrap_or_else(|| panic_any("vault_amount_overflow"));
+        if total > 0 {
+            kv_increment(env, &bcat(&[b"account:", &suffix[0..48], b":balance:AMA"]), total);
+            report.add(&suffix[0..48], "vault_refund", total);
+        }
+        kv_delete(env, &bcat(&[VAULT_KEY_PREFIX, &suffix]));
+    }
+}
+
 //single post-pay boundary scan: closes every unlocked vault whose window has elapsed
 //(unlock_at_epoch <= `epoch`, the epoch being entered) by crediting amount+accrued to
 //its owner and deleting it, and sums amount+accrued per backing validator over the
@@ -512,6 +548,9 @@ const CREATE_KEYS: &[&[u8]] = &[b"amount", b"tier", b"validator", b"payout_addre
 //  months         (int,  optional) — og tier only: lock length in months
 //                 (default 0). rejected on any other tier.
 pub fn call_create(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    if vault_creation_closed(env) {
+        panic_any("vault_creation_disabled")
+    }
     let map = ArgMap::parse(&args, CREATE_KEYS);
 
     let amount = map.require_int(b"amount", "invalid_amount");

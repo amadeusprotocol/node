@@ -4,7 +4,8 @@
 //mining emission), "interest" (vault APY paid out to a payout address, net of
 //commission), "interest_compounded" (vault APY accrued into the vault, attributed
 //to the vault owner — not a balance credit), "commission" (validator commission
-//skimmed off vault yield), "tax" (network tax to treasury). the directory comes
+//skimmed off vault yield), "tax" (network tax to treasury), "vault_refund" (non-og
+//vault principal+accrued returned to its owner at VAULT_SUNSET_EPOCH). the directory comes
 //from the same WORKFOLDER envvar runtime.exs reads (default ~/.cache/amadeusd).
 //observer only: consensus state and mutation tracking are untouched, and the file
 //is written atomically (tmp+rename) so re-applies and reorg replays converge on

@@ -314,6 +314,9 @@ pub fn next(env: &mut ApplyEnv) {
     let vault_budget = vault_half.checked_add(vault_pool).unwrap_or_else(|| panic_any("vault_budget_overflow"));
     let vault_paid = consensus::bic::lockup_vault::pay_epoch_yield(env, epoch_cur, &trainers_map, vault_reduction_pct, vault_budget, &mut report);
     let vault_leftover = vault_budget.checked_sub(vault_paid).unwrap_or_else(|| panic_any("vault_pool_underflow"));
+    if !env.testnet && epoch_next == consensus::bic::lockup_vault::VAULT_SUNSET_EPOCH {
+        consensus::bic::lockup_vault::refund_non_og_vaults(env, &mut report);
+    }
     let vault_stakes = consensus::bic::lockup_vault::close_matured_and_sum_stakes(env, epoch_next);
 
     //--- solver emission, curbed by participation ---
