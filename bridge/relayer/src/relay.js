@@ -22,10 +22,11 @@ const save = () => writeFileSync(STATE, JSON.stringify(state, null, 1))
 const RETRY_MAX_MS = 3_600_000
 state.retry ??= []
 //`wait`: an order waiting for its chain's finality is looked at again after that long, not backed off
-function retryLater({ wait, ...item }, e) {
-  const tries = (item.tries ?? 0) + 1
+function retryLater({ wait, ...item }, e, before = item.error) {
+  const tries = (item.tries ?? 0) + (wait ? 0 : 1)
   const error = e.error ?? e.shortMessage ?? e.message ?? String(e)
-  log('delivery', item.from, item.n, 'failed', `(try ${tries})`, error)
+  if (!wait) log('delivery', item.from, item.n, 'failed', `(try ${tries})`, error)
+  else if (error !== before) log('delivery', item.from, item.n, 'waiting:', error)
   state.retry.push({ ...item, tries, error, due: Date.now() + (wait ?? Math.min(5000 * 2 ** tries, RETRY_MAX_MS)) })
 }
 
@@ -40,7 +41,7 @@ const toAmadeus = c => async () => {
   const orders = await c.findTippedOrders(state.from[c.key], head)
   //in batches: one proof request per batch stays within RPC limits
   for (let i = 0; i < orders.length; i += 20) {
-    for (const f of await c.deliverToAmadeus(orders.slice(i, i + 20))) retryLater({ ...f, from: c.key }, f)
+    for (const f of await c.deliverToAmadeus(orders.slice(i, i + 20))) retryLater({ ...f, from: c.key }, f, null)
   }
   state.from[c.key] = head + 1
   save()
@@ -52,7 +53,7 @@ async function retries() {
   for (const r of due) {
     try {
       if (r.from === 'amadeus') await relay.deliverIfTipped(r.n)
-      else for (const f of await relay.chains[r.from].deliverToAmadeus([r])) retryLater({ ...r, ...f }, f)
+      else for (const f of await relay.chains[r.from].deliverToAmadeus([r])) retryLater({ ...r, ...f }, f, r.error)
     } catch (e) { retryLater(r, e) }
   }
   save()

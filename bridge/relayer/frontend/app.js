@@ -190,16 +190,17 @@ async function checkRecipientGas() {
       recipientGas = await rpcOf(chainOf(to)).getBalance(who)
       if (!dropTouched && gasPrice !== null) drop = recipientGas < 2n * AVG_TX_GAS * gasPrice
     }
-  } catch { recipientGas = null }
-  render()
+  } catch { recipientGas = null } finally { render() }
 }
 
 /// the destination's gas price and, on OP-stack chains, the L1 data fee of a delivery
 async function readGas() {
   if (to === AMA) return
-  const c = chainOf(to), p = rpcOf(c)
-  gasPrice = BigInt(await p.send('eth_gasPrice', []))
-  l1Fee = c.opStack ? BigInt(await p.call({ to: '0x420000000000000000000000000000000000000F', data: '0xf1c7a58b' + DELIVERY_BYTES.toString(16).padStart(64, '0') })) : 0n
+  const k = to, c = chainOf(k), p = rpcOf(c)
+  const price = BigInt(await p.send('eth_gasPrice', []))
+  const fee = c.opStack ? BigInt(await p.call({ to: '0x420000000000000000000000000000000000000F', data: '0xf1c7a58b' + DELIVERY_BYTES.toString(16).padStart(64, '0') })) : 0n
+  //a slower answer for a destination switched away from meanwhile is dropped
+  if (k === to) [gasPrice, l1Fee] = [price, fee]
 }
 
 async function refresh() {

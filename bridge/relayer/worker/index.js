@@ -133,10 +133,12 @@ export class Relay extends DurableObject {
 
   //never given up: caps reset, pauses lift, RPCs come back. Backs off up to RETRY_MAX_MS
   //`wait`: an order waiting for its chain's finality is looked at again after that long, not backed off
-  async retryLater(key, { wait, ...item }, e) {
-    const tries = item.tries + 1
+  //a wait is no failure: it neither backs off later retries nor repeats in the log
+  async retryLater(key, { wait, ...item }, e, before = item.error) {
+    const tries = item.tries + (wait ? 0 : 1)
     const error = e.shortMessage ?? e.message
-    this.note('delivery', key.slice(2), 'failed', `(try ${tries})`, error)
+    if (!wait) this.note('delivery', key.slice(2), 'failed', `(try ${tries})`, error)
+    else if (error !== before) this.note('delivery', key.slice(2), 'waiting:', error)
     await this.ctx.storage.put(key, { ...item, tries, error, due: Date.now() + (wait ?? Math.min(5000 * 2 ** tries, RETRY_MAX_MS)) })
   }
 
@@ -155,7 +157,7 @@ export class Relay extends DurableObject {
       try {
         const failed = new Map((await c.deliverToAmadeus(batch.map(([, v]) => v))).map(f => [f.n, f]))
         await this.ctx.storage.delete(batch.filter(([, v]) => !failed.has(v.n)).map(([k]) => k))
-        for (const [key, item] of batch.filter(([, v]) => failed.has(v.n))) await this.retryLater(key, { ...item, ...failed.get(item.n) }, new Error(failed.get(item.n).error))
+        for (const [key, item] of batch.filter(([, v]) => failed.has(v.n))) await this.retryLater(key, { ...item, ...failed.get(item.n) }, new Error(failed.get(item.n).error), item.error)
       } catch (e) {
         for (const [key, item] of batch) await this.retryLater(key, item, e)
       }
