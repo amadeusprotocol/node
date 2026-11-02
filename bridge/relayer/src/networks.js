@@ -16,6 +16,7 @@
 //                        an OP-stack chain (L1 data fee per delivery from its GasPriceOracle)
 //   finalTag             the block tag a delivery counts as done at ('finalized' default; 'safe' where
 //                        finalized lags far behind: OP-stack and Arbitrum chains, Ethereum)
+//   (ama)ListFrom        the first order nonce the site lists (older ones were test orders)
 //   gasDrop(Ama)         the gas drop the site offers when the recipient could not pay for ~2 txs
 //   maxGasDrop(Ama)      largest gas drop the relay funds (chain wei / AMA base units)
 const chain = c => ({ bridge: '', lightClient: '', wama: '', from: '', trustEpoch: '', amaPerGasCoin: '', deliveryGas: 800000, maxGasDrop: '1000000000000000', gasDrop: '0.0001', ...c })
@@ -40,6 +41,7 @@ export default {
   testnet: {
     amadeus: { url: 'https://testnet-rpc.ama.one', network: 'testnet', chain: 'amadeus-testnet' },
     amaNext: '16',
+    amaListFrom: '33',
     amadeusCost: '20000000',
     maxGasDropAma: '100000000',
     gasDropAma: '0.05',
@@ -48,7 +50,7 @@ export default {
         name: 'bsc-testnet', label: 'BSC Testnet', chainId: 97, rpc: 'https://bsc-testnet-rpc.publicnode.com', explorer: 'https://testnet.bscscan.com', gasSymbol: 'tBNB', finality: 'bsc',
         bridge: '0x9A0b97147DE379D84c45D4E56649bEa6bD7A7B92', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
         wama: '0xA2B32A87E971E3deE4A895bc4de4f8f4D887Df44', from: '140053000', trustEpoch: '138539000',
-        amaPerGasCoin: '9360',
+        listFrom: '5', amaPerGasCoin: '9360',
       }),
       //Sepolia prices new state far higher (new storage slot ~+245k gas): deliveries measured 845k
       //(existing recipient) to 1.44M (new recipient, new state root), so a 1.6M ceiling. A root on
@@ -60,7 +62,7 @@ export default {
         finalTag: 'safe', deliveryGas: 1600000, amadeusCost: '150000000',
         bridge: '0x989D3047bB7C9f4cdE03F579C1dA82a2e1AD8A9e', lightClient: '0x73aA4b7c71Dfc5CA95d2244b24095B6e4A703557',
         wama: '0x70b2e7ca598101f0D1aDD4602085aCD4413ffA27', from: '12036000',
-        amaPerGasCoin: '28148',
+        listFrom: '4', amaPerGasCoin: '28148',
       }),
       //an Arbitrum Orbit chain on Sepolia: its L1 cost is charged as extra gas, so deliveries use more gas
       //units. Orders reach Amadeus as L2 -> L1 messages once the rollup confirms them (~1 h, chains/arbitrum.js);
@@ -71,7 +73,7 @@ export default {
         finalTag: 'safe', deliveryGas: 900000, gasDrop: '0.00001', amadeusCost: '100000000',
         bridge: '0xfD0a63B491662ddd37c86D68948E6793300C3E8e', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
         wama: '0x989D3047bB7C9f4cdE03F579C1dA82a2e1AD8A9e', from: '146599135',
-        amaPerGasCoin: '28148',
+        listFrom: '4', amaPerGasCoin: '28148',
       }),
       arbitrum: chain({
         name: 'arbitrum-testnet', label: 'Arbitrum Sepolia', chainId: 421614, rpc: 'https://sepolia-rollup.arbitrum.io/rpc', explorer: 'https://sepolia.arbiscan.io', gasSymbol: 'ETH', finality: 'arbitrum',
@@ -79,7 +81,7 @@ export default {
         finalTag: 'safe', deliveryGas: 900000, gasDrop: '0.00001', amadeusCost: '100000000',
         bridge: '0x9d9Af25190820fdbd18336C00959875AE9517817', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
         wama: '0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B', from: '325113799',
-        amaPerGasCoin: '28148',
+        listFrom: '3', amaPerGasCoin: '28148',
       }),
       //Polygon PoS on Sepolia: orders reach Amadeus once a checkpoint covers them (~10 min apart) and
       //Sepolia finalized it (chains/polygon.js). 1.13 = POL $0.0905 / AMA $0.08

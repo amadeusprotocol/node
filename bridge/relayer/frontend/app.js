@@ -278,11 +278,13 @@ async function showOrders() {
   const rows = []
   const route = (a, b) => `<img src="${side(a).chainLogo}" alt=""> → <img src="${side(b).chainLogo}" alt="">`
   const { nonce } = await amaGet('/bridge/nonce')
-  for (let n = nonce; n > Math.max(0, nonce - 8); n--) {
+  for (let n = nonce; n > Math.max(0, nonce - 8, Number(settings.amaListFrom || 1) - 1); n--) {
     const o = unpackOrder(fromBase58((await amaGet(`/bridge/order/${n}`)).order))
     const k = keyByName(o.dstChain)
     if (!k || k === AMA) continue
     const c = chainOf(k), recipient = hexlify(o.recipient)
+    //for a contract since replaced on that chain: its delivery is not this bridge's to show
+    if (hexlify(o.dstCoin) !== c.wama.toLowerCase()) continue
     const done = await new Contract(c.bridge, bridgeAbi, rpcOf(c)).received(n)
     const claim = !done && evmAddress && recipient === evmAddress.toLowerCase() ? `<button data-claim="${n}" data-chain="${k}">Claim</button>` : ''
     rows.push([route(AMA, k), n, `${fmt(o.outputAmount)} wAMA`, short(recipient), delivery(o), done ? status(true) : claim || status(false, o.gasDropFee > 0n ? 'relay delivering' : 'to claim')])
@@ -290,7 +292,8 @@ async function showOrders() {
   for (const c of settings.chains.filter(c => c.inbound)) {
     const bridge = new Contract(c.bridge, bridgeAbi, rpcOf(c))
     const head = await rpcOf(c).getBlockNumber()
-    for (const ev of (await bridge.queryFilter(bridge.filters.OrderCreated(), Math.max(0, head - 5000), head)).slice(-5).reverse()) {
+    const events = (await bridge.queryFilter(bridge.filters.OrderCreated(), Math.max(0, head - 5000), head)).filter(ev => ev.args.nonce >= BigInt(c.listFrom || 1))
+    for (const ev of events.slice(-5).reverse()) {
       const o = unpackOrder(ev.args.order)
       const k = keyByName(o.dstChain) ?? AMA
       const { received } = await amaGet(`/bridge/received/${c.name}/${c.bridge}/${o.nonce}`)
