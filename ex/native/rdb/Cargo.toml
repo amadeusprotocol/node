@@ -37,6 +37,7 @@ wasmer-middlewares = "7.1.0"
 wasmparser = "0.247.0"
 lazy_static = "1.4"
 rustc-hash = "2"
+goblin = "0.9"
 
 [dependencies.rust-rocksdb]
 git = "https://github.com/vans163/rust-rocksdb"
