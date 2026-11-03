@@ -62,7 +62,7 @@ pub const RISCV_ED25519_VERIFY_COST: i128 = 10_000;
 
 pub const LOG_MSG_SIZE: usize = 4096; //max log line length
 pub const LOG_TOTAL_SIZE: usize = 16384; //max log total size
-pub const LOG_TOTAL_ELEMENTS: usize = 32; //max elements in list
+pub const LOG_TOTAL_ELEMENTS: usize = 128; //max elements in list
 pub const MAX_PTR_LEN: usize = 1048576;
 pub const MAX_RETURN_SIZE: usize = 128;
 

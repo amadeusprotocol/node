@@ -14,6 +14,7 @@ pub(crate) const KITCHEN: &[u8] = include_bytes!("fixtures/riscv/kitchen.elf");
 const DEPOSIT: &[u8] = include_bytes!("fixtures/riscv/deposit.elf");
 const COIN: &[u8] = include_bytes!("fixtures/riscv/coin.elf");
 const NFT: &[u8] = include_bytes!("fixtures/riscv/nft.elf");
+const RPG: &[u8] = include_bytes!("fixtures/riscv/rpg.elf");
 
 pub(crate) struct Out {
     pub(crate) result: Result<Vec<u8>, String>,
@@ -337,6 +338,38 @@ fn nft_contract_creates_a_collection_and_mints() {
     assert_eq!(held(b"2"), if token == b"2" { 3 } else { 2 });
     assert_eq!(held(&token), if token == b"2" { 3 } else { 1 });
     assert!(ok(&testnet(&chain, &caller.pk, &nft, b"view_nft", &[b"AGENTIC", b"3"])).starts_with(b"ipfs://"));
+}
+
+#[test]
+fn rpg_heroes_fight_monsters_and_loot_nfts() {
+    let chain = Chain::new();
+    let caller = chain.wallet(0);
+    let rpg = install(&chain, RPG);
+    ok(&testnet(&chain, &caller.pk, &rpg, b"init", &[]));
+    assert!(chain.get(b"nft:RPGSOULBOUND:soulbound").is_some());
+    assert_eq!(testnet(&chain, &caller.pk, &rpg, b"fight", &[]).result, Err("abort".to_string()));
+    ok(&testnet(&chain, &caller.pk, &rpg, b"create_hero", &[]));
+    assert_eq!(testnet(&chain, &caller.pk, &rpg, b"create_hero", &[]).result, Err("abort".to_string()));
+    let fight = |i: u8| {
+        chain.with_env(&caller.pk, |env| {
+            env.testnet = true;
+            env.caller_env.tx_hash = [i; 32];
+            env.caller_env.account_current = rpg.to_vec();
+            (env.exec_track, env.exec_left, env.exec_max) = (true, protocol::TX_EXEC_LOCK, protocol::TX_EXEC_LOCK);
+            (env.storage_left, env.storage_max) = (protocol::AMA_1_DOLLAR, protocol::AMA_1_DOLLAR);
+            call_vm(env, rpg.to_vec(), b"fight".to_vec(), vec![], None, None);
+            env.logs.iter().map(|l| String::from_utf8_lossy(l).into_owned()).collect::<Vec<_>>()
+        })
+    };
+    let logs: Vec<Vec<String>> = (0..60).map(fight).collect();
+    let saw = |needle: &str| logs.iter().flatten().any(|l| l.contains(needle));
+    assert!(logs.iter().all(|l| l[0].starts_with("A wild ") && l.len() <= protocol::LOG_TOTAL_ELEMENTS));
+    for needle in ["goblin appears", "orc appears", "goblin died", "You have died, reviving", "dropped gold"] {
+        assert!(saw(needle), "{needle}");
+    }
+    let gold = chain.get(&bcat(&[b"account:", &caller.pk, b":nft:RPG:gold"])).map(|v| String::from_utf8(v).unwrap().parse::<u64>().unwrap());
+    assert_eq!(gold, Some(logs.iter().flatten().filter(|l| l.ends_with("dropped gold")).count() as u64));
+    assert!(ok(&testnet(&chain, &caller.pk, &rpg, b"view_nft", &[b"RPG", b"gold"])).starts_with(b"https://"));
 }
 
 #[test]

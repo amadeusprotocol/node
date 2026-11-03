@@ -11,7 +11,7 @@ A Privacy Layer 1 for Agentics /w MatMul-based Useful Proof of Work
 | Max Cap | 1 billion AMA |
 | UPoW | MatMul |
 | Signature | BLS12-381 |
-| Contracts | WASM |
+| Contracts | RISC-V (RV64IM) |
 | Proofs | Sorted Merkle Tree |
 | Serializer | VecPak |
 
@@ -37,13 +37,12 @@ A Privacy Layer 1 for Agentics /w MatMul-based Useful Proof of Work
 - [TypeScript SDK](https://github.com/amadeusprotocol/amadeus-typescript-sdk)
 - [Wallet API Samples](https://github.com/amadeusprotocol/amadeus-wallet-extension-react-demo)
 
-## WASM Contracts
+## RISC-V Contracts
 | Resource | Link |
 |----------|------|
 | Getting Started | https://github.com/amadeusprotocol/node/blob/main/contract_samples/GETTINGSTARTED.md |
 | Local Testing | https://github.com/amadeusprotocol/node/blob/main/contract_samples/README.md |
-| AssemblyScript SDK | https://github.com/amadeusprotocol/node/tree/main/contract_samples/assemblyscript |
-| Rust SDK | https://github.com/amadeusprotocol/node/tree/main/contract_samples/rust |
+| Rust SDK | https://github.com/amadeusprotocol/node/tree/main/contract_samples/riscv |
 
 ## MCP and Agents
 - [AIChain MCP](https://github.com/amadeusprotocol/aichain)

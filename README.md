@@ -39,9 +39,9 @@ Testnet.call(sk, "Coin", "transfer", [pk,"1","AMA"])
 
 pk = Application.fetch_env!(:ama, :trainer_pk)
 sk = Application.fetch_env!(:ama, :trainer_sk)
-Testnet.deploy "/home/user/project/node/contract_samples/assemblyscript/counter.wasm"
+Testnet.deploy "/home/user/project/node/contract_samples/riscv/out/counter.elf"
 Testnet.call sk, pk, "get", []
-Testnet.call sk, pk, "increment", ["2"]
+Testnet.call sk, pk, "inc", ["2"]
 ```
 
 ### AutoUpdates + Running as a systemd service

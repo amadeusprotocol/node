@@ -28,8 +28,7 @@ mix compile
 
 All built-in contracts are here https://github.com/amadeusprotocol/node/tree/main/ex/native/rdb/src/consensus/bic  
 The built-in contract entry is here https://github.com/amadeusprotocol/node/blob/4c258f34021d9f79ec432af4c270441195475b02/ex/native/rdb/src/consensus/consensus_apply.rs#L738-L760  
-The WASM function imports are here https://github.com/amadeusprotocol/node/blob/4c258f34021d9f79ec432af4c270441195475b02/ex/native/rdb/src/consensus/bic/wasm.rs#L620-L648  
-The WASM const imports are here https://github.com/amadeusprotocol/node/blob/4c258f34021d9f79ec432af4c270441195475b02/ex/native/rdb/src/consensus/bic/wasm.rs#L660-L703  
+The contract VM and its host calls are here https://github.com/amadeusprotocol/node/tree/main/ex/native/rdb/src/consensus/riscv  
 The RPC API is defined here https://github.com/amadeusprotocol/node/blob/4c258f34021d9f79ec432af4c270441195475b02/ex/lib/http/multiserver.ex#L82-L90  
 The Proof Generation API is here https://github.com/amadeusprotocol/node/blob/4c258f34021d9f79ec432af4c270441195475b02/ex/lib/api/api_proof.ex  
   
@@ -38,31 +37,30 @@ Most likely you will need to read the above files as they are more up-to-date th
 You might also need to edit an RPC API or built-in contract function to improve it or make it fit your usecase, in which case it
 would be good to raise a GitHub Issue or full PR for the problem/fix.  
   
-### Building your first AssemblyScript contract
+### Building your first contract
 
-Install nodejs + assemblyscript  
+Contracts are written in Rust and compiled to RISC-V. Install nightly Rust with the standard library sources:
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-npm install --global assemblyscript
+rustup toolchain install nightly --component rust-src
 ```
 
-Build counter contract  
+Build the sample contracts
 ```bash
-cd node/contract_samples/assemblyscript
-asc 0_counter.ts --target release --importMemory --memoryBase 65536 --outFile counter.wasm
+cd node/contract_samples/riscv
+./build.sh
 ```
 
-Deploy + call it  
+Deploy + call it
 ```elixir
 #Inside testnet local node REPL
 # iex(1)>
 key0 = Application.fetch_env!(:ama, :keys) |> Enum.at(0)
-path = "node/contract_samples/assemblyscript/counter.wasm"
+path = "node/contract_samples/riscv/out/counter.elf"
 Testnet.deploy key0, path
-Testnet.call key0.seed, key0.pk, "increment", ["1"]
+Testnet.call key0.seed, key0.pk, "inc", ["1"]
 ```
 
-Now read the README.md in the same directory for more contract examples.  
+Now read riscv/README.md for the host calls, gas costs and SDK.
 
 ### Frontend TS API
 

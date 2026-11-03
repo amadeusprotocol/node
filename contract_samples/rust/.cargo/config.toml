@@ -1,5 +1,0 @@
-[target.wasm32-unknown-unknown]
-rustflags = [
-    "-C", "link-arg=--import-memory",
-    "-C", "link-arg=-zstack-size=65536",
-]
