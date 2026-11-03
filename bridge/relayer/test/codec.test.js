@@ -40,8 +40,9 @@ test('a delivery pays the relay its cost: gas at the current price plus the gas 
   assert.equal(costToChain(bsc, 50_000_000n, 0n), 327_600_000n)
   assert.equal(costToChain(bsc, 50_000_000n, 100_000_000_000_000n), 327_600_000n + 936_000_000n)
   assert.equal(costToChain({ ...bsc, amaPerGasCoin: '' }, 50_000_000n, 0n), null)
-  assert.equal(paysToChain(bsc, 50_000_000n, { gasDrop: 0n, gasDropFee: 327_599_999n }), false)
-  assert.equal(paysToChain(bsc, 50_000_000n, { gasDrop: 0n, gasDropFee: 327_600_000n }), true)
+  //90% of the cost (327_600_000) is enough: gas moves between quote and delivery
+  assert.equal(paysToChain(bsc, 50_000_000n, { gasDrop: 0n, gasDropFee: 294_839_999n }), false)
+  assert.equal(paysToChain(bsc, 50_000_000n, { gasDrop: 0n, gasDropFee: 294_840_000n }), true)
   assert.equal(paysToChain(bsc, 50_000_000n, { gasDrop: 2_000_000_000_000_000n, gasDropFee: 10n ** 12n }), false) //over maxGasDrop
   const net = { amadeusCost: '20000000', maxGasDropAma: '100000000' }
   assert.equal(costToAmadeus(net, 50_000_000n), 70_000_000n)

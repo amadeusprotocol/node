@@ -31,8 +31,10 @@ export const costThroughAmadeus = (net, src, chain, gasPrice, gasDrop, l1Fee = 0
   return c === null ? null : costToAmadeus(net, 0n, src) + c
 }
 
+/// gas moves between the quote and the delivery: an order paying 90% of today's cost is delivered
+/// (the cost is priced at the deliveryGas ceiling, above what a delivery uses)
 export const paysToChain = (chain, gasPrice, o, l1Fee = 0n) => {
   const cost = costToChain(chain, gasPrice, o.gasDrop, l1Fee)
-  return cost !== null && o.gasDrop <= BigInt(chain.maxGasDrop) && o.gasDropFee >= cost
+  return cost !== null && o.gasDrop <= BigInt(chain.maxGasDrop) && o.gasDropFee * 10n >= cost * 9n
 }
 export const paysToAmadeus = (net, o, src) => o.gasDrop <= BigInt(net.maxGasDropAma) && o.gasDropFee >= costToAmadeus(net, o.gasDrop, src)
