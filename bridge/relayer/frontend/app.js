@@ -99,11 +99,11 @@ function cost() {
 /// how long until the coins arrive: Amadeus proves an order once its source chain made it final (an
 /// Arbitrum chain: once Ethereum confirmed and finalized its state), then the relay delivers (~1 min)
 function arrival() {
-  if (from === AMA) return ['~1 min', 'Amadeus finalizes in seconds']
+  if (from === AMA) return '~1 min (Amadeus finality: seconds)'
   const c = chainOf(from)
-  if (finalityLag[from] == null) return ['…', 'Estimating']
-  const what = c.arbitrum ? `${c.label} settling on ${chainOf(c.arbitrum.parent).label}` : c.polygon ? `a ${c.label} checkpoint on ${chainOf(c.polygon.parent).label}` : `${c.label} finality`
-  return [eta(finalityLag[from] + 60), `Waits for ${what}`]
+  if (finalityLag[from] == null) return 'estimating…'
+  const what = c.arbitrum ? `${c.label} settling on ${chainOf(c.arbitrum.parent).label}` : c.polygon ? `${c.label} checkpoint on ${chainOf(c.polygon.parent).label}` : `${c.label} finality`
+  return `${eta(finalityLag[from] + 60)} (${what})`
 }
 
 /// everything that follows from the route, amount and wallets
@@ -128,26 +128,24 @@ function render() {
   $('drop').onchange = e => { drop = e.target.checked; dropTouched = true; render() }
 
   const c = cost(), a = amount()
-  //one line of costs and time; the why of each is in its tooltip
-  const items = []
+  const rows = []
   let receive = null
+  //where the delivery gas is spent: the destination, and Amadeus too when it passes the order on
+  const gasOn = to === AMA ? side(AMA).chainName : from === AMA ? t.chainName : `${side(AMA).chainName} + ${t.chainName}`
   if (a !== null && a > 0n && c !== null) {
     //off the source asset at the source: burned on Amadeus, to the bridge admin on a chain
     const ppm = to === AMA ? 0n : from === AMA ? amaFeePpm : chainFeePpm
     const bp = a * ppm / 1_000_000n
     receive = a - bp - c
-    const rate = `${Number(ppm) / 100} bp`
-    items.push(['Fee', ppm > 0n ? fmt(bp) : '0.0', ppm === 0n ? 'Feeless' : from === AMA ? `${rate}, burned on Amadeus` : `${rate}, to the bridge on ${f.chainName}`])
-    const via = from !== AMA && to !== AMA ? 'Both legs via Amadeus. ' : ''
-    items.push([drop ? 'Relay + gas' : 'Relay', fmt(c), `${via}Delivery at cost${drop ? `, with ${dropText} of gas for the recipient` : ''}`])
+    rows.push(['Bridge fee', ppm > 0n ? `${fmt(bp)} ${f.coin}` : '0.0'])
+    rows.push([`Gas on ${gasOn}${drop ? ` + ${dropText} gas drop` : ''}, at cost`, `${fmt(c)} ${f.coin}`])
   } else if (to !== AMA && c === null) {
-    items.push(['Relay', '…', 'Reading gas price'])
+    rows.push([`Gas on ${gasOn}`, 'reading gas price…'])
   }
-  const [time, why] = arrival()
-  items.push(['⏱', time, why])
+  rows.push(['Estimated time', arrival()])
   $('receive').textContent = receive === null ? '0.0' : receive > 0n ? fmt(receive) : '–'
-  if (receive !== null && receive <= 0n) items.unshift(['', 'amount too small', 'The fee and relay cost exceed it'])
-  $('summary').innerHTML = `<div class="costs">${items.map(([k, v, title]) => `<span title="${title}">${k} <b>${v}</b></span>`).join('<span class="dot">·</span>')}</div>`
+  $('summary').innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('')
+    + (receive !== null ? `<div class="total"><span>You receive</span><span>${receive > 0n ? `${fmt(receive)} ${t.coin}` : 'amount too small'}</span></div>` : '')
 
   const need = from === AMA ? (!amaAddress ? 'Connect Amadeus wallet' : null) : (!signer ? 'Connect MetaMask' : null)
   $('go').disabled = Boolean(need) || !(receive > 0n)
