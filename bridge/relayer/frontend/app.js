@@ -137,10 +137,9 @@ function render() {
     const bp = a * ppm / 1_000_000n
     receive = a - bp - c
     const rate = `${Number(ppm) / 100} bp`
-    if (ppm > 0n) items.push(['Fee', fmt(bp), from === AMA ? `${rate}, burned on Amadeus` : `${rate}, to the bridge on ${f.chainName}`])
+    items.push(['Fee', ppm > 0n ? fmt(bp) : '0.0', ppm === 0n ? 'Feeless' : from === AMA ? `${rate}, burned on Amadeus` : `${rate}, to the bridge on ${f.chainName}`])
     const via = from !== AMA && to !== AMA ? 'Both legs via Amadeus. ' : ''
-    const priced = to !== AMA ? ' Priced at today\'s gas; if it rises, delivery waits (or claim it yourself).' : ''
-    items.push([drop ? 'Relay + gas' : 'Relay', fmt(c), `${via}Delivery at cost${drop ? `, with ${dropText} of gas for the recipient` : ''}.${priced}`])
+    items.push([drop ? 'Relay + gas' : 'Relay', fmt(c), `${via}Delivery at cost${drop ? `, with ${dropText} of gas for the recipient` : ''}`])
   } else if (to !== AMA && c === null) {
     items.push(['Relay', '…', 'Reading gas price'])
   }
@@ -165,16 +164,13 @@ const amaBalance = async a => parseUnits(String((await amaGet(`/wallet/balance_a
 const askRelayToStartNow = body => fetch('/deliver', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } })
   .then(r => r.json()).then(j => log(j.error ? `relay: ${j.error}` : 'relay notified')).catch(e => log(`relay: ${e.message}`))
 
-/// the relay: its address on the route's chain explorer, light clients only when one lags, its queue only when busy
+/// the relay, only when something is off: down, a light client behind, deliveries piling up
 async function showRelayStatus() {
   const s = await (await fetch('/status')).json()
-  if (s.configError) { $('relay-status').textContent = `Relay not running: ${s.configError}`; return }
-  const c = chainOf(to !== AMA ? to : from !== AMA ? from : settings.chains[0]?.key)
-  const who = c?.explorer ? `<a href="${c.explorer}/address/${s.relay}" target="_blank" rel="noopener" title="${s.relay} on ${c.label}">${short(s.relay)}</a>` : short(s.relay)
   const behind = Object.entries(s.lightClients ?? {}).filter(([, v]) => v?.alert).map(([k]) => chainOf(k)?.label ?? k)
-  const parts = [`Relay ${who}`, behind.length ? `⚠ ${behind.join(', ')} light client behind` : '✓ in sync']
-  if (s.queue.length) parts.push(`${s.queue.length} delivering`)
-  $('relay-status').innerHTML = parts.join(' · ')
+  const issues = s.configError ? ['⚠ Relay offline: deliveries wait (you can still claim yourself)']
+    : [...(behind.length ? [`⚠ ${behind.join(', ')} light client behind: deliveries from it wait`] : []), ...(s.queue.length >= 5 ? [`${s.queue.length} deliveries queued`] : [])]
+  $('relay-status').textContent = issues.join(' · ')
 }
 
 async function signAndSubmitOnAmadeus(params) {
@@ -375,7 +371,7 @@ $('max').onclick = () => {
   if (b !== null && b > 0n) { $('amount').value = fmt(b); $('amount').oninput() }
 }
 
-/// priced at the destination's gas right now: the relay delivers for exactly this, waiting if gas rises
+/// priced at the destination's gas right now (the relay delivers while an order covers 90% of it)
 async function bridgeFromAmadeus(a) {
   const c = chainOf(to)
   const who = $('recipient').value || evmAddress
