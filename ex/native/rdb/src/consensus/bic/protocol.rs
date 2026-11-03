@@ -75,9 +75,10 @@ pub const MAX_DB_VALUE_SIZE: usize = 1048576;
 
 pub const MAX_CONTRACT_SIZE: usize = 524288;
 pub const MAX_CALL_ARGS_TOTAL: usize = 1 * 1024 * 1024;
+pub const MAX_CALL_ARGS: u64 = 16;
 
 pub const MAX_CALL_DEPTH: u32 = 16;
-pub const ATTACHMENTS_DECODE_BYTE_COST: i128 = 1;
+pub const ATTACHMENTS_DECODE_BYTE_COST: i128 = 3;
 
 pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i128) {
     if cost < 0 {

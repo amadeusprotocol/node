@@ -179,44 +179,76 @@ pub fn load_opts(elf: &[u8], extra_fusion: bool) -> Result<Program, &'static str
     load_opts2(elf, extra_fusion, true)
 }
 
+struct Segment {
+    vaddr: u64,
+    offset: u64,
+    filesz: u64,
+    memsz: u64,
+    exec: bool,
+}
+
+fn rd<const N: usize>(b: &[u8], at: usize) -> u64 {
+    let mut le = [0u8; 8];
+    le[..N].copy_from_slice(&b[at..at + N]);
+    u64::from_le_bytes(le)
+}
+
+fn load_segments(elf: &[u8]) -> Result<(u64, Vec<Segment>), &'static str> {
+    if elf.len() < 64 || &elf[..4] != b"\x7fELF" || rd::<2>(elf, 54) != 56 {
+        return Err("riscv_load_elf_parse_failed");
+    }
+    if elf[4] != 2 || elf[5] != 1 || rd::<2>(elf, 18) != 243 {
+        return Err("riscv_load_not_rv64_little_endian_elf");
+    }
+    let (entry, phoff, phnum) = (rd::<8>(elf, 24), rd::<8>(elf, 32), rd::<2>(elf, 56));
+    if phoff.checked_add(56 * phnum).map_or(true, |end| end > elf.len() as u64) {
+        return Err("riscv_load_elf_parse_failed");
+    }
+    let mut segments = Vec::new();
+    for k in 0..phnum as usize {
+        let h = phoff as usize + 56 * k;
+        if rd::<4>(elf, h) != 1 {
+            continue;
+        }
+        if segments.len() == MAX_SEGMENTS {
+            return Err("riscv_load_too_many_segments");
+        }
+        segments.push(Segment { vaddr: rd::<8>(elf, h + 16), offset: rd::<8>(elf, h + 8), filesz: rd::<8>(elf, h + 32), memsz: rd::<8>(elf, h + 40), exec: rd::<4>(elf, h + 4) & 1 == 1 });
+    }
+    Ok((entry, segments))
+}
+
 pub fn load_opts2(elf: &[u8], extra_fusion: bool, more_fusion: bool) -> Result<Program, &'static str> {
-    use goblin::elf::{header::EM_RISCV, program_header::PT_LOAD};
     if elf.len() > MAX_ELF {
         return Err("riscv_load_elf_too_large");
     }
-    let e = goblin::elf::Elf::parse(elf).map_err(|_| "riscv_load_elf_parse_failed")?;
-    if !e.is_64 || !e.little_endian || e.header.e_machine != EM_RISCV {
-        return Err("riscv_load_not_rv64_little_endian_elf");
-    }
+    let (entry, segments) = load_segments(elf)?;
     let mut code = None;
     let mut data = Vec::new();
     let mut top = 0u64;
-    if e.program_headers.iter().filter(|p| p.p_type == PT_LOAD).count() > MAX_SEGMENTS {
-        return Err("riscv_load_too_many_segments");
-    }
-    for ph in e.program_headers.iter().filter(|p| p.p_type == PT_LOAD) {
-        let file_end = ph.p_offset.checked_add(ph.p_filesz).ok_or("riscv_load_segment_file_range_overflow")?;
-        if file_end > elf.len() as u64 || ph.p_filesz > ph.p_memsz {
+    for ph in &segments {
+        let file_end = ph.offset.checked_add(ph.filesz).ok_or("riscv_load_segment_file_range_overflow")?;
+        if file_end > elf.len() as u64 || ph.filesz > ph.memsz {
             return Err("riscv_load_segment_file_range_invalid");
         }
-        let mem_end = ph.p_vaddr.checked_add(ph.p_memsz).ok_or("riscv_load_segment_address_overflow")?;
+        let mem_end = ph.vaddr.checked_add(ph.memsz).ok_or("riscv_load_segment_address_overflow")?;
         if mem_end > MAX_MEM {
             return Err("riscv_load_segment_exceeds_memory_limit");
         }
         top = top.max(mem_end);
-        let bytes = &elf[ph.p_offset as usize..file_end as usize];
-        if ph.is_executable() && code.replace((ph.p_vaddr, bytes)).is_some() {
+        let bytes = &elf[ph.offset as usize..file_end as usize];
+        if ph.exec && code.replace((ph.vaddr, bytes)).is_some() {
             return Err("riscv_load_multiple_executable_segments");
         }
-        data.push((ph.p_vaddr, bytes.to_vec()));
+        data.push((ph.vaddr, bytes.to_vec()));
     }
-    let mut ranges: Vec<(u64, u64)> = e.program_headers.iter().filter(|p| p.p_type == PT_LOAD && p.p_memsz > 0).map(|p| (p.p_vaddr, p.p_vaddr + p.p_memsz)).collect();
+    let mut ranges: Vec<(u64, u64)> = segments.iter().filter(|p| p.memsz > 0).map(|p| (p.vaddr, p.vaddr + p.memsz)).collect();
     ranges.sort_unstable();
     if ranges.windows(2).any(|w| w[1].0 < w[0].1) {
         return Err("riscv_load_overlapping_segments");
     }
     let (code_base, code) = code.ok_or("riscv_load_no_executable_segment")?;
-    build(code_base, e.entry, code, data, top, extra_fusion, more_fusion)
+    build(code_base, entry, code, data, top, extra_fusion, more_fusion)
 }
 
 fn build(code_base: u64, entry: u64, code: &[u8], data: Vec<(u64, Vec<u8>)>, top: u64, extra_fusion: bool, more_fusion: bool) -> Result<Program, &'static str> {

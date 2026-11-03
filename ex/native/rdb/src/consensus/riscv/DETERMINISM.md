@@ -7,7 +7,8 @@ reference interpreter.
 
 ## Loading (`vm::load`, also run at deploy)
 
-- ELF64, little-endian, `e_machine` 243 (RISC-V), at most 512 KiB (`MAX_CONTRACT_SIZE`), at most 16 `PT_LOAD`
+- Only the 64-byte ELF header and the program header table are read (no sections, dynamic or symbol data).
+  ELF64, little-endian, `e_machine` 243 (RISC-V), `e_phentsize` 56, header table inside the file, at most 512 KiB (`MAX_CONTRACT_SIZE`), at most 16 `PT_LOAD`
   segments, each with its file range inside the file, `filesz <= memsz` and `vaddr + memsz <= 16 MiB`.
 - Non-empty `PT_LOAD` segments must not overlap. Exactly one is executable; its base and the entry point are
   4-byte aligned and the entry is inside it.

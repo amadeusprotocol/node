@@ -127,6 +127,12 @@ fn riscv_cost_calibration() {
     });
     report("smallest call (setup + one ecall)", ns, protocol::RISCV_PAGE_COST * tiny.pages() as i128 + protocol::RISCV_CODE_WORD_COST + protocol::RISCV_HOST_CALL_COST);
 
+    let entries: Vec<(vecpak::Term, vecpak::Term)> = (0..2000).map(|i| (vecpak::Term::Binary(format!("C{i:05}").into_bytes()), vecpak::Term::PropList((0..4).map(|t| (vecpak::Term::Binary(format!("T{t}").into_bytes()), vecpak::Term::VarInt(1_000_000_007 * t + 1))).collect()))).collect();
+    let attached = vecpak::encode(vecpak::Term::PropList(entries)).unwrap();
+    let chain = crate::consensus::tests::chain_harness::Chain::new();
+    let ns = chain.with_env(&[0u8; 48], |env| best_ns(20, || drop(std::hint::black_box(crate::consensus::bic::attachment::decode(env, &attached)))));
+    report(&format!("attachments decode ({} bytes)", attached.len()), ns, protocol::ATTACHMENTS_DECODE_BYTE_COST * attached.len() as i128);
+
     let copy = vec![0u8; 1 << 20];
     let ns = best_ns(200, || drop(std::hint::black_box(copy.to_vec())));
     report("host copy 1 MiB", ns, (copy.len() as u64).div_ceil(protocol::RISCV_COPY_BYTES_PER_UNIT) as i128);

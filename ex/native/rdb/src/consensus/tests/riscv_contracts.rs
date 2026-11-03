@@ -84,7 +84,8 @@ fn deploy(chain: &Chain, code: &[u8]) -> Result<(), String> {
 fn deploy_validates_riscv_bytecode() {
     let chain = Chain::new();
     assert_eq!(deploy(&chain, KITCHEN), Ok(()));
-    assert_eq!(deploy(&chain, &KITCHEN[..KITCHEN.len() / 2]), Err("riscv_load_elf_parse_failed".to_string()));
+    assert_eq!(deploy(&chain, &KITCHEN[..KITCHEN.len() / 2]), Err("riscv_load_segment_file_range_invalid".to_string()));
+    assert_eq!(deploy(&chain, &KITCHEN[..40]), Err("riscv_load_elf_parse_failed".to_string()));
     assert_eq!(deploy(&chain, b"\0asm\x01\0\0\0"), Err("riscv_invalid_bytecode".to_string()));
     let mut huge = KITCHEN.to_vec();
     huge.resize(protocol::MAX_CONTRACT_SIZE + 1, 0);
@@ -639,4 +640,160 @@ fn attachments_to_self_debit_before_crediting() {
     chain.put(&bcat(&[b"account:", &kitchen, b":balance:BIG"]), max.as_bytes());
     ok(&testnet(&chain, &caller.pk, &kitchen, b"call_attached", &[&kitchen, b"echo", b"BIG", b"1"]));
     assert_eq!(held(&chain, &kitchen, &[b":balance:BIG"]), Some(max.into_bytes()));
+}
+
+#[test]
+fn views_are_metered_like_transactions() {
+    use crate::consensus::tests::apply_golden::{entry, wallet_from, HEIGHT};
+    let chain = Chain::new();
+    let caller = chain.wallet(0);
+    let kitchen = install(&chain, KITCHEN);
+    let view = |function: &[u8], args: &[&[u8]]| {
+        let out = crate::consensus::consensus_apply::contract_view(chain.db, entry(HEIGHT, &wallet_from(11), vec![]), caller.pk.to_vec(), kitchen.to_vec(), function.to_vec(), args.iter().map(|a| a.to_vec()).collect(), true);
+        let _ = std::panic::take_hook();
+        (out.0, out.1)
+    };
+    assert_eq!(view(b"hostloop", &[b"1000"]), (true, Vec::new()));
+    assert_eq!(view(b"hostloop", &[b"300000"]), (false, b"exec_insufficient_exec_budget".to_vec()));
+    assert_eq!(view(b"fill", &[b"1", b"1", b"x"]).1, b"exec_cannot_write_during_view".to_vec());
+}
+
+#[test]
+fn nested_calls_take_as_many_arguments_as_transactions() {
+    let chain = Chain::new();
+    let caller = chain.wallet(0);
+    let kitchen = install(&chain, KITCHEN);
+    let args: Vec<Vec<u8>> = (0..=protocol::MAX_CALL_ARGS).map(|i| format!("a{i}").into_bytes()).collect();
+    let forward = |n: usize| {
+        let mut all: Vec<&[u8]> = vec![&kitchen, b"echo"];
+        all.extend(args[..n].iter().map(|a| a.as_slice()));
+        testnet(&chain, &caller.pk, &kitchen, b"call", &all)
+    };
+    let max = protocol::MAX_CALL_ARGS as usize;
+    let out = forward(max);
+    ok(&out);
+    assert_eq!(out.logs.len(), max + 1);
+    assert_eq!(forward(max + 1).result, Err("host_call_too_many_args".to_string()));
+}
+
+#[test]
+fn replacing_or_scanning_past_a_large_value_pays_for_its_bytes() {
+    let chain = Chain::new();
+    let caller = chain.wallet(0);
+    let kitchen = install(&chain, KITCHEN);
+    let used = |f: &[u8], args: &[&[u8]]| {
+        let out = testnet(&chain, &caller.pk, &kitchen, f, args);
+        ok(&out);
+        out.exec_used
+    };
+    let big = 100_000;
+    used(b"fill", &[b"1", big.to_string().as_bytes(), b"big"]);
+    used(b"fill", &[b"1", b"1", b"sml"]);
+    let overwrite_big = used(b"fill", &[b"1", b"1", b"big"]);
+    let overwrite_small = used(b"fill", &[b"1", b"1", b"sml"]);
+    assert_eq!(overwrite_big - overwrite_small, (big - 1) as i128 * protocol::COST_PER_DB_READ_BYTE_TESTNET);
+
+    used(b"fill", &[b"1", big.to_string().as_bytes(), b"big"]);
+    let miss_big = used(b"next", &[b"f:a", b""]);
+    let miss_small = used(b"next", &[b"f:r", b""]);
+    assert_eq!(ok(&testnet(&chain, &caller.pk, &kitchen, b"next", &[b"f:a", b""])), b"0");
+    assert_eq!(miss_big - miss_small, (big - 1) as i128 * protocol::COST_PER_DB_READ_BYTE_TESTNET);
+}
+
+fn with_program_headers(elf: &[u8], extra: &[[u8; 56]]) -> Vec<u8> {
+    let rd = |at: usize, n: usize| { let mut b = [0u8; 8]; b[..n].copy_from_slice(&elf[at..at + n]); u64::from_le_bytes(b) as usize };
+    let (phoff, phnum) = (rd(32, 8), rd(56, 2));
+    let mut out = elf.to_vec();
+    let table = out.len();
+    out.extend_from_slice(&elf[phoff..phoff + 56 * phnum]);
+    for h in extra {
+        out.extend_from_slice(h);
+    }
+    out[32..40].copy_from_slice(&(table as u64).to_le_bytes());
+    out[56..58].copy_from_slice(&((phnum + extra.len()) as u16).to_le_bytes());
+    out
+}
+
+#[test]
+fn loader_only_reads_load_segments_from_hostile_headers() {
+    let header = |kind: u32, offset: u64| {
+        let mut h = [0u8; 56];
+        h[0..4].copy_from_slice(&kind.to_le_bytes());
+        h[8..16].copy_from_slice(&offset.to_le_bytes());
+        h[32..40].copy_from_slice(&(1u64 << 20).to_le_bytes());
+        h
+    };
+    let mut junk: Vec<[u8; 56]> = (0..4000).map(|_| header(0, 0)).collect();
+    junk.extend((0..4000).map(|_| header(2, 64)));
+    let hostile = with_program_headers(EMPTY, &junk);
+    assert!(hostile.len() <= protocol::MAX_CONTRACT_SIZE);
+    let t = std::time::Instant::now();
+    assert!(crate::consensus::riscv::host::validate(&hostile).is_ok());
+    assert!(t.elapsed() < std::time::Duration::from_millis(5), "{:?}", t.elapsed());
+
+    let mut loads: Vec<[u8; 56]> = Vec::new();
+    for k in 0..crate::consensus::riscv::vm::MAX_SEGMENTS {
+        let mut h = header(1, 0);
+        h[16..24].copy_from_slice(&(0x80_0000 + 0x1000 * k as u64).to_le_bytes());
+        h[32..40].copy_from_slice(&0u64.to_le_bytes());
+        loads.push(h);
+    }
+    assert_eq!(crate::consensus::riscv::host::validate(&with_program_headers(EMPTY, &loads)), Err("riscv_load_too_many_segments"));
+}
+
+#[test]
+fn failures_through_apply_entry_revert_attachments_nested_calls_and_deploys() {
+    use crate::consensus::tests::apply_golden::{seed_tree, wallet_from, HEIGHT};
+    let chain = Chain::new();
+    let signer = wallet_from(12);
+    chain.fund(&signer.pk, 100 * protocol::AMA_1_DOLLAR);
+    seed_tree(&chain);
+    let kitchen = install(&chain, KITCHEN);
+    let empty = install(&chain, EMPTY);
+    put_nft(&chain, &signer.pk, b"RPG", b"gold", b"4");
+    let signer_ama = || chain.get(&bcat(&[b"account:", &signer.pk, b":balance:AMA"])).map(|v| String::from_utf8(v).unwrap().parse::<i128>().unwrap()).unwrap();
+    let call = |nonce: u64, function: &[u8], args: Vec<Vec<u8>>, att: Vec<u8>| apply_tx(&chain, &signer, nonce, HEIGHT + nonce, crate::model::tx::Action { attachments: Some(att), ..action(&kitchen, function, args) });
+    let both = attachments(vec![(b"AMA", vecpak::Term::VarInt(500)), (b"RPG", tokens(&[(b"gold", 2)]))]);
+
+    let r = call(1, b"call_attached", vec![kitchen.to_vec(), b"abort".to_vec(), b"AMA".to_vec(), b"100".to_vec()], both.clone());
+    assert_eq!((r.success, r.result.as_slice()), (false, b"abort".as_slice()));
+    assert_eq!(held(&chain, &kitchen, &[b":balance:AMA"]), None);
+    assert_eq!(held(&chain, &kitchen, &[b":nft:RPG:gold"]), None);
+    assert_eq!(held(&chain, &signer.pk, &[b":nft:RPG:gold"]), Some(b"4".to_vec()));
+
+    let before = signer_ama();
+    let r = call(2, b"call_attached", vec![empty.to_vec(), b"run".to_vec(), b"AMA".to_vec(), b"100".to_vec()], both);
+    assert!(r.success, "{}", String::from_utf8_lossy(&r.result));
+    assert_eq!(held(&chain, &kitchen, &[b":balance:AMA"]), Some(b"400".to_vec()));
+    assert_eq!(held(&chain, &empty, &[b":balance:AMA"]), Some(b"100".to_vec()));
+    assert_eq!(held(&chain, &kitchen, &[b":nft:RPG:gold"]), Some(b"2".to_vec()));
+    assert!(signer_ama() < before - 500);
+
+    let gas = |code: &[u8]| code.len() as i128 * (protocol::COST_PER_BYTE_STATE + protocol::COST_PER_BYTE_HISTORICAL) + protocol::AMA_10_CENT;
+    let key = bcat(&[b"account:", &signer.pk, b":attribute:bytecode"]);
+    assert!(deploy_tx(&chain, &signer, 3, HEIGHT + 3, COUNTER, Some(gas(COUNTER))).success);
+    let failing_init = crate::model::tx::Action { attached_gas: Some(gas(KITCHEN)), ..action(b"Contract", b"deploy", vec![KITCHEN.to_vec(), b"abort".to_vec()]) };
+    let r = apply_tx(&chain, &signer, 4, HEIGHT + 4, failing_init);
+    assert_eq!((r.success, r.result.as_slice()), (false, b"abort".as_slice()));
+    assert_eq!(chain.get(&key).as_deref(), Some(COUNTER));
+}
+
+#[test]
+fn nested_calls_stop_at_the_depth_limit() {
+    let chain = Chain::new();
+    let caller = chain.wallet(0);
+    let kitchen = install(&chain, KITCHEN);
+    let deep = |n: u32| {
+        let r = chain.with_env(&caller.pk, |env| {
+            env.testnet = true;
+            env.caller_env.account_current = kitchen.to_vec();
+            (env.exec_track, env.exec_left, env.exec_max) = (true, 100 * protocol::TX_EXEC_LOCK, 100 * protocol::TX_EXEC_LOCK);
+            (env.storage_left, env.storage_max) = (protocol::AMA_1_DOLLAR, protocol::AMA_1_DOLLAR);
+            catch_unwind(AssertUnwindSafe(|| call_vm(env, kitchen.to_vec(), b"deep".to_vec(), vec![n.to_string().into_bytes()], None))).map(|_| ()).map_err(panic_message)
+        });
+        let _ = std::panic::take_hook();
+        r
+    };
+    assert_eq!(deep(protocol::MAX_CALL_DEPTH - 1), Ok(()));
+    assert_eq!(deep(protocol::MAX_CALL_DEPTH), Err("exec_call_depth_exceeded".to_string()));
 }

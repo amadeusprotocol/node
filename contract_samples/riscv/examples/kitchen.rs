@@ -52,6 +52,14 @@ fn dispatch(f: &[u8]) {
                 c::kv_put(&[b"f:", &tag[..], b":", c::itoa(i as i128, &mut buf)].concat(), &value);
             }
         }
+        b"deep" => {
+            let n = c::atoi(&arg(0));
+            if n > 0 {
+                let mut buf = [0u8; 48];
+                c::call(&c::account_current(), b"deep", &[c::itoa(n - 1, &mut buf)], &[]);
+            }
+        }
+        b"next" => c::ret(if c::kv_get_next(&arg(0), &arg(1)).is_some() { b"1" } else { b"0" }),
         b"hostloop" => {
             for _ in 0..c::atoi(&arg(0)) {
                 core::hint::black_box(c::arg_count());

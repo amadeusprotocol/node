@@ -59,7 +59,7 @@ caller-provided buffer and the full length is returned (copy is truncated to the
 |---|---|---|---|
 | 1 | log | ptr, len | |
 | 2 | return | ptr, len (max 128 bytes) | stops, success |
-| 3 | call contract | args table, attachments ptr, len (0 for none), out, cap | result length |
+| 3 | call contract | args table (contract, function and up to 16 args), attachments ptr, len (0 for none), out, cap | result length |
 | 4 | kv_put | key, klen, value, vlen | |
 | 5 | kv_increment | key, klen, delta (decimal string), dlen, out, cap | new value length |
 | 6 | kv_delete | key, klen | |
@@ -97,7 +97,7 @@ must hold enough, paused coins and soulbound coins, collections or tokens are re
 reverts the whole call. Attaching to a built-in (`Coin`, `Nft`, ...) fails with
 `attachments_not_allowed_on_builtin`; attaching to an account without bytecode fails as any call to it
 does. In a contract, `c::attachments()` returns what was attached and `c::call(.., &[c::Asset::coin(b"AMA",
-5)])` attaches to a nested call. Decoding costs 1 exec unit per byte and each transfer pays the normal
+5)])` attaches to a nested call. Decoding costs 3 exec units per byte and each transfer pays the normal
 storage costs (about 65,000-75,000 units), so a transaction fits roughly 25 attachments.
 
 `env` fields, grouped with room to grow: 0 seed; entry 10 slot, 11 height, 12 epoch (u64 LE), 13 signer,

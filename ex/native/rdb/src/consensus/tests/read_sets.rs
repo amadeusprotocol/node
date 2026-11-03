@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use crate::consensus::consensus_apply::make_apply_env;
-use crate::consensus::consensus_kv::{kv_get, kv_get_next, kv_get_prev, kv_get_prev_or_first, kv_increment, kv_put, kv_set_bit, overlay_commit_tx, overlay_discard_tx, overlay_apply, overlay_take_tx, Read};
+use crate::consensus::consensus_kv::{kv_delete, kv_get, kv_get_next, reads_valid, kv_get_prev, kv_get_prev_or_first, kv_increment, kv_put, kv_set_bit, overlay_commit_tx, overlay_discard_tx, overlay_apply, overlay_take_tx, Read};
 use crate::consensus::consensus_kv::{digest, digest_found};
 use crate::consensus::tests::chain_harness::Chain;
 
@@ -132,10 +132,10 @@ fn range_reads_record_seek_and_result() {
 
     let found = |k: &[u8], v: &[u8]| digest_found(&Some((k.to_vec(), v.to_vec())));
     assert_eq!(overlay_take_tx(&mut env).2, vec![
-        Read::Next { seek: b"p:1".to_vec(), found: found(b"p:3", b"y") },
-        Read::Prev { seek: b"p:3".to_vec(), inclusive: false, found: found(b"p:1", b"x") },
-        Read::Prev { seek: b"p:3".to_vec(), inclusive: true, found: found(b"p:3", b"y") },
-        Read::Next { seek: b"p:3".to_vec(), found: None },
+        Read::Next { seek: b"p:1".to_vec(), found: found(b"p:3", b"y"), skipped: 0 },
+        Read::Prev { seek: b"p:3".to_vec(), inclusive: false, found: found(b"p:1", b"x"), skipped: 0 },
+        Read::Prev { seek: b"p:3".to_vec(), inclusive: true, found: found(b"p:3", b"y"), skipped: 0 },
+        Read::Next { seek: b"p:3".to_vec(), found: None, skipped: 0 },
     ]);
 }
 
@@ -176,4 +176,34 @@ fn a_large_value_read_records_only_its_digest() {
     let reads = overlay_take_tx(&mut env).2;
     assert_eq!(reads, vec![key(b"bytecode", Some(&big))]);
     assert!(std::mem::size_of_val(&reads[0]) < 128);
+}
+
+#[test]
+fn a_range_read_is_invalidated_by_new_tombstones_it_would_skip() {
+    let chain = Chain::new();
+    chain.put(b"p:3", b"y");
+    let mut speculative = env(&chain);
+    kv_get_next(&mut speculative, b"p:", b"1");
+    let reads = overlay_take_tx(&mut speculative).2;
+    assert_eq!(reads, vec![Read::Next { seek: b"p:1".to_vec(), found: digest_found(&Some((b"p:3".to_vec(), b"y".to_vec()))), skipped: 0 }]);
+
+    let mut main = env(&chain);
+    assert!(reads_valid(&main, &reads));
+    kv_put(&mut main, b"p:2", b"x");
+    kv_delete(&mut main, b"p:2");
+    overlay_commit_tx(&mut main);
+    assert!(!reads_valid(&main, &reads));
+}
+
+#[test]
+fn a_range_read_that_runs_out_of_gas_still_records_its_dependency() {
+    let chain = Chain::new();
+    chain.put(b"p:3", &[7u8; 10_000]);
+    let mut env = env(&chain);
+    env.testnet = true;
+    (env.exec_track, env.exec_left, env.exec_max) = (true, 6_000, 6_000);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| kv_get_next(&mut env, b"p:", b"1")));
+    let _ = std::panic::take_hook();
+    assert!(out.is_err());
+    assert!(matches!(overlay_take_tx(&mut env).2.as_slice(), [Read::Next { .. }]));
 }

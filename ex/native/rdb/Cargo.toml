@@ -32,7 +32,6 @@ num-bigint = "0.4"
 vecpak = { git = "https://github.com/amadeusprotocol/chain", rev = "0b4a9d7761fbe4a663e60574198db8c5cb9276c1", package = "vecpak" }
 vecpak_ex = { git = "https://github.com/amadeusprotocol/chain", rev = "0b4a9d7761fbe4a663e60574198db8c5cb9276c1", package = "vecpak_ex" }
 rustc-hash = "2"
-goblin = "0.9"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 [dependencies.rust-rocksdb]

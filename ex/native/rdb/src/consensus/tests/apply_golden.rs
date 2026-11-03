@@ -308,6 +308,6 @@ fn mainnet_contract_calls_are_pinned() {
     assert_eq!(hex(&a), GOLDEN_MAINNET_CONTRACTS, "mainnet apply_entry output changed");
 }
 
-const GOLDEN_MAINNET_CONTRACTS: &str = "0799f5bb6aa1c37504331b059a00cb5ebf7d428e0792ac76cf60ceb512e687a7";
+const GOLDEN_MAINNET_CONTRACTS: &str = "e874550f57f8f740f5d1ccb5bec8b29ad5a6f1f4ecca8c3c00a5b893a419012b";
 const GOLDEN: &str = "060254327e907419385e434f9367378d37a4651a4dbe841f2f0c8fe9d14f46f1";
-const GOLDEN_EXTENDED: &str = "8f24c1e0e003289b76632421d6e02d45273296451823dac8e3032972653972b5";
+const GOLDEN_EXTENDED: &str = "84e7f7c01deba5875d74bd64737acc09ad4d6d700c4dd8141ae56ced2c837554";

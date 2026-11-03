@@ -539,8 +539,8 @@ pub fn contract_view<'db, 'a>(
     applyenv.caller_env.account_current = contract.to_vec();
     applyenv.caller_env.account_origin = view_pk.to_vec();
     applyenv.caller_env.account_caller = view_pk.to_vec();
-    applyenv.exec_left = protocol::AMA_10_CENT;
-    applyenv.storage_left = protocol::AMA_1_DOLLAR;
+    (applyenv.exec_track, applyenv.exec_left, applyenv.exec_max) = (true, protocol::TX_EXEC_LOCK, protocol::TX_EXEC_LOCK);
+    (applyenv.storage_left, applyenv.storage_max) = (protocol::AMA_1_DOLLAR, protocol::AMA_1_DOLLAR);
 
     std::panic::set_hook(Box::new(|_| {}));
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match consensus::bls12_381::validate_public_key(contract.as_slice()) {
@@ -944,14 +944,14 @@ pub fn call_vm(
         panic_any("account_has_no_bytecode")
     }
 
+    if !protocol::riscv_enabled(env) {
+        std::panic::panic_any("wasm_noop");
+    }
+
     if let Some(bytes) = attachments {
         let assets = consensus::bic::attachment::decode(env, &bytes);
         consensus::bic::attachment::transfer(env, &contract, &assets);
         env.caller_env.attachments = bytes;
-    }
-
-    if !protocol::riscv_enabled(env) {
-        std::panic::panic_any("wasm_noop");
     }
 
     let error = consensus::riscv::host::call(env, bytecode.as_deref().unwrap_or_else(|| panic_any("invalid_bytecode")), function, args);

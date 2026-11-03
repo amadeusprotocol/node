@@ -245,7 +245,7 @@ pub fn log_line(env: &mut ApplyEnv, line: Vec<u8>) {
 
 fn arg_table(env: &mut ApplyEnv, m: &Machine, table: u64) -> Vec<(u64, u64)> {
     let count = u64::from_le_bytes(read(env, m, table, 8).try_into().unwrap());
-    if count > 16 {
+    if count > protocol::MAX_CALL_ARGS + 2 {
         panic_any("host_call_too_many_args")
     }
     let raw = read(env, m, table + 8, 16 * count);

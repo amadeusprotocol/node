@@ -31,8 +31,8 @@ pub fn rethrow_db_fault(payload: Box<dyn std::any::Any + Send>) -> Box<dyn std::
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
     Key { key: Vec<u8>, value: Option<[u8; 32]> },
-    Next { seek: Vec<u8>, found: Option<(Vec<u8>, [u8; 32])> },
-    Prev { seek: Vec<u8>, inclusive: bool, found: Option<(Vec<u8>, [u8; 32])> },
+    Next { seek: Vec<u8>, found: Option<(Vec<u8>, [u8; 32])>, skipped: u64 },
+    Prev { seek: Vec<u8>, inclusive: bool, found: Option<(Vec<u8>, [u8; 32])>, skipped: u64 },
     Bit { key: Vec<u8>, bit: u64, exists: bool, set: bool },
 }
 
@@ -153,8 +153,14 @@ pub fn reads_valid(env: &ApplyEnv, reads: &[Read]) -> bool {
             let byte = (*bit / 8) as usize;
             page.is_some() == *exists && page.map_or(false, |p| p[byte] & (1u8 << (7 - (*bit % 8) as u8)) != 0) == *set
         }
-        Read::Next { seek, found } => digest_found(&merged_next(env, seek, false)) == *found,
-        Read::Prev { seek, inclusive, found } => digest_found(&merged_prev(env, seek, *inclusive)) == *found,
+        Read::Next { seek, found, skipped } => {
+            let (now, now_skipped) = merged_next_counted(env, seek, false);
+            digest_found(&now) == *found && now_skipped == *skipped
+        }
+        Read::Prev { seek, inclusive, found, skipped } => {
+            let (now, now_skipped) = merged_prev_counted(env, seek, *inclusive);
+            digest_found(&now) == *found && now_skipped == *skipped
+        }
     })
 }
 
@@ -185,8 +191,9 @@ fn overlay_prev(env: &ApplyEnv, cursor: &[u8], inclusive: bool) -> Option<Vec<u8
         .max()
 }
 
-fn merged_next(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>, Vec<u8>)> {
+fn merged_next_counted(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> (Option<(Vec<u8>, Vec<u8>)>, u64) {
     let active = overlay_active(env);
+    let mut skipped = 0u64;
     let mut it = env.txn.raw_iterator_cf(&env.cf);
     let mut cursor = seek.to_vec();
     let mut inclusive = inclusive;
@@ -200,11 +207,12 @@ fn merged_next(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>,
         let key = match (db_key, ov_key) {
             (Some(a), Some(b)) => a.min(b),
             (Some(a), None) | (None, Some(a)) => a,
-            (None, None) => return None,
+            (None, None) => return (None, skipped),
         };
         match layered_get(env, &key) {
-            Some(v) => return Some((key, v)),
+            Some(v) => return (Some((key, v)), skipped),
             None => {
+                skipped += 1;
                 cursor = key;
                 inclusive = false;
             }
@@ -212,8 +220,9 @@ fn merged_next(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>,
     }
 }
 
-fn merged_prev(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>, Vec<u8>)> {
+fn merged_prev_counted(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> (Option<(Vec<u8>, Vec<u8>)>, u64) {
     let active = overlay_active(env);
+    let mut skipped = 0u64;
     let mut it = env.txn.raw_iterator_cf(&env.cf);
     let mut cursor = seek.to_vec();
     let mut inclusive = inclusive;
@@ -227,11 +236,12 @@ fn merged_prev(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>,
         let key = match (db_key, ov_key) {
             (Some(a), Some(b)) => a.max(b),
             (Some(a), None) | (None, Some(a)) => a,
-            (None, None) => return None,
+            (None, None) => return (None, skipped),
         };
         match layered_get(env, &key) {
-            Some(v) => return Some((key, v)),
+            Some(v) => return (Some((key, v)), skipped),
             None => {
+                skipped += 1;
                 cursor = key;
                 inclusive = false;
             }
@@ -281,6 +291,25 @@ fn charge_read_value(env: &mut ApplyEnv, value_len: usize) {
     exec_budget_decr(env, protocol::db_read_byte_cost(env) * value_len as i128);
 }
 
+fn charge_old_value(env: &mut ApplyEnv, old: &Option<Vec<u8>>) {
+    if protocol::riscv_enabled(env) {
+        charge_read_value(env, old.as_ref().map_or(0, |v| v.len()));
+    }
+}
+
+fn charge_scan(env: &mut ApplyEnv, prefix: &[u8], found: &Option<(Vec<u8>, Vec<u8>)>, skipped: u64) {
+    if protocol::riscv_enabled(env) {
+        exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE * skipped as i128);
+        if let Some((_, v)) = found {
+            charge_read_value(env, v.len());
+        }
+    } else if let Some((k, v)) = found {
+        if k.starts_with(prefix) {
+            charge_read_value(env, v.len());
+        }
+    }
+}
+
 pub fn exec_kv_size(key: &[u8], value: Option<&[u8]>) {
     if key.len() > protocol::MAX_DB_KEY_SIZE {
         panic_any("exec_too_large_key_size");
@@ -301,6 +330,7 @@ pub fn kv_put(env: &mut ApplyEnv, key: &[u8], value: &[u8]) {
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::db_write_byte_cost(env) * (key.len() + value.len()) as i128);
 
     let old_value = raw_get(env, key);
+    charge_old_value(env, &old_value);
     match old_value {
         None => {
             storage_budget_decr(env, protocol::COST_PER_NEW_LEAF_MERKLE);
@@ -329,7 +359,9 @@ pub fn kv_increment(env: &mut ApplyEnv, key: &[u8], value: i128) -> i128 {
     let value_str = value.to_string().into_bytes();
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::db_write_byte_cost(env) * (key.len() + value_str.len()) as i128);
 
-    match raw_get(env, key) {
+    let old_value = raw_get(env, key);
+    charge_old_value(env, &old_value);
+    match old_value {
         None => {
             exec_kv_size(key, Some(&value_str));
             storage_budget_decr(env, protocol::COST_PER_NEW_LEAF_MERKLE);
@@ -360,7 +392,9 @@ pub fn kv_delete(env: &mut ApplyEnv, key: &[u8]) {
 
     exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::db_write_byte_cost(env) * (key.len()) as i128);
 
-    if let Some(old) = raw_get(env, key) {
+    let old_value = raw_get(env, key);
+    charge_old_value(env, &old_value);
+    if let Some(old) = old_value {
         env.muts.push(Mutation::Delete { op: b"delete".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec() });
         env.muts_rev.push(Mutation::Put { op: b"put".to_vec(), table: env.cf_name.to_vec(), key: key.to_vec(), value: old.to_vec() });
         raw_delete(env, key);
@@ -443,17 +477,13 @@ pub fn kv_get_next(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 
     let seek = [prefix, key].concat();
 
-    let found = merged_next(env, &seek, false);
-    record(env, Read::Next { seek: seek.clone(), found: digest_found(&found) });
-    let result = match found {
+    let (found, skipped) = merged_next_counted(env, &seek, false);
+    record(env, Read::Next { seek: seek.clone(), found: digest_found(&found), skipped });
+    charge_scan(env, prefix, &found, skipped);
+    match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
-    };
-
-    if let Some((_, ref v)) = result {
-        charge_read_value(env, v.len());
     }
-    result
 }
 
 pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -461,17 +491,13 @@ pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 
     let seek = [prefix, key].concat();
 
-    let found = merged_prev(env, &seek, false);
-    record(env, Read::Prev { seek: seek.clone(), inclusive: false, found: digest_found(&found) });
-    let result = match found {
+    let (found, skipped) = merged_prev_counted(env, &seek, false);
+    record(env, Read::Prev { seek: seek.clone(), inclusive: false, found: digest_found(&found), skipped });
+    charge_scan(env, prefix, &found, skipped);
+    match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
-    };
-
-    if let Some((_, ref v)) = result {
-        charge_read_value(env, v.len());
     }
-    result
 }
 
 pub fn kv_get_prev_or_first(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -479,17 +505,13 @@ pub fn kv_get_prev_or_first(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Op
 
     let seek = [prefix, key].concat();
 
-    let found = merged_prev(env, &seek, true);
-    record(env, Read::Prev { seek: seek.clone(), inclusive: true, found: digest_found(&found) });
-    let result = match found {
+    let (found, skipped) = merged_prev_counted(env, &seek, true);
+    record(env, Read::Prev { seek: seek.clone(), inclusive: true, found: digest_found(&found), skipped });
+    charge_scan(env, prefix, &found, skipped);
+    match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
-    };
-
-    if let Some((_, ref v)) = result {
-        charge_read_value(env, v.len());
     }
-    result
 }
 
 pub fn contractstate_namespace(key: &[u8]) -> Option<Vec<u8>> {
