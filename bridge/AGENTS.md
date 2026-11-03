@@ -34,8 +34,8 @@ Every order has `gasDrop` and `gasDropFee`:
 ## AMA → BSC
 1. Send on Amadeus: call `Bridge.send` with args (all strings or bytes)
    `["AMA", amount, "bsc-testnet", <wAMA 20 bytes>, <recipient 20 bytes>, "", "0", gasDrop, gasDropFee]`.
-   The last two may be omitted (self claim). 0.1 bp of `amount` is burned; the recipient gets
-   `amount - amount/100000 - gasDropFee`. The order nonce is `GET /bridge/nonce` right after.
+   The last two may be omitted (self claim). No fee (`GET /bridge/fee` shows any the admin set, burned);
+   the recipient gets `amount - gasDropFee`. The order nonce is `GET /bridge/nonce` right after.
 2. Claim on BSC (yourself), needs ~750k gas of BNB:
    - `GET /proof/contractstate/<base58("bic:bridge:order:" + nonce padded to 20 digits)>` → `entry_height` h + proof
    - wait until `GET /chain/stats` `rooted_height >= h`
@@ -48,7 +48,7 @@ Every order has `gasDrop` and `gasDropFee`:
 
 ## BSC → Base (any chain to another, through Amadeus)
 1. On BSC: `AmaBridge.send(amount, bytes32("base-testnet"), <Base wAMA 20 bytes>, <recipient 20 bytes>, refundTo, 0, gasDrop, gasDropFee)`
-   (the 8-argument `send`). 0.1 bp of the amount goes to the bridge's admin on BSC; the order carries the
+   (the 8-argument `send`). No fee unless the BSC admin set one (`feePpm`); the order carries the
    rest. gasDrop is wei of ETH on Base; gasDropFee pays both deliveries: the relay
    charges `amadeusCost` plus its Base delivery cost (`relayer/src/tips.js costThroughAmadeus`).
 2. Amadeus `Bridge.receive` of that order (as for BSC → AMA below) passes it on as an Amadeus order to

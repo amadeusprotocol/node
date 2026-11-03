@@ -29,7 +29,7 @@ pub const ESCROW: [u8; 48] = {
 /// may pause/unpause routes, nothing else. set before the bridge fork
 pub const ADMIN: [u8; 48] = [0u8; 48];
 /// the fee on sends from Amadeus, burned: parts per million, ADMIN sets it (set_fee) up to MAX_FEE_PPM
-pub const DEFAULT_FEE_PPM: u128 = 10;
+pub const DEFAULT_FEE_PPM: u128 = 0;
 pub const MAX_FEE_PPM: u128 = 10_000;
 const KEY_FEE_PPM: &[u8] = b"bic:bridge:fee_ppm";
 
@@ -231,7 +231,7 @@ fn check_active(env: &ApplyEnv) {
     }
 }
 
-/// 10 ppm (0.1 bp) unless ADMIN set another
+/// DEFAULT_FEE_PPM unless ADMIN set another
 pub fn fee(env: &mut ApplyEnv, amount: u128) -> u128 {
     let ppm = kv_get(env, KEY_FEE_PPM).and_then(|v| std::str::from_utf8(&v).ok()?.parse::<u128>().ok()).unwrap_or(DEFAULT_FEE_PPM);
     amount * ppm / 1_000_000

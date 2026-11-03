@@ -32,8 +32,19 @@ fn bridge_order_packs_and_names_chains() {
 }
 
 #[test]
+fn bridge_sends_are_feeless_by_default() {
+    let chain = Chain::new();
+    let w = chain.wallet(1_000 * AMA);
+    send(&chain, &w, 100 * AMA, &[7u8; 20]).unwrap();
+    assert_eq!(chain.balance(&BURN_ADDRESS), 0);
+    assert_eq!(chain.balance(&ESCROW), 100 * AMA);
+    assert_eq!(order(&chain, 1).output_amount, (100 * AMA) as u128);
+}
+
+#[test]
 fn bridge_send_locks_burns_fee_and_records_order() {
     let chain = Chain::new();
+    chain.put(b"bic:bridge:fee_ppm", b"10");
     let w = chain.wallet(1_000 * AMA);
     let recipient = [7u8; 20];
     send(&chain, &w, 100 * AMA, &recipient).unwrap();
@@ -59,8 +70,8 @@ fn bridge_send_locks_burns_fee_and_records_order() {
 fn bridge_escrow_cap_and_admin_pause() {
     let mut chain = Chain::new();
     let w = chain.wallet(20_000_000 * AMA);
-    //at most 10M AMA outside Amadeus at once: 10M sent leaves 9,999,900 in escrow after the burn
-    send(&chain, &w, 10_000_000 * AMA, &[7u8; 20]).unwrap();
+    //at most 10M AMA outside Amadeus at once
+    send(&chain, &w, 9_999_900 * AMA, &[7u8; 20]).unwrap();
     send(&chain, &w, 100 * AMA, &[7u8; 20]).unwrap();
     assert_eq!(send(&chain, &w, AMA, &[7u8; 20]), Err("bridge_cap_reached".into()));
     //not a rate: a new epoch frees nothing, only coins coming back do
@@ -271,11 +282,10 @@ fn bridge_send_with_gas_drop_pays_the_deliverer_out_of_the_order() {
     let send9 = |amount: i128, drop: &str, tip: i128| chain.call(&w, b"Bridge", b"send",
         &[b"AMA", amount.to_string().as_bytes(), b"bsc-testnet", &bridge::BSC_TESTNET_WAMA, &[7u8; 20], b"", b"0", drop.as_bytes(), tip.to_string().as_bytes()]);
     send9(100 * AMA, "2000000000000000", 2 * AMA).unwrap();
-    let fee = 100 * AMA / 100_000;
     let o = order(&chain, 1);
-    assert_eq!((o.gas_drop, o.gas_drop_fee, o.output_amount), (2_000_000_000_000_000, (2 * AMA) as u128, (98 * AMA - fee) as u128));
-    assert_eq!(chain.balance(&ESCROW), 100 * AMA - fee); //the tip is minted on BSC to the deliverer, so it stays locked
-    assert_eq!(send9(AMA, "0", AMA), Err("bridge_gas_drop_fee_too_large".into()));
+    assert_eq!((o.gas_drop, o.gas_drop_fee, o.output_amount), (2_000_000_000_000_000, (2 * AMA) as u128, (98 * AMA) as u128));
+    assert_eq!(chain.balance(&ESCROW), 100 * AMA); //the tip is minted on BSC to the deliverer, so it stays locked
+    assert_eq!(send9(AMA, "0", AMA + 1), Err("bridge_gas_drop_fee_too_large".into()));
 }
 
 #[test]
@@ -378,13 +388,12 @@ fn bridge_receive_refunds_an_order_whose_recipient_is_not_a_key() {
     assert!(chain.get(format!("bic:bridge:received:bsc-testnet:{contract}:{:020}", 9).as_bytes()).is_some());
 
     let back_amount = amount - tip;
-    let fee = back_amount / 100_000;
     let back = order(&chain, 2);
-    assert_eq!((back.recipient, back.amount, back.output_amount, back.dst_chain), (vec![6; 20], back_amount, back_amount - fee, chain_name(b"bsc-testnet").unwrap()));
+    assert_eq!((back.recipient, back.amount, back.output_amount, back.dst_chain), (vec![6; 20], back_amount, back_amount, chain_name(b"bsc-testnet").unwrap()));
     assert_eq!(back.dst_coin, bridge::BSC_TESTNET_WAMA.to_vec());
     //escrow keeps backing exactly what BSC mints for the refund
-    assert_eq!(chain.balance(&ESCROW), escrow - (tip + fee) as i128);
-    assert_eq!(chain.balance(&BURN_ADDRESS), burned + fee as i128);
+    assert_eq!(chain.balance(&ESCROW), escrow - tip as i128);
+    assert_eq!(chain.balance(&BURN_ADDRESS), burned);
     assert_eq!(chain.call(&relay, b"Bridge", b"receive", &[b"bsc-testnet", b"100", &o.pack(), &account_proof, &storage_proof]), Err("bridge_already_received".into()));
 }
 
@@ -529,7 +538,7 @@ fn bridge_moves_between_chains_leave_the_cap_alone_and_backing_follows() {
     let backing = |c: &str| getn(&format!("bic:bridge:backing:{c}"));
 
     //the cap is full: 10M AMA outside Amadeus
-    send(&chain, &w, 10_000_000 * AMA, &[7u8; 20]).unwrap();
+    send(&chain, &w, 9_999_900 * AMA, &[7u8; 20]).unwrap();
     send(&chain, &w, 100 * AMA, &[7u8; 20]).unwrap();
     assert_eq!(send(&chain, &w, AMA, &[7u8; 20]), Err("bridge_cap_reached".into()));
     let escrow = chain.balance(&ESCROW);

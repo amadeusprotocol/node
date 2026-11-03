@@ -38,8 +38,8 @@ let signer, evmAddress, amaAddress
 //the gas drop: on by default when the recipient could not pay for ~2 txs, the user may switch it off
 let drop = false, dropTouched = false, recipientGas = null
 const balances = { ama: null, wama: null }
-//the bridge fee, set by each side's admin (parts per million; 10 = 0.1 bp): Amadeus' and the source chain's
-let amaFeePpm = 10n, chainFeePpm = 10n
+//the bridge fee: none by default, each side's admin may set one (parts per million; 10 = 0.1 bp)
+let amaFeePpm = 0n, chainFeePpm = 0n
 
 const side = k => k === AMA
   ? { chainName: settings.network === 'mainnet' ? 'Amadeus' : 'Amadeus Testnet', chainLogo: amaLogo, coin: 'AMA', coinLogo: amaLogo, badge: null }
@@ -99,11 +99,11 @@ function cost() {
 /// how long until the coins arrive: Amadeus proves an order once its source chain made it final (an
 /// Arbitrum chain: once Ethereum confirmed and finalized its state), then the relay delivers (~1 min)
 function arrival() {
-  if (from === AMA) return '~1 min (Amadeus finality: seconds)'
+  if (from === AMA) return ['~1 min', 'Amadeus finalizes in seconds']
   const c = chainOf(from)
-  if (finalityLag[from] == null) return 'estimating…'
-  const what = c.arbitrum ? `${c.label} settling on ${chainOf(c.arbitrum.parent).label}` : c.polygon ? `${c.label} checkpoint on ${chainOf(c.polygon.parent).label}` : `${c.label} finality`
-  return `${eta(finalityLag[from] + 60)} (${what})`
+  if (finalityLag[from] == null) return ['…', 'Estimating']
+  const what = c.arbitrum ? `${c.label} settling on ${chainOf(c.arbitrum.parent).label}` : c.polygon ? `a ${c.label} checkpoint on ${chainOf(c.polygon.parent).label}` : `${c.label} finality`
+  return [eta(finalityLag[from] + 60), `Waits for ${what}`]
 }
 
 /// everything that follows from the route, amount and wallets
@@ -128,7 +128,8 @@ function render() {
   $('drop').onchange = e => { drop = e.target.checked; dropTouched = true; render() }
 
   const c = cost(), a = amount()
-  const rows = []
+  //one line of costs and time; the why of each is in its tooltip
+  const items = []
   let receive = null
   if (a !== null && a > 0n && c !== null) {
     //off the source asset at the source: burned on Amadeus, to the bridge admin on a chain
@@ -136,16 +137,18 @@ function render() {
     const bp = a * ppm / 1_000_000n
     receive = a - bp - c
     const rate = `${Number(ppm) / 100} bp`
-    rows.push(ppm === 0n ? ['Bridge fee', 'none this way'] : [from === AMA ? `Bridge fee (${rate}, burned on Amadeus)` : `Bridge fee (${rate}, to the bridge on ${f.chainName})`, `${fmt(bp)} ${f.coin}`])
-    const via = from !== AMA && to !== AMA ? ' (both legs, via Amadeus)' : ''
-    rows.push([`Relay delivery${drop ? ` + ${dropText} gas drop` : ''}${via}, at cost`, `${fmt(c)} ${f.coin}`])
+    if (ppm > 0n) items.push(['Fee', fmt(bp), from === AMA ? `${rate}, burned on Amadeus` : `${rate}, to the bridge on ${f.chainName}`])
+    const via = from !== AMA && to !== AMA ? 'Both legs via Amadeus. ' : ''
+    const priced = to !== AMA ? ' Priced at today\'s gas; if it rises, delivery waits (or claim it yourself).' : ''
+    items.push([drop ? 'Relay + gas' : 'Relay', fmt(c), `${via}Delivery at cost${drop ? `, with ${dropText} of gas for the recipient` : ''}.${priced}`])
+  } else if (to !== AMA && c === null) {
+    items.push(['Relay', '…', 'Reading gas price'])
   }
-  rows.push(['Estimated time', arrival()])
+  const [time, why] = arrival()
+  items.push(['⏱', time, why])
   $('receive').textContent = receive === null ? '0.0' : receive > 0n ? fmt(receive) : '–'
-  $('summary').innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('')
-    + (receive !== null ? `<div class="total"><span>You receive</span><span>${receive > 0n ? `${fmt(receive)} ${t.coin}` : 'amount too small'}</span></div>` : '')
-    + (receive !== null && to !== AMA ? `<div><span>Priced at today's ${t.chainName} gas; if it rises the delivery waits (you can claim it any time)</span></div>` : '')
-    + (to !== AMA && c === null ? '<div><span>Relay delivery</span><span>reading gas price…</span></div>' : '')
+  if (receive !== null && receive <= 0n) items.unshift(['', 'amount too small', 'The fee and relay cost exceed it'])
+  $('summary').innerHTML = `<div class="costs">${items.map(([k, v, title]) => `<span title="${title}">${k} <b>${v}</b></span>`).join('<span class="dot">·</span>')}</div>`
 
   const need = from === AMA ? (!amaAddress ? 'Connect Amadeus wallet' : null) : (!signer ? 'Connect MetaMask' : null)
   $('go').disabled = Boolean(need) || !(receive > 0n)
@@ -162,10 +165,16 @@ const amaBalance = async a => parseUnits(String((await amaGet(`/wallet/balance_a
 const askRelayToStartNow = body => fetch('/deliver', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } })
   .then(r => r.json()).then(j => log(j.error ? `relay: ${j.error}` : 'relay notified')).catch(e => log(`relay: ${e.message}`))
 
+/// the relay: its address on the route's chain explorer, light clients only when one lags, its queue only when busy
 async function showRelayStatus() {
   const s = await (await fetch('/status')).json()
-  const lcs = Object.entries(s.lightClients ?? {}).filter(([, v]) => v && !v.error).map(([k, v]) => `${chainOf(k)?.label ?? k} light client ${v.alert ? 'behind' : 'current'}`)
-  $('relay-status').textContent = s.configError ? `Relay not running: ${s.configError}` : [`Relay ${short(s.relay)}`, `${s.queue.length} queued`, ...lcs].join(' · ')
+  if (s.configError) { $('relay-status').textContent = `Relay not running: ${s.configError}`; return }
+  const c = chainOf(to !== AMA ? to : from !== AMA ? from : settings.chains[0]?.key)
+  const who = c?.explorer ? `<a href="${c.explorer}/address/${s.relay}" target="_blank" rel="noopener" title="${s.relay} on ${c.label}">${short(s.relay)}</a>` : short(s.relay)
+  const behind = Object.entries(s.lightClients ?? {}).filter(([, v]) => v?.alert).map(([k]) => chainOf(k)?.label ?? k)
+  const parts = [`Relay ${who}`, behind.length ? `⚠ ${behind.join(', ')} light client behind` : '✓ in sync']
+  if (s.queue.length) parts.push(`${s.queue.length} delivering`)
+  $('relay-status').innerHTML = parts.join(' · ')
 }
 
 async function signAndSubmitOnAmadeus(params) {

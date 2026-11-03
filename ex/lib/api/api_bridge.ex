@@ -11,10 +11,10 @@ defmodule API.Bridge do
     end
   end
 
-  #the fee on sends from Amadeus, parts per million (ADMIN sets it; 10 = 0.1 bp)
+  #the fee on sends from Amadeus, parts per million (none unless ADMIN sets one; 10 = 0.1 bp)
   def fee() do
     ppm = get("bic:bridge:fee_ppm")
-    %{error: :ok, fee_ppm: if(ppm, do: :erlang.binary_to_integer(ppm), else: 10)}
+    %{error: :ok, fee_ppm: if(ppm, do: :erlang.binary_to_integer(ppm), else: 0)}
   end
 
   def nonce(), do: %{error: :ok, nonce: :erlang.binary_to_integer(get("bic:bridge:nonce") || "0")}

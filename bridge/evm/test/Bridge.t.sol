@@ -204,13 +204,13 @@ contract BridgeTest is Test {
         assertEq(o.dstChain, bytes32("base-testnet"));
         assertEq(o.dstCoin, baseWama);
         assertEq(o.recipient, abi.encodePacked(to));
-        //0.1 bp taken here, for the admin; the order carries the rest
-        assertEq(o.amount, 100e9 - 1e6);
-        assertEq(o.outputAmount, 100e9 - 1e6 - 2e9);
+        //feeless by default: the order carries the whole amount
+        assertEq(o.amount, 100e9);
+        assertEq(o.outputAmount, 100e9 - 2e9);
         assertEq(o.gasDrop, 1e14);
         assertEq(o.gasDropFee, 2e9);
         assertEq(wama.balanceOf(recipient), before - 100e9);
-        assertEq(wama.balanceOf(bridge.admin()), 1e6);
+        assertEq(wama.balanceOf(bridge.admin()), 0);
         //an Amadeus key to Amadeus only, 20-byte addresses elsewhere, never back to this chain
         vm.startPrank(recipient);
         vm.expectRevert(AmaBridge.BadAddress.selector);

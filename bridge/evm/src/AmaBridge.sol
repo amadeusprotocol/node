@@ -14,8 +14,8 @@ interface ArbSys {
 /// EVM side of the Amadeus bridge, the same on every EVM chain (Amadeus: ex/native/rdb/src/consensus/bic/bridge.rs).
 /// AMA is native to Amadeus: it arrives here as wAMA (minted once the Amadeus order is
 /// proven) and leaves by burning wAMA; Amadeus releases it from escrow after proving
-/// `orders[nonce]` in this contract's storage. No fee here: Amadeus burns 0.1 bp on its sends,
-/// so Amadeus orders arrive with output = amount - fee and orders from here carry the full amount.
+/// `orders[nonce]` in this contract's storage. Feeless by default; each side's admin may set a fee
+/// (setFee here, on moves to another chain; Bridge.set_fee on Amadeus, burned).
 /// Delivery: orders with gasDropFee = 0 are claimed by their recipient. Otherwise anyone may
 /// deliver: the deliverer gets gasDropFee (out of the order) and passes gasDrop of the
 /// destination's gas coin to the recipient (this chain's, as msg.value).
@@ -68,8 +68,8 @@ contract AmaBridge {
         admin = admin_;
     }
 
-    /// the fee on sends from here to another chain, parts per million, for the admin (setFee)
-    uint32 public feePpm = 10;
+    /// the fee on sends from here to another chain, parts per million, for the admin (setFee); none by default
+    uint32 public feePpm;
     uint32 public constant MAX_FEE_PPM = 10_000;
 
     /// admin only, at most 1%; orders already made keep theirs
@@ -94,9 +94,9 @@ contract AmaBridge {
     /// burn `amount` wAMA and create an order to `dstChain`: Amadeus (dstCoin "AMA", a 48-byte
     /// Amadeus key), or another chain Amadeus bridges to (dstCoin its wAMA, a 20-byte address):
     /// Amadeus proves the order and passes it on as its own order to that chain, the AMA staying
-    /// in escrow. To another chain the 0.1 bp fee is taken here, off the wAMA, for the admin; the
-    /// order carries the rest. An order Amadeus cannot pass on goes back to refundTo. gasDrop is in
-    /// the destination's gas coin; gasDropFee pays every delivery on the way
+    /// in escrow. To another chain an admin-set fee (none by default) is taken here, off the wAMA, for
+    /// the admin; the order carries the rest. An order Amadeus cannot pass on goes back to refundTo.
+    /// gasDrop is in the destination's gas coin; gasDropFee pays every delivery on the way
     function send(uint128 amount, bytes32 dstChain, bytes memory dstCoin, bytes calldata recipient, bytes calldata refundTo,
                   uint64 fillDeadline, uint128 gasDrop, uint128 gasDropFee) public returns (uint64 n)
     {

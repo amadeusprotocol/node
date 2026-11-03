@@ -18,6 +18,7 @@
   .tl { color: #00b8a9; letter-spacing: .5px; }
   .note { font-size: 12px; color: var(--muted); margin: -6px 0 14px; }
   .note a { color: var(--muted); }
+  .note .free { color: var(--ok); }
   .wallets { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
   .wallet { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; cursor: pointer; font: inherit; text-align: left; color: var(--text); }
   .wallet:hover { border-color: #c6cbd5; }
@@ -80,6 +81,10 @@
   .summary { font-size: 13px; color: var(--muted); margin: 10px 2px 0; display: grid; gap: 2px; }
   .summary div { display: flex; justify-content: space-between; }
   .summary .total { color: var(--text); font-weight: 600; }
+  .summary .costs { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
+  .summary .costs span[title] { cursor: help; }
+  .summary .costs b { color: var(--text); font-weight: 600; }
+  .summary .dot { color: #c4c9d3; }
   .go { width: 100%; margin-top: 12px; padding: 13px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font: 600 16px system-ui, sans-serif; cursor: pointer; }
   .go:disabled { background: #aab3c5; cursor: default; }
   h2 { font-size: 15px; margin: 22px 0 8px; }
@@ -91,6 +96,7 @@
   .st.done { background: #e6f4ea; color: var(--ok); } .st.wait { background: #fff3cd; color: var(--warn); }
   td button { border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; padding: 3px 9px; cursor: pointer; }
   .relay { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .relay a { color: var(--muted); }
   details { margin-top: 18px; font-size: 13px; color: var(--muted); }
   #log { white-space: pre-wrap; font: 12px ui-monospace, monospace; color: #444; margin-top: 6px; }
   @media (max-width: 480px) { .wallets { grid-template-columns: 1fr; } }
@@ -106,7 +112,7 @@
     <span class="badge" id="network"></span>
   </header>
 
-  <p class="note">Verified on-chain by light clients on both sides (<a id="lc-link" target="_blank" rel="noopener">contracts</a>) · relay optional: delivery + gas drop</p>
+  <p class="note"><b class="free">Feeless</b> · verified on-chain by light clients on both sides (<a id="lc-link" target="_blank" rel="noopener">contracts</a>) · relay optional: delivery + gas drop</p>
 
   <div class="wallets">
     <button class="wallet" id="connect-ama"><img src="./logos/ama-wallet.png" alt=""><span><div class="name">Amadeus wallet</div><div class="who" id="ama-account">Connect</div></span></button>
