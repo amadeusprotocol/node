@@ -292,13 +292,13 @@ fn charge_read_value(env: &mut ApplyEnv, value_len: usize) {
 }
 
 fn charge_old_value(env: &mut ApplyEnv, old: &Option<Vec<u8>>) {
-    if protocol::riscv_enabled(env) {
+    if protocol::gas_fork(env) {
         charge_read_value(env, old.as_ref().map_or(0, |v| v.len()));
     }
 }
 
 fn charge_scan(env: &mut ApplyEnv, prefix: &[u8], found: &Option<(Vec<u8>, Vec<u8>)>, skipped: u64) {
-    if protocol::riscv_enabled(env) {
+    if protocol::gas_fork(env) {
         exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE * skipped as i128);
         if let Some((_, v)) = found {
             charge_read_value(env, v.len());

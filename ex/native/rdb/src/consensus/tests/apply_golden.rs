@@ -13,6 +13,7 @@ use crate::model::entry::{Entry, Header};
 use crate::model::tx::{Action, TX, TXU};
 
 pub(crate) const HEIGHT: u64 = 90_000_123;
+const PRE_FORK_HEIGHT: u64 = 89_800_123;
 
 pub(crate) fn txu(signer: &Wallet, nonce: u64, contract: &[u8], function: &[u8], args: Vec<Vec<u8>>) -> TXU {
     txu_attached(signer, nonce, contract, function, args, None)
@@ -116,6 +117,10 @@ fn apply_net(chain: &Chain, e: Entry, h: &mut blake3::Hasher, testnet: bool) {
 
 //seed the tree with the genesis state so the root covers it
 pub(crate) fn seed_tree(chain: &Chain) {
+    seed_tree_at(chain, HEIGHT)
+}
+
+pub(crate) fn seed_tree_at(chain: &Chain, height: u64) {
     let cf = chain.db.cf_handle("contractstate").unwrap();
     let mut ops = Vec::new();
     let mut iter = chain.db.raw_iterator_cf(&cf);
@@ -128,13 +133,21 @@ pub(crate) fn seed_tree(chain: &Chain) {
     let mut env = make_apply_env(
         chain.db, chain.db.transaction(), chain.db.cf_handle("contractstate").unwrap(), b"contractstate".to_vec(),
         chain.db.cf_handle("contractstate").unwrap(), chain.db.cf_handle("contractstate_tree_hbsmt").unwrap(),
-        &[0u8; 48], &[0u8; 32], HEIGHT - 1, HEIGHT - 2, HEIGHT - 1, (HEIGHT - 1) / 100_000, &[0u8; 96], &[0u8; 32], &[0u8; 32], false,
+        &[0u8; 48], &[0u8; 32], height - 1, height - 2, height - 1, (height - 1) / 100_000, &[0u8; 96], &[0u8; 32], &[0u8; 32], false,
     );
     crate::consensus::hbsmt_rdb::hbsmt_batch_update_env(&mut env, "contractstate_tree_hbsmt", ops);
     env.txn.commit().unwrap();
 }
 
 fn run_blocks() -> [u8; 32] {
+    run_blocks_at(HEIGHT)
+}
+
+fn run_blocks_pre_fork() -> [u8; 32] {
+    run_blocks_at(PRE_FORK_HEIGHT)
+}
+
+fn run_blocks_at(height: u64) -> [u8; 32] {
     let chain = Chain::new();
     let producer = wallet_from(1);
     let alice = wallet_from(2);
@@ -147,9 +160,9 @@ fn run_blocks() -> [u8; 32] {
     chain.put(b"bic:epoch:segment_vr_hash", &[5u8; 32]);
     chain.put(b"bic:epoch:diff_bits", b"24");
 
-    seed_tree(&chain);
+    seed_tree_at(&chain, height);
 
-    let epoch = HEIGHT / 100_000;
+    let epoch = height / 100_000;
     let transfer = |to: &Wallet, amt: i128| vec![to.pk.to_vec(), amt.to_string().into_bytes(), b"AMA".to_vec()];
     let mut h = blake3::Hasher::new();
 
@@ -157,7 +170,7 @@ fn run_blocks() -> [u8; 32] {
     //a failing transfer (revert), sols that set bloom bits then fail (revert),
     //a duplicate sol, and an unknown contract call
     let dave = new_wallet_det(5);
-    apply(&chain, entry(HEIGHT, &producer, vec![
+    apply(&chain, entry(height, &producer, vec![
         txu(&alice, 1, b"Coin", b"transfer", transfer(&bob, 3 * ama)),
         txu(&alice, 2, b"Coin", b"transfer", transfer(&dave, 1 * ama)),
         txu(&bob, 1, b"Coin", b"transfer", transfer(&carol, 1_000 * ama)),
@@ -169,7 +182,7 @@ fn run_blocks() -> [u8; 32] {
     ]), &mut h);
 
     //block 2: builds on block 1's state, including the producer's own fee income
-    apply(&chain, entry(HEIGHT + 1, &producer, vec![
+    apply(&chain, entry(height + 1, &producer, vec![
         txu(&dave, 1, b"Coin", b"transfer", transfer(&alice, ama / 2)),
         txu(&bob, 3, b"Coin", b"transfer", transfer(&dave, 2 * ama)),
         txu(&alice, 3, b"Coin", b"transfer", transfer(&bob, 0)),
@@ -179,14 +192,18 @@ fn run_blocks() -> [u8; 32] {
 }
 
 fn run_blocks_extended() -> [u8; 32] {
-    run_blocks_extended_with(true)
+    run_blocks_extended_with(true, HEIGHT)
 }
 
 fn run_blocks_extended_mainnet() -> [u8; 32] {
-    run_blocks_extended_with(false)
+    run_blocks_extended_with(false, HEIGHT)
 }
 
-fn run_blocks_extended_with(testnet_block: bool) -> [u8; 32] {
+fn run_blocks_extended_mainnet_pre_fork() -> [u8; 32] {
+    run_blocks_extended_with(false, PRE_FORK_HEIGHT)
+}
+
+fn run_blocks_extended_with(testnet_block: bool, height: u64) -> [u8; 32] {
     let chain = Chain::new();
     let producer = wallet_from(11);
     let alice = wallet_from(12);
@@ -210,7 +227,7 @@ fn run_blocks_extended_with(testnet_block: bool) -> [u8; 32] {
 
     //bloom pages the failing sol touches already exist, one with a bit preset,
     //so its revert clears bits on existing pages
-    let epoch = HEIGHT / 100_000;
+    let epoch = height / 100_000;
     let sol = sol_bytes(epoch, &alice.pk, 3);
     let segs = crate::consensus::bic::sol_bloom::segs_from_digest(blake3::hash(&sol).as_bytes());
     for (i, seg) in segs.iter().enumerate() {
@@ -222,12 +239,12 @@ fn run_blocks_extended_with(testnet_block: bool) -> [u8; 32] {
         }
         chain.put(format!("bic:epoch:solbloom:{}", seg.page).as_bytes(), &page);
     }
-    seed_tree(&chain);
+    seed_tree_at(&chain, height);
 
     let transfer = |to: &Wallet, amt: i128| vec![to.pk.to_vec(), amt.to_string().into_bytes(), b"AMA".to_vec()];
     let mut h = blake3::Hasher::new();
 
-    apply(&chain, entry(HEIGHT, &producer, vec![
+    apply(&chain, entry(height, &producer, vec![
         txu(&alice, 1, b"Epoch", b"submit_sol", vec![sol.clone()]),
         txu_attached(&alice, 2, &contract_ok.pk, b"run", vec![], Some((b"AMA", 5))),
         txu_attached(&bob, 1, &contract_loop.pk, b"run", vec![], Some((b"AMA", 7))),
@@ -235,24 +252,24 @@ fn run_blocks_extended_with(testnet_block: bool) -> [u8; 32] {
         txu(&alice, 3, b"Coin", b"transfer", transfer(&bob, 10_000 * ama)),
     ]), &mut h);
 
-    apply(&chain, entry(HEIGHT + 1, &producer, vec![]), &mut h);
+    apply(&chain, entry(height + 1, &producer, vec![]), &mut h);
 
     //contracts only execute on testnet: a call that runs, and one that loops until
     //its exec budget is gone after the attachment's balance writes
     if testnet_block {
-        apply_net(&chain, entry(HEIGHT + 2, &producer, vec![
+        apply_net(&chain, entry(height + 2, &producer, vec![
             txu_attached(&alice, 5, &rv_ok.pk, b"run", vec![], Some((b"AMA", 5))),
             txu_attached(&bob, 5, &rv_loop.pk, b"run", vec![], Some((b"AMA", 7))),
             txu(&bob, 6, b"Coin", b"transfer", transfer(&alice, ama)),
         ]), &mut h, true);
     }
 
-    let segment_height = (HEIGHT / 1000 + 1) * 1000;
+    let segment_height = (height / 1000 + 1) * 1000;
     apply(&chain, entry(segment_height, &producer, vec![
         txu(&bob, 7, b"Coin", b"transfer", transfer(&alice, ama)),
     ]), &mut h);
 
-    let epoch_last = (HEIGHT / 100_000 + 1) * 100_000 - 1;
+    let epoch_last = (height / 100_000 + 1) * 100_000 - 1;
     apply(&chain, entry(epoch_last, &producer, vec![
         txu(&alice, 6, b"Coin", b"transfer", transfer(&bob, 2 * ama)),
         txu(&bob, 8, b"Coin", b"transfer", transfer(&alice, 0)),
@@ -302,12 +319,21 @@ fn apply_entry_output_is_pinned_extended() {
 }
 
 #[test]
+fn apply_entry_output_before_the_gas_fork_is_pinned() {
+    assert!(PRE_FORK_HEIGHT / 100_000 < crate::consensus::bic::protocol::GAS_FORK_EPOCH && HEIGHT / 100_000 >= crate::consensus::bic::protocol::GAS_FORK_EPOCH);
+    assert_eq!(hex(&run_reporting(run_blocks_pre_fork)), GOLDEN_PRE_FORK, "apply_entry output before the gas fork changed");
+    assert_eq!(hex(&run_reporting(run_blocks_extended_mainnet_pre_fork)), GOLDEN_MAINNET_CONTRACTS_PRE_FORK, "mainnet apply_entry output before the gas fork changed");
+}
+
+#[test]
 fn mainnet_contract_calls_are_pinned() {
     let a = run_reporting(run_blocks_extended_mainnet);
     assert_eq!(a, run_reporting(run_blocks_extended_mainnet));
     assert_eq!(hex(&a), GOLDEN_MAINNET_CONTRACTS, "mainnet apply_entry output changed");
 }
 
-const GOLDEN_MAINNET_CONTRACTS: &str = "e874550f57f8f740f5d1ccb5bec8b29ad5a6f1f4ecca8c3c00a5b893a419012b";
-const GOLDEN: &str = "060254327e907419385e434f9367378d37a4651a4dbe841f2f0c8fe9d14f46f1";
-const GOLDEN_EXTENDED: &str = "84e7f7c01deba5875d74bd64737acc09ad4d6d700c4dd8141ae56ced2c837554";
+const GOLDEN_MAINNET_CONTRACTS: &str = "4c7e8e3add2a023f15812deb3da198b89a468fe2fc2b965740ca75c3b534901a";
+const GOLDEN_PRE_FORK: &str = "28188f8e93e5a818dcea6b4be6a1fee38e5db09e365c7430dbc637f142f153ea";
+const GOLDEN_MAINNET_CONTRACTS_PRE_FORK: &str = "ea3735e38a3f86edb34ef56dad51dd0c482b02eeb511bd0e315256439854d9f0";
+const GOLDEN: &str = "e1e19f30a85f0f9be9233d87fc2db1b1b85e50ea913bfd19d6beedae919dc884";
+const GOLDEN_EXTENDED: &str = "843b624e3b9ebeaa80e4fb8ab68529a29505077fbdf0225828ce1914ac611b5d";
