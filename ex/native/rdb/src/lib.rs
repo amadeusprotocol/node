@@ -847,28 +847,6 @@ fn contract_view<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn contract_validate<'a>(env: Env<'a>, db: ResourceArc<DbResource>, entry_vecpak: Binary, wasmbytes: Binary, testnet: bool) -> Result<Term<'a>, Error> {
-    let __res: std::thread::Result<Result<Term<'a>, Error>> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-    let entry = crate::model::entry::from_bytes(entry_vecpak.as_slice()).map_err(|_| Error::BadArg)?;
-
-    let (result, logs) = consensus::consensus_apply::contract_validate(&db.db, entry, wasmbytes.as_slice(), testnet);
-
-    let mut ob_result = OwnedBinary::new(result.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
-    ob_result.as_mut_slice().copy_from_slice(&result);
-
-    let mut logs_list = Vec::new();
-    for l in logs {
-        let mut ob_log = OwnedBinary::new(l.len()).ok_or_else(|| Error::Term(Box::new("alloc failed")))?;
-        ob_log.as_mut_slice().copy_from_slice(&l);
-        logs_list.push(Binary::from_owned(ob_log, env))
-    }
-
-    Ok((Binary::from_owned(ob_result, env), logs_list).encode(env))
-    }));
-    match __res { Ok(inner) => inner, Err(_) => Err(Error::BadArg) }
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
 fn vecpak_encode<'a>(env: Env<'a>, map: Term<'a>) -> Result<Term<'a>, Error> {
     let mut buf = Vec::with_capacity(1024);
     vecpak_ex::encode_term(env, &mut buf, map, 0)?;
@@ -1145,7 +1123,6 @@ fn protocol_constants<'a>(env: Env<'a>) -> Term<'a> {
 
     map = map.map_put(atoms::cost_per_byte_historical(), protocol::COST_PER_BYTE_HISTORICAL).ok().unwrap();
     map = map.map_put(atoms::cost_per_byte_state(), protocol::COST_PER_BYTE_STATE).ok().unwrap();
-    map = map.map_put(atoms::cost_per_op_wasm(), protocol::COST_PER_OP_WASM).ok().unwrap();
 
     map = map.map_put(atoms::cost_per_db_read_base(), protocol::COST_PER_DB_READ_BASE).ok().unwrap();
     map = map.map_put(atoms::cost_per_db_read_byte(), protocol::COST_PER_DB_READ_BYTE).ok().unwrap();

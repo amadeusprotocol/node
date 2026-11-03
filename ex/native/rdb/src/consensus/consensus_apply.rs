@@ -17,7 +17,6 @@ pub type SolCache = std::sync::Arc<std::sync::Mutex<HashMap<([u8; 32], Vec<u8>, 
 pub struct CallerEnv {
     pub readonly: bool,
     pub seed: Vec<u8>,
-    pub seedf64: f64,
     pub entry_signer: [u8; 48],
     pub entry_prev_hash: [u8; 32],
     pub entry_slot: u64,
@@ -56,7 +55,6 @@ pub fn make_caller_env(
     CallerEnv {
         readonly: false,
         seed: Vec::new(),
-        seedf64: 1.0,
         entry_signer: *entry_signer,
         entry_prev_hash: *entry_prev_hash,
         entry_slot: entry_slot,
@@ -308,7 +306,7 @@ pub fn execute_tx(applyenv: &mut ApplyEnv, i: usize, txu: crate::model::tx::TXU)
             }
             true => {
                 //println!("{:?}->{:?} {:?} {:?}", bs58::encode(&contract).into_string(), String::from_utf8_lossy(&function), attached_amount, attached_symbol);
-                let result = call_wasmvm(applyenv, contract, function, args, attached_symbol, attached_amount);
+                let result = call_vm(applyenv, contract, function, args, attached_symbol, attached_amount);
                 result
             }
         }
@@ -419,6 +417,9 @@ pub fn apply_entry_mode<'db>(
     testnet: bool,
     speculative_budget: Option<usize>,
 ) -> ((Transaction<'db, TransactionDB<MultiThreaded>>, Vec<consensus_muts::Mutation>, Vec<consensus_muts::Mutation>, Vec<TXReceipt>, [u8; 32], [u8; 32]), usize) {
+    if testnet {
+        consensus::riscv::host::prefault();
+    }
 
     let cf_h = db.cf_handle("contractstate").unwrap();
     let cf2_h = db.cf_handle("contractstate").unwrap();
@@ -550,7 +551,7 @@ pub fn contract_view<'db, 'a>(
             b"ok".to_vec()
         }
         true => {
-            let result = call_wasmvm(&mut applyenv, contract, function, args, None, None);
+            let result = call_vm(&mut applyenv, contract, function, args, None, None);
             result
         }
     }));
@@ -564,68 +565,6 @@ pub fn contract_view<'db, 'a>(
                 (false, s.to_string().into(), applyenv.logs.clone())
             } else {
                 (false, b"unknown".into(), applyenv.logs.clone())
-            }
-        }
-    }
-}
-
-pub fn contract_validate<'db, 'a>(
-    db: &'db TransactionDB<MultiThreaded>,
-    entry: crate::model::entry::Entry,
-    wasm_bytes: &[u8],
-    testnet: bool,
-) -> (Vec<u8>, Vec<Vec<u8>>) {
-    let cf_h = db.cf_handle("contractstate").unwrap();
-    let cf2_h = db.cf_handle("contractstate").unwrap();
-    let cf_tree_hbsmt_h = db.cf_handle("contractstate_tree_hbsmt").unwrap();
-
-    let entry_signer = entry.header.signer.as_slice().try_into().unwrap_or_else(|_| panic!("entry_signer_len_wrong"));
-    let entry_prev_hash = entry.header.prev_hash.as_slice().try_into().unwrap_or_else(|_| panic!("entry_prev_hash_len_wrong"));
-    let entry_vr = entry.header.vr.as_slice().try_into().unwrap_or_else(|_| panic!("entry_vr_len_wrong"));
-    let entry_vr_b3_binding = blake3::hash(&entry.header.vr);
-    let entry_vr_b3 = entry_vr_b3_binding.as_bytes().try_into().unwrap_or_else(|_| panic!("entry_vr_len_wrong"));
-    let entry_dr = entry.header.dr.as_slice().try_into().unwrap_or_else(|_| panic!("entry_dr_len_wrong"));
-
-    let txn_opts = TransactionOptions::default();
-    let write_opts = WriteOptions::default();
-    let txn = db.transaction_opt(&write_opts, &txn_opts);
-
-    let entry_epoch = entry.header.height / 100_000;
-    let mut applyenv = make_apply_env(
-        db,
-        txn,
-        cf_h,
-        b"contractstate".to_vec(),
-        cf2_h,
-        cf_tree_hbsmt_h,
-        entry_signer,
-        entry_prev_hash,
-        entry.header.slot,
-        entry.header.prev_slot,
-        entry.header.height,
-        entry_epoch,
-        entry_vr,
-        entry_vr_b3,
-        entry_dr,
-        testnet,
-    );
-    applyenv.readonly = true;
-
-    applyenv.exec_left = protocol::AMA_10_CENT;
-    applyenv.storage_left = protocol::AMA_1_DOLLAR;
-
-    std::panic::set_hook(Box::new(|_| {}));
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::consensus::bic::wasm::validate_contract(&mut applyenv, wasm_bytes)));
-
-    applyenv.txn.rollback();
-
-    match res {
-        Ok(result) => (b"ok".to_vec(), applyenv.logs.clone()),
-        Err(payload) => {
-            if let Some(&s) = payload.downcast_ref::<&'static str>() {
-                (s.to_string().into(), applyenv.logs.clone())
-            } else {
-                (b"error".to_vec(), applyenv.logs.clone())
             }
         }
     }
@@ -857,14 +796,6 @@ fn call_exit(env: &mut ApplyEnv) {
     let vr = env.caller_env.entry_vr.to_vec();
     let seed_hash = blake3::hash(&vr);
     env.caller_env.seed = seed_hash.as_bytes().to_vec();
-    //for assemblyscript
-    // Canonicalize NaN: interpreting hash bytes as f64 yields a NaN ~1/2048 of the
-    // time, and NaN payload/signaling-bit handling differs across CPU archs and wasm
-    // runtimes. An un-canonicalized NaN seed reaching a contract would diverge
-    // tx_state_root across validators (consensus fork). Only the NaN case changes.
-    let seedf64 = f64::from_le_bytes(seed_hash.as_bytes()[0..8].try_into().unwrap_or([0u8; 8]));
-    let seedf64 = if seedf64.is_nan() { f64::from_bits(0x7ff8_0000_0000_0000) } else { seedf64 };
-    env.caller_env.seedf64 = seedf64;
 
     env.muts = Vec::new();
     env.muts_rev = Vec::new();
@@ -981,7 +912,7 @@ pub fn call_bic(
     }
 }
 
-pub fn call_wasmvm(
+pub fn call_vm(
     env: &mut ApplyEnv,
     contract: Vec<u8>,
     function: Vec<u8>,
@@ -1009,15 +940,7 @@ pub fn call_wasmvm(
     hasher.update(&env.caller_env.tx_index.to_le_bytes());
     hasher.update(&env.caller_env.call_counter.to_le_bytes());
     let result_hash = hasher.finalize();
-
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&result_hash.as_bytes()[0..8]);
-
     env.caller_env.seed = result_hash.as_bytes().to_vec();
-    // Canonicalize NaN seed (see call_exit derivation): a NaN payload diverges across
-    // archs/wasm runtimes -> tx_state_root fork. Only the NaN case changes.
-    let seedf64 = f64::from_le_bytes(buf);
-    env.caller_env.seedf64 = if seedf64.is_nan() { f64::from_bits(0x7ff8_0000_0000_0000) } else { seedf64 };
 
     //attachments
     env.caller_env.attached_symbol = Vec::new();
@@ -1058,7 +981,7 @@ pub fn call_wasmvm(
         std::panic::panic_any("wasm_noop");
     }
 
-    let error = consensus::bic::wasm::call_contract(env, bytecode.as_deref().unwrap_or_else(|| panic_any("invalid_bytecode")), function, args);
+    let error = consensus::riscv::host::call(env, bytecode.as_deref().unwrap_or_else(|| panic_any("invalid_bytecode")), function, args);
     env.call_depth = env.call_depth.saturating_sub(1);
     error
 }

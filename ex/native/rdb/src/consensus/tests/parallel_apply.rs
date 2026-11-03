@@ -2,7 +2,8 @@
 
 use crate::bcat;
 use crate::consensus::consensus_apply::{apply_entry_mode, SPECULATIVE_BUDGET_BYTES};
-use crate::consensus::tests::apply_golden::{entry, hash_muts, seed_tree, state_digest, txu, txu_attached, wallet_from, HEIGHT, WASM_RUN_EMPTY, WASM_RUN_LOOP};
+use crate::consensus::tests::apply_golden::{entry, hash_muts, seed_tree, state_digest, txu, txu_attached, wallet_from, HEIGHT};
+use crate::consensus::tests::riscv_contracts::{COUNTER, EMPTY, SPIN};
 use crate::consensus::tests::chain_harness::{Chain, Wallet};
 use crate::model::entry::Entry;
 use crate::model::tx::TXU;
@@ -59,8 +60,8 @@ fn genesis(world: &World) -> Chain {
     }
     chain.put(b"bic:epoch:segment_vr_hash", &[5u8; 32]);
     chain.put(b"bic:epoch:diff_bits", b"0");
-    chain.put(&bcat(&[b"account:", &world.w[22].pk, b":attribute:bytecode"]), WASM_RUN_EMPTY);
-    chain.put(&bcat(&[b"account:", &world.w[23].pk, b":attribute:bytecode"]), WASM_RUN_LOOP);
+    chain.put(&bcat(&[b"account:", &world.w[22].pk, b":attribute:bytecode"]), EMPTY);
+    chain.put(&bcat(&[b"account:", &world.w[23].pk, b":attribute:bytecode"]), SPIN);
     seed_tree(&chain);
     chain
 }
@@ -87,7 +88,7 @@ fn blocks(world: &mut World) -> Vec<(Entry, bool)> {
     let producer = 21;
     let fresh = wallet_from(200).pk;
     let p = world.w[producer].pk;
-    let (wasm_ok, wasm_loop) = (world.w[22].pk, world.w[23].pk);
+    let (contract_ok, contract_loop) = (world.w[22].pk, world.w[23].pk);
 
     let mut mixed = Vec::new();
     for i in 0..6 {
@@ -110,11 +111,11 @@ fn blocks(world: &mut World) -> Vec<(Entry, bool)> {
     mixed.push(world.transfer(20, &p, 1_000 * AMA));
     mixed.push(world.transfer(10, &world.w[0].pk.clone(), AMA / 3));
 
-    let wasm = vec![
-        world.call(11, &wasm_ok, 5),
-        world.call(12, &wasm_ok, 6),
-        world.call(13, &wasm_loop, 7),
-        world.transfer(14, &wasm_ok, AMA),
+    let contracts = vec![
+        world.call(11, &contract_ok, 5),
+        world.call(12, &contract_ok, 6),
+        world.call(13, &contract_loop, 7),
+        world.transfer(14, &contract_ok, AMA),
     ];
 
     let mut independent = Vec::new();
@@ -131,7 +132,7 @@ fn blocks(world: &mut World) -> Vec<(Entry, bool)> {
 
     vec![
         (entry(HEIGHT, &world.w[producer], mixed), false),
-        (entry(HEIGHT + 1, &world.w[producer], wasm), true),
+        (entry(HEIGHT + 1, &world.w[producer], contracts), true),
         (entry(HEIGHT + 2, &world.w[producer], independent), false),
         (entry(HEIGHT + 3, &world.w[producer], large), false),
     ]
@@ -162,13 +163,7 @@ fn parallel_apply_matches_serial() {
     assert_eq!(reexecuted[2].0, 0, "independent block must need no re-execution");
 }
 
-const WASM_RUN_COUNT: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00,
-    0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x16, 0x01, 0x14, 0x01, 0x01, 0x7f, 0x03, 0x40,
-    0x20, 0x00, 0x41, 0x01, 0x6a, 0x22, 0x00, 0x41, 0xe8, 0x07, 0x49, 0x0d, 0x00, 0x0b, 0x0b,
-];
-
-fn wasm_exec_used(bytecode: &[u8], warm_first: bool) -> Vec<u8> {
+fn contract_exec_used(bytecode: &[u8], warm_first: bool) -> Vec<u8> {
     let world = World::new();
     let chain = genesis(&world);
     let contract = wallet_from(201);
@@ -176,7 +171,7 @@ fn wasm_exec_used(bytecode: &[u8], warm_first: bool) -> Vec<u8> {
     let mut nonce = 0;
     let mut call = |attached: Option<(&[u8], i128)>| {
         nonce += 1;
-        txu_attached(&world.w[0], nonce, &contract.pk, b"run", vec![], attached)
+        txu_attached(&world.w[0], nonce, &contract.pk, b"get", vec![], attached)
     };
     if warm_first {
         let e = entry(HEIGHT, &world.w[21], vec![call(Some((b"AMA", 5)))]);
@@ -185,15 +180,15 @@ fn wasm_exec_used(bytecode: &[u8], warm_first: bool) -> Vec<u8> {
     let e = entry(HEIGHT + 1, &world.w[21], vec![call(None)]);
     let ((txn, _, _, receipts, _, _), _) = apply_entry_mode(chain.db, chain.db.transaction(), e, &[0u8; 48], &[0u8; 64], true, None);
     txn.commit().unwrap();
-    assert!(receipts[0].success);
+    assert!(receipts[0].success, "{:?}", receipts[0].result);
     receipts[0].exec_used.clone()
 }
 
 #[test]
-fn wasm_gas_does_not_depend_on_the_artifact_cache() {
-    let variant = |tag: u8| [WASM_RUN_COUNT, &[0x00, 0x04, 0x03, b'a', b'b', tag]].concat();
-    let warmed = wasm_exec_used(&variant(b'w'), true);
-    let reference = wasm_exec_used(&variant(b'c'), false);
+fn contract_gas_does_not_depend_on_the_program_cache() {
+    let variant = |tag: u8| [COUNTER, &[tag]].concat();
+    let warmed = contract_exec_used(&variant(b'w'), true);
+    let reference = contract_exec_used(&variant(b'c'), false);
     let _ = std::panic::take_hook();
     assert_eq!(warmed, reference);
 }

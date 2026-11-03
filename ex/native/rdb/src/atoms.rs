@@ -83,7 +83,6 @@ rustler::atoms! {
 
     cost_per_byte_historical,
     cost_per_byte_state,
-    cost_per_op_wasm,
 
     cost_per_db_read_base,
     cost_per_db_read_byte,

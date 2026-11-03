@@ -179,33 +179,35 @@ fn run_blocks() -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-//module exporting run() with an empty body
-pub(crate) const WASM_RUN_EMPTY: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00,
-    0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
-];
-
-//module exporting run() that loops forever
-pub(crate) const WASM_RUN_LOOP: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00,
-    0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
-];
-
 fn run_blocks_extended() -> [u8; 32] {
+    run_blocks_extended_with(true)
+}
+
+fn run_blocks_extended_mainnet() -> [u8; 32] {
+    run_blocks_extended_with(false)
+}
+
+fn run_blocks_extended_with(testnet_block: bool) -> [u8; 32] {
     let chain = Chain::new();
     let producer = wallet_from(11);
     let alice = wallet_from(12);
     let bob = wallet_from(13);
-    let wasm_ok = wallet_from(14);
-    let wasm_loop = wallet_from(15);
+    let contract_ok = wallet_from(14);
+    let contract_loop = wallet_from(15);
+    let rv_ok = wallet_from(16);
+    let rv_loop = wallet_from(17);
     let ama = 1_000_000_000_000_000i128;
     for w in [&alice, &bob] {
         chain.fund(&w.pk, 50 * ama);
     }
     chain.put(b"bic:epoch:segment_vr_hash", &[5u8; 32]);
     chain.put(b"bic:epoch:diff_bits", b"24");
-    chain.put(&bcat(&[b"account:", &wasm_ok.pk, b":attribute:bytecode"]), WASM_RUN_EMPTY);
-    chain.put(&bcat(&[b"account:", &wasm_loop.pk, b":attribute:bytecode"]), WASM_RUN_LOOP);
+    chain.put(&bcat(&[b"account:", &contract_ok.pk, b":attribute:bytecode"]), crate::consensus::tests::riscv_contracts::EMPTY);
+    chain.put(&bcat(&[b"account:", &contract_loop.pk, b":attribute:bytecode"]), crate::consensus::tests::riscv_contracts::SPIN);
+    if testnet_block {
+        chain.put(&bcat(&[b"account:", &rv_ok.pk, b":attribute:bytecode"]), crate::consensus::tests::riscv_contracts::EMPTY);
+        chain.put(&bcat(&[b"account:", &rv_loop.pk, b":attribute:bytecode"]), crate::consensus::tests::riscv_contracts::SPIN);
+    }
 
     //bloom pages the failing sol touches already exist, one with a bit preset,
     //so its revert clears bits on existing pages
@@ -228,21 +230,23 @@ fn run_blocks_extended() -> [u8; 32] {
 
     apply(&chain, entry(HEIGHT, &producer, vec![
         txu(&alice, 1, b"Epoch", b"submit_sol", vec![sol.clone()]),
-        txu_attached(&alice, 2, &wasm_ok.pk, b"run", vec![], Some((b"AMA", 5))),
-        txu_attached(&bob, 1, &wasm_loop.pk, b"run", vec![], Some((b"AMA", 7))),
+        txu_attached(&alice, 2, &contract_ok.pk, b"run", vec![], Some((b"AMA", 5))),
+        txu_attached(&bob, 1, &contract_loop.pk, b"run", vec![], Some((b"AMA", 7))),
         txu(&bob, 2, b"Coin", b"transfer", transfer(&alice, ama)),
         txu(&alice, 3, b"Coin", b"transfer", transfer(&bob, 10_000 * ama)),
     ]), &mut h);
 
     apply(&chain, entry(HEIGHT + 1, &producer, vec![]), &mut h);
 
-    //wasm only executes on testnet: a call that runs, and one that loops until
+    //contracts only execute on testnet: a call that runs, and one that loops until
     //its exec budget is gone after the attachment's balance writes
-    apply_net(&chain, entry(HEIGHT + 2, &producer, vec![
-        txu_attached(&alice, 5, &wasm_ok.pk, b"run", vec![], Some((b"AMA", 5))),
-        txu_attached(&bob, 5, &wasm_loop.pk, b"run", vec![], Some((b"AMA", 7))),
-        txu(&bob, 6, b"Coin", b"transfer", transfer(&alice, ama)),
-    ]), &mut h, true);
+    if testnet_block {
+        apply_net(&chain, entry(HEIGHT + 2, &producer, vec![
+            txu_attached(&alice, 5, &rv_ok.pk, b"run", vec![], Some((b"AMA", 5))),
+            txu_attached(&bob, 5, &rv_loop.pk, b"run", vec![], Some((b"AMA", 7))),
+            txu(&bob, 6, b"Coin", b"transfer", transfer(&alice, ama)),
+        ]), &mut h, true);
+    }
 
     let segment_height = (HEIGHT / 1000 + 1) * 1000;
     apply(&chain, entry(segment_height, &producer, vec![
@@ -298,5 +302,13 @@ fn apply_entry_output_is_pinned_extended() {
     assert_eq!(hex(&a), GOLDEN_EXTENDED, "apply_entry output changed");
 }
 
+#[test]
+fn mainnet_contract_calls_are_pinned() {
+    let a = run_reporting(run_blocks_extended_mainnet);
+    assert_eq!(a, run_reporting(run_blocks_extended_mainnet));
+    assert_eq!(hex(&a), GOLDEN_MAINNET_CONTRACTS, "mainnet apply_entry output changed");
+}
+
+const GOLDEN_MAINNET_CONTRACTS: &str = "0e4ff1c33657d5481cc742cebacce734790307487d59951f2cda8280c81a3735";
 const GOLDEN: &str = "060254327e907419385e434f9367378d37a4651a4dbe841f2f0c8fe9d14f46f1";
-const GOLDEN_EXTENDED: &str = "1fde8ae4be5163ca0979769e2775099fe04c914a56eead4ad979b160011be146";
+const GOLDEN_EXTENDED: &str = "7c97e3404626d1e0383c9771630437ad764e1d23094377debc8d9b0e2f98b2a1";

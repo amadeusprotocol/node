@@ -1327,7 +1327,6 @@ impl TestEnv {
             caller_env: CallerEnv {
                 readonly: false,
                 seed: Vec::new(),
-                seedf64: 1.0,
                 entry_signer: [0u8; 48],
                 entry_prev_hash: [0u8; 32],
                 entry_slot: 0,

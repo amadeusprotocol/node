@@ -33,35 +33,44 @@ pub const TX_EXEC_LOCK: i128 = 2 * AMA_01_CENT;
 
 pub const COST_PER_BYTE_HISTORICAL: i128 = 1_111; //cost to increase the ledger size
 pub const COST_PER_BYTE_STATE: i128 = 5_555; //cost to grow the contract state
-pub const COST_PER_OP_WASM: i128 = 1; //cost to execute a wasm op
 
 pub const COST_PER_DB_READ_BASE: i128 = 5_000;
 pub const COST_PER_DB_READ_BYTE: i128 = 5;
+pub const COST_PER_DB_READ_BYTE_TESTNET: i128 = 1;
 
 pub const COST_PER_DB_WRITE_BASE: i128 = 25_000;
 pub const COST_PER_DB_WRITE_BYTE: i128 = 25;
+pub const COST_PER_DB_WRITE_BYTE_TESTNET: i128 = 1;
 
-pub const COST_PER_CALL: i128 = 100_000;
 pub const COST_PER_NEW_LEAF_MERKLE: i128 = COST_PER_BYTE_STATE * 128; //cost to grow the merkle tree
 
-//wasm ops are metered 1 point each; a tx pays floor(points / 10)
-pub const WASM_POINTS_PER_UNIT: i128 = 10;
+pub const RISCV_GAS_PER_UNIT: i128 = 2;
+pub const RISCV_HOST_CALL_COST: i128 = 10;
+pub const RISCV_COPY_BYTES_PER_UNIT: u64 = 32;
+pub const RISCV_CALL_COST: i128 = 2_000;
+pub const RISCV_CODE_WORD_COST: i128 = 6;
+pub const RISCV_DEPLOY_BYTE_COST: i128 = 1;
+pub const RISCV_PAGE_COST: i128 = 140;
+pub const RISCV_SHA256_BLOCK_COST: i128 = 10;
+pub const RISCV_KECCAK_BLOCK_COST: i128 = 100;
+pub const RISCV_BLAKE3_CHUNK_COST: i128 = 45;
+pub const RISCV_BLS_VERIFY_COST: i128 = 250_000;
+pub const RISCV_BLS_AGGREGATE_KEY_COST: i128 = 64_000;
+pub const RISCV_SECP256K1_RECOVER_COST: i128 = 50_000;
+pub const RISCV_SECP256K1_VERIFY_COST: i128 = 25_000;
+pub const RISCV_ED25519_VERIFY_COST: i128 = 10_000;
 
 pub const LOG_MSG_SIZE: usize = 4096; //max log line length
 pub const LOG_TOTAL_SIZE: usize = 16384; //max log total size
 pub const LOG_TOTAL_ELEMENTS: usize = 32; //max elements in list
-pub const WASM_MAX_PTR_LEN: usize = 1048576; //largest term passable from inside WASM to HOST
-pub const WASM_MAX_PANIC_MSG_SIZE: usize = 128;
+pub const MAX_PTR_LEN: usize = 1048576;
+pub const MAX_RETURN_SIZE: usize = 128;
 
 pub const MAX_DB_KEY_SIZE: usize = 512;
 pub const MAX_DB_VALUE_SIZE: usize = 1048576;
 
-pub const WASM_MAX_BINARY_SIZE: usize = 1048576;
-pub const WASM_MAX_CALL_ARGS_TOTAL: usize = 1 * 1024 * 1024;
-pub const WASM_MAX_FUNCTIONS: u32 = 1000;
-pub const WASM_MAX_GLOBALS: u32 = 100;
-pub const WASM_MAX_EXPORTS: u32 = 50;
-pub const WASM_MAX_IMPORTS: u32 = 50;
+pub const MAX_CONTRACT_SIZE: usize = 524288;
+pub const MAX_CALL_ARGS_TOTAL: usize = 1 * 1024 * 1024;
 
 pub const MAX_CALL_DEPTH: u32 = 16;
 
@@ -73,6 +82,14 @@ pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i12
     // Increment validator / burn
     consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.entry_signer, b":balance:AMA"]), cost / 2);
     consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &coin::BURN_ADDRESS, b":balance:AMA"]), cost / 2);
+}
+
+pub fn db_read_byte_cost(env: &crate::consensus::consensus_apply::ApplyEnv) -> i128 {
+    if env.testnet { COST_PER_DB_READ_BYTE_TESTNET } else { COST_PER_DB_READ_BYTE }
+}
+
+pub fn db_write_byte_cost(env: &crate::consensus::consensus_apply::ApplyEnv) -> i128 {
+    if env.testnet { COST_PER_DB_WRITE_BYTE_TESTNET } else { COST_PER_DB_WRITE_BYTE }
 }
 
 pub fn cost_per_bytes_historical(bytes: usize) -> i128 {
