@@ -21,14 +21,6 @@ defmodule API.Contract do
       RDB.contract_view(db, tip, view_pk, contract, function, args, !!Application.fetch_env!(:ama, :testnet))
     end
 
-    def validate(bytecode) do
-      %{db: db} = :persistent_term.get({:rocksdb, Fabric})
-      tip = DB.Chain.tip_entry() |> RDB.vecpak_encode()
-      {error, logs} = RDB.contract_validate(db, tip, bytecode, !!Application.fetch_env!(:ama, :testnet))
-      logs = Enum.map(logs, & RocksDB.ascii_dump(&1))
-      %{error: error, logs: logs}
-    end
-
     @richlist_top 1000
     @richlist_ttl_ms 60 * 60_000
 

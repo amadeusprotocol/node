@@ -37,7 +37,6 @@ defmodule Ama.MixProject do
       {:blake3_ex, git: "https://github.com/vans163/blake3", branch: "finalize_xof"},
       {:bls_ex, git: "https://github.com/amadeusprotocol/bls_ex"},
       {:reedsolomon_ex, git: "https://github.com/amadeusprotocol/reedsolomon_ex"},
-      {:wasmer_ex, git: "https://github.com/amadeusprotocol/wasmer_ex"},
 
       {:comsat, git: "https://github.com/vans163/ComSat.git"},
       {:ex_stun, git: "https://github.com/elixir-webrtc/ex_stun.git"},

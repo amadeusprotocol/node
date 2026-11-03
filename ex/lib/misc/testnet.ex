@@ -15,12 +15,11 @@ defmodule Testnet do
 
   def deploy(path) do deploy(Application.fetch_env!(:ama, :keys) |> Enum.at(0), path) end
   def deploy(key, path, init_func \\ nil) do
-    wasmbytes = File.read!(path)
-    if init_func do
-      Testnet.call(key.seed, "Contract", "deploy", [wasmbytes, init_func])
-    else
-      Testnet.call(key.seed, "Contract", "deploy", [wasmbytes])
-    end
+    bytecode = File.read!(path)
+    args = if init_func do [bytecode, init_func] else [bytecode] end
+    gas = RDBProtocol.cost_per_new_leaf_merkle() + (RDBProtocol.cost_per_byte_state() + RDBProtocol.cost_per_byte_historical()) * byte_size(bytecode) + 10 * RDBProtocol.ama_1_cent()
+    txu = TX.build(key.seed, "Contract", "deploy", args, nil, nil, nil, gas)
+    API.TX.submit_and_wait(txu |> TX.pack(), false, false)
   end
 
   def transfer(to, amount, symbol \\ "AMA") do

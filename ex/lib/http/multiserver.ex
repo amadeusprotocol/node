@@ -360,10 +360,6 @@ defmodule Ama.MultiServer do
                 result = API.Epoch.sol_in_epoch(:erlang.binary_to_integer(sol_epoch), Base58.decode(sol_hash))
                 quick_reply(state, result)
 
-            r.method == "POST" and String.starts_with?(r.path, "/api/contract/validate") ->
-                {r, bytecode} = read_body_all_limited(state, r)
-                result = API.Contract.validate(bytecode)
-                quick_reply(%{state|request: r}, result)
             r.method == "POST" and r.path == "/api/contract/get" ->
                 {r, key} = read_body_all_limited(state, r)
                 result = API.Contract.get(key)

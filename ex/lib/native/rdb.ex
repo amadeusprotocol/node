@@ -46,7 +46,6 @@ defmodule RDB do
 
   def apply_entry(_db, _entry_hash, _pk, _sk, _testnet, _archival, _want_receipts), do: :erlang.nif_error(:nif_not_loaded)
   def contract_view(_db, _entry, _view_pk, _contract, _function, _args, _testnet), do: :erlang.nif_error(:nif_not_loaded)
-  def contract_validate(_db, _entry, _wasmbytes, _testnet), do: :erlang.nif_error(:nif_not_loaded)
 
   def vecpak_encode(_map), do: :erlang.nif_error(:nif_not_loaded)
   def vecpak_decode(_bin), do: :erlang.nif_error(:nif_not_loaded)

@@ -40,19 +40,6 @@ defmodule Ama.Bakeware do
             end
             :erlang.halt()
 
-          arg0 == "deploytx" ->
-            ["deploytx", wasmpath] = args
-            sk = Application.fetch_env!(:ama, :seed64)
-            wasmbytes = File.read!(wasmpath)
-            error = BIC.Contract.validate(wasmbytes)
-            if error[:error] != :ok do
-              IO.puts(:stderr, inspect(error))
-              :erlang.halt()
-            end
-            txu = TX.build(sk, "Contract", "deploy", [wasmbytes])
-            IO.puts Base58.encode(txu |> TX.pack())
-            :erlang.halt()
-
           arg0 == "getpk" ->
             ["getpk", path] = args
             sk = File.read!(path) |> String.trim()
