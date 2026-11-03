@@ -371,6 +371,7 @@ pub fn commit_tx(applyenv: &mut ApplyEnv, out: TxOutput) {
             applyenv.receipts.push(receipt);
         }
         Err(payload) => {
+            let payload = consensus_kv::rethrow_db_fault(payload);
             //TODO: refund storage costs on revert?
             refund_exec_storage_deposit(applyenv);
 

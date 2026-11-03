@@ -367,10 +367,10 @@ impl<'a> Ctx<'a> {
 
     fn read(&self, key: &[u8]) -> Option<Vec<u8>> {
         match &self.leaves {
-            Leaves::Txn(txn, _) => txn.get_cf(self.cf_leaves, key).ok().flatten(),
+            Leaves::Txn(txn, _) => txn.get_cf(self.cf_leaves, key).unwrap(),
             Leaves::Db(db, _, pending) => match key.try_into().ok().and_then(|path: Path| pending.get(&path)) {
                 Some(v) => v.clone(),
-                None => db.get_cf(self.cf_leaves, key).ok().flatten(),
+                None => db.get_cf(self.cf_leaves, key).unwrap(),
             },
         }
     }
@@ -433,6 +433,7 @@ impl<'a> Ctx<'a> {
                 break;
             }
         }
+        iter.status().unwrap();
         (first, more)
     }
 }
@@ -456,6 +457,7 @@ fn first_two_leaves_pending(iter: &mut RawIter, pending: &BTreeMap<Path, Option<
         }
         iter.next();
     }
+    iter.status().unwrap();
     found.extend(
         pending.range(*lo..=*hi)
             .filter_map(|(path, v)| v.as_deref().and_then(decode_leaf).map(|(id, val)| (*path, id, val)))
@@ -729,7 +731,7 @@ use crate::consensus::consensus_apply::ApplyEnv;
 pub fn hbsmt_root_env(env: &mut ApplyEnv, cf_name: &str) -> [u8; 32] {
     let cf = env.db.cf_handle(cf_name).unwrap();
     let key = split_key(&[0u8; 32], 0);
-    if let Some(v) = env.txn.get_cf(&cf, key).ok().flatten() {
+    if let Some(v) = env.txn.get_cf(&cf, key).unwrap() {
         if v.len() == 32 {
             let mut h = [0u8; 32];
             h.copy_from_slice(&v);

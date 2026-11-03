@@ -11,6 +11,23 @@ use std::ops::Bound;
 pub type Writes = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
 pub type BitWrites = BTreeMap<Vec<u8>, BTreeSet<u64>>;
 
+pub struct DbFault(pub &'static str);
+
+pub fn db_fault(what: &'static str) -> ! {
+    std::panic::panic_any(DbFault(what))
+}
+
+pub fn db_read<T, E>(result: Result<T, E>, what: &'static str) -> T {
+    result.unwrap_or_else(|_| db_fault(what))
+}
+
+pub fn rethrow_db_fault(payload: Box<dyn std::any::Any + Send>) -> Box<dyn std::any::Any + Send> {
+    if payload.is::<DbFault>() {
+        std::panic::resume_unwind(payload)
+    }
+    payload
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
     Key { key: Vec<u8>, value: Option<[u8; 32]> },
@@ -44,7 +61,7 @@ fn layered_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
             return v.clone();
         }
     }
-    env.txn.get_cf(&env.cf, key).unwrap()
+    db_read(env.txn.get_cf(&env.cf, key), "kv_get_failed")
 }
 
 fn raw_get(env: &mut ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
@@ -124,7 +141,7 @@ pub fn overlay_apply(env: &mut ApplyEnv, writes: Writes, bits: BitWrites) {
 fn outside_get(env: &ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
     match env.overlay.block.get(key).or_else(|| env.overlay.shared.get(key)) {
         Some(v) => v.clone(),
-        None => env.txn.get_cf(&env.cf_contractstate, key).unwrap(),
+        None => db_read(env.txn.get_cf(&env.cf_contractstate, key), "kv_get_failed"),
     }
 }
 
@@ -178,7 +195,7 @@ fn merged_next(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>,
         if !inclusive && it.valid() && it.key() == Some(&cursor[..]) {
             it.next();
         }
-        let db_key = if it.valid() { it.key().map(|k| k.to_vec()) } else { None };
+        let db_key = if it.valid() { it.key().map(|k| k.to_vec()) } else { db_read(it.status(), "kv_iter_failed"); None };
         let ov_key = if active { overlay_next(env, &cursor, inclusive) } else { None };
         let key = match (db_key, ov_key) {
             (Some(a), Some(b)) => a.min(b),
@@ -205,7 +222,7 @@ fn merged_prev(env: &ApplyEnv, seek: &[u8], inclusive: bool) -> Option<(Vec<u8>,
         if !inclusive && it.valid() && it.key() == Some(&cursor[..]) {
             it.prev();
         }
-        let db_key = if it.valid() { it.key().map(|k| k.to_vec()) } else { None };
+        let db_key = if it.valid() { it.key().map(|k| k.to_vec()) } else { db_read(it.status(), "kv_iter_failed"); None };
         let ov_key = if active { overlay_prev(env, &cursor, inclusive) } else { None };
         let key = match (db_key, ov_key) {
             (Some(a), Some(b)) => a.max(b),

@@ -37,7 +37,7 @@ RUN git clone --depth 1 --branch $ELIXIR_VERSION https://github.com/elixir-lang/
     && cd /root/source/elixir && make install \
     && mix local.hex --force && mix local.rebar --force
 
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 CMD ["/bin/bash"]

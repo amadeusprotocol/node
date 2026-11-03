@@ -24,3 +24,4 @@ pub mod wasm_attachments;
 pub mod validator_set;
 pub mod muts_vecpak;
 pub mod chain_index;
+pub mod db_faults;

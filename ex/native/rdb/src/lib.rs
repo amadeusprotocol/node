@@ -4,6 +4,8 @@ pub mod model;
 pub mod tx_filter;
 pub mod upow;
 
+const _: () = assert!(usize::BITS == 64, "rdb requires a 64-bit target");
+
 use rustler::types::{Binary, OwnedBinary};
 use rustler::{Atom, Encoder, Env, Error, NifResult, NifTaggedEnum, ResourceArc, Term};
 
