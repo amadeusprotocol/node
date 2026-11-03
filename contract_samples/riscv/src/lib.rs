@@ -49,8 +49,7 @@ pub mod field {
     pub const ACCOUNT_CURRENT: u64 = 50;
     pub const ACCOUNT_CALLER: u64 = 51;
     pub const ACCOUNT_ORIGIN: u64 = 52;
-    pub const ATTACHED_SYMBOL: u64 = 70;
-    pub const ATTACHED_AMOUNT: u64 = 71;
+    pub const ATTACHMENTS: u64 = 70;
 }
 
 pub const NOT_FOUND: u64 = u64::MAX;
@@ -148,12 +147,61 @@ pub fn seed() -> Vec<u8> {
     env(field::SEED)
 }
 
-pub fn attachment() -> Option<(Vec<u8>, Vec<u8>)> {
-    let symbol = env(field::ATTACHED_SYMBOL);
-    if symbol.is_empty() {
-        return None;
+#[derive(Clone, Debug, PartialEq)]
+pub enum Asset {
+    Coin { symbol: Vec<u8>, amount: i128 },
+    Nft { collection: Vec<u8>, token: Vec<u8>, amount: i128 },
+}
+
+impl Asset {
+    pub fn coin(symbol: &[u8], amount: i128) -> Asset {
+        Asset::Coin { symbol: symbol.to_vec(), amount }
     }
-    Some((symbol, env(field::ATTACHED_AMOUNT)))
+
+    pub fn nft(collection: &[u8], token: &[u8], amount: i128) -> Asset {
+        Asset::Nft { collection: collection.to_vec(), token: token.to_vec(), amount }
+    }
+}
+
+pub fn attachments() -> Vec<Asset> {
+    let bytes = env(field::ATTACHMENTS);
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let Ok(vecpak::Term::Map(entries)) = vecpak::decode(&bytes) else { abort(b"bad attachments") };
+    let mut assets = Vec::new();
+    for (k, v) in entries {
+        let vecpak::Term::Binary(key) = k else { abort(b"bad attachments") };
+        match v {
+            vecpak::Term::Int(amount) => assets.push(Asset::Coin { symbol: key, amount }),
+            vecpak::Term::Map(tokens) => {
+                for (t, a) in tokens {
+                    let (vecpak::Term::Binary(token), vecpak::Term::Int(amount)) = (t, a) else { abort(b"bad attachments") };
+                    assets.push(Asset::Nft { collection: key.clone(), token, amount });
+                }
+            }
+            _ => abort(b"bad attachments"),
+        }
+    }
+    assets
+}
+
+pub fn encode_attachments(assets: &[Asset]) -> Vec<u8> {
+    use vecpak::Term;
+    let mut entries: Vec<(Term, Term)> = Vec::new();
+    for asset in assets {
+        match asset {
+            Asset::Coin { symbol, amount } => entries.push((Term::Binary(symbol.clone()), Term::Int(*amount))),
+            Asset::Nft { collection, token, amount } => {
+                let pair = (Term::Binary(token.clone()), Term::Int(*amount));
+                match entries.iter_mut().find(|(k, v)| matches!((k, v), (Term::Binary(k), Term::Map(_)) if k == collection)) {
+                    Some((_, Term::Map(tokens))) => tokens.push(pair),
+                    _ => entries.push((Term::Binary(collection.clone()), Term::Map(alloc::vec![pair]))),
+                }
+            }
+        }
+    }
+    vecpak::encode(&Term::Map(entries)).unwrap_or_else(|e| abort(e.as_bytes()))
 }
 
 pub fn kv_put(key: &[u8], value: &[u8]) {
@@ -195,7 +243,7 @@ pub fn kv_get_prev(prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     fetch(1024, |b| syscall(id::KV_GET_PREV, [ptr(prefix), len(prefix), ptr(key), len(key), ptr(b), len(b), 0])).map(split_pair)
 }
 
-pub fn call(contract: &[u8], function: &[u8], args: &[&[u8]], attach: Option<(&[u8], &[u8])>) -> Vec<u8> {
+pub fn call(contract: &[u8], function: &[u8], args: &[&[u8]], attachments: &[Asset]) -> Vec<u8> {
     let table = |items: &[&[u8]]| {
         let mut t = Vec::with_capacity(1 + 2 * items.len());
         t.push(items.len() as u64);
@@ -208,10 +256,9 @@ pub fn call(contract: &[u8], function: &[u8], args: &[&[u8]], attach: Option<(&[
     let mut main: Vec<&[u8]> = vec![contract, function];
     main.extend_from_slice(args);
     let main = table(&main);
-    let extra = attach.map(|(sym, amt)| table(&[sym, amt]));
-    let extra_ptr = extra.as_ref().map_or(0, |t| t.as_ptr() as u64);
+    let attached = if attachments.is_empty() { Vec::new() } else { encode_attachments(attachments) };
     let mut out = [0u8; 256];
-    let n = syscall(id::CALL, [main.as_ptr() as u64, extra_ptr, out.as_mut_ptr() as u64, out.len() as u64, 0, 0, 0]) as usize;
+    let n = syscall(id::CALL, [main.as_ptr() as u64, ptr(&attached), len(&attached), out.as_mut_ptr() as u64, out.len() as u64, 0, 0]) as usize;
     out[..n.min(out.len())].to_vec()
 }
 

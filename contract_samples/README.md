@@ -22,7 +22,7 @@ Deposit vault, coin and NFT samples
 ```elixir
 key1 = Application.fetch_env!(:ama, :keys) |> Enum.at(1)
 Testnet.deploy key1, "/home/user/project/node/contract_samples/riscv/out/deposit.elf"
-Testnet.call key1.seed, key1.pk, "deposit", [], "AMA", "100000"
+Testnet.call key1.seed, key1.pk, "deposit", [], %{"AMA" => 100000}
 Testnet.call key1.seed, key1.pk, "withdraw", ["AMA", "10"]
 Testnet.view key1.pk, "balance", ["AMA"]
 

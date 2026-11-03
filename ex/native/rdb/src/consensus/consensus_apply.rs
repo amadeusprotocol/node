@@ -33,8 +33,7 @@ pub struct CallerEnv {
     pub account_origin: Vec<u8>,
     pub account_caller: Vec<u8>,
     pub account_current: Vec<u8>,
-    pub attached_symbol: Vec<u8>,
-    pub attached_amount: Vec<u8>,
+    pub attachments: Vec<u8>,
     pub call_counter: u32,
     pub call_exec_points: u64,
     pub call_exec_points_remaining: u64,
@@ -71,8 +70,7 @@ pub fn make_caller_env(
         account_origin: Vec::new(),
         account_caller: Vec::new(),
         account_current: Vec::new(),
-        attached_symbol: Vec::new(),
-        attached_amount: Vec::new(),
+        attachments: Vec::new(),
         call_counter: 0,
         call_exec_points: 10_000_000,
         call_exec_points_remaining: 10_000_000,
@@ -280,8 +278,7 @@ pub fn execute_tx(applyenv: &mut ApplyEnv, i: usize, txu: crate::model::tx::TXU)
     let contract = action.contract;
     let function = action.function;
     let args = action.args;
-    let attached_symbol = action.attached_symbol.clone();
-    let attached_amount = action.attached_amount.clone();
+    let attachments = action.attachments;
 
     applyenv.caller_env.call_counter = 1;
     applyenv.caller_env.account_current = contract.to_vec();
@@ -300,13 +297,14 @@ pub fn execute_tx(applyenv: &mut ApplyEnv, i: usize, txu: crate::model::tx::TXU)
         applyenv.exec_track = true;
         match consensus::bls12_381::validate_public_key(contract.as_slice()) {
             false => {
-                //println!("{:?}->{:?} {:?} {:?}", String::from_utf8_lossy(&contract), String::from_utf8_lossy(&function), attached_amount, attached_symbol);
-                call_bic(applyenv, contract, function, args, attached_symbol, attached_amount);
+                if attachments.is_some() {
+                    panic_any("attachments_not_allowed_on_builtin")
+                }
+                call_bic(applyenv, contract, function, args);
                 b"ok".to_vec()
             }
             true => {
-                //println!("{:?}->{:?} {:?} {:?}", bs58::encode(&contract).into_string(), String::from_utf8_lossy(&function), attached_amount, attached_symbol);
-                let result = call_vm(applyenv, contract, function, args, attached_symbol, attached_amount);
+                let result = call_vm(applyenv, contract, function, args, attachments);
                 result
             }
         }
@@ -547,11 +545,11 @@ pub fn contract_view<'db, 'a>(
     std::panic::set_hook(Box::new(|_| {}));
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match consensus::bls12_381::validate_public_key(contract.as_slice()) {
         false => {
-            call_bic(&mut applyenv, contract, function, args, None, None);
+            call_bic(&mut applyenv, contract, function, args);
             b"ok".to_vec()
         }
         true => {
-            let result = call_vm(&mut applyenv, contract, function, args, None, None);
+            let result = call_vm(&mut applyenv, contract, function, args, None);
             result
         }
     }));
@@ -842,8 +840,6 @@ pub fn call_bic(
     contract: Vec<u8>,
     function: Vec<u8>,
     args: Vec<Vec<u8>>,
-    attached_symbol: Option<Vec<u8>>,
-    attached_amount: Option<Vec<u8>>,
 ) {
     if env.testnet {
         match (contract.as_slice(), function.as_slice()) {
@@ -917,8 +913,7 @@ pub fn call_vm(
     contract: Vec<u8>,
     function: Vec<u8>,
     args: Vec<Vec<u8>>,
-    attached_symbol: Option<Vec<u8>>,
-    attached_amount: Option<Vec<u8>>,
+    attachments: Option<Vec<u8>>,
 ) -> Vec<u8> {
     env.call_depth = env.call_depth.saturating_add(1);
     if env.call_depth > protocol::MAX_CALL_DEPTH {
@@ -942,42 +937,20 @@ pub fn call_vm(
     let result_hash = hasher.finalize();
     env.caller_env.seed = result_hash.as_bytes().to_vec();
 
-    //attachments
-    env.caller_env.attached_symbol = Vec::new();
-    env.caller_env.attached_amount = Vec::new();
+    env.caller_env.attachments = Vec::new();
 
     let bytecode = consensus::bic::contract::bytecode(env, contract.as_slice());
     if bytecode.is_none() {
         panic_any("account_has_no_bytecode")
     }
 
-    match (attached_symbol, attached_amount) {
-        (Some(attached_symbol), Some(attached_amount)) => {
-            let amount =
-                std::str::from_utf8(&attached_amount).ok().and_then(|s| s.parse::<i128>().ok()).unwrap_or_else(|| panic_any("invalid_attached_amount"));
-            if amount <= 0 {
-                panic_any("invalid_attached_amount")
-            }
-            if amount > consensus::bic::coin::balance(env, &env.caller_env.account_caller.clone(), &attached_symbol) {
-                panic_any("attached_amount_insufficient_funds")
-            }
-            if consensus::bic::coin::paused(env, &attached_symbol) {
-                panic_any("paused")
-            }
-            if consensus::bic::coin::soulbound(env, &attached_symbol) {
-                panic_any("soulbound")
-            }
-
-            consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &contract, b":balance:", &attached_symbol]), amount);
-            consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.account_caller, b":balance:", &attached_symbol]), -amount);
-
-            env.caller_env.attached_symbol = attached_symbol;
-            env.caller_env.attached_amount = attached_amount;
-        }
-        _ => (),
+    if let Some(bytes) = attachments {
+        let assets = consensus::bic::attachment::decode(env, &bytes);
+        consensus::bic::attachment::transfer(env, &contract, &assets);
+        env.caller_env.attachments = bytes;
     }
 
-    if !env.testnet {
+    if !protocol::riscv_enabled(env) {
         std::panic::panic_any("wasm_noop");
     }
 

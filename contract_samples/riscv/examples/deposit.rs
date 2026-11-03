@@ -23,12 +23,19 @@ fn dispatch(f: &[u8]) {
     match f {
         b"balance" => ret_int(c::kv_get(&vault_key(&arg(0))).map_or(0, |v| c::atoi(&v))),
         b"deposit" => {
-            let (symbol, amount) = c::attachment().unwrap_or_else(|| c::abort(b"deposit has no attachment"));
-            let amount = c::atoi(&amount);
-            if amount <= 100 {
-                c::abort(b"deposit amount less than 100");
+            let attached = c::attachments();
+            if attached.is_empty() {
+                c::abort(b"deposit has no attachment");
             }
-            ret_int(c::kv_increment(&vault_key(&symbol), amount))
+            let mut last = 0;
+            for asset in attached {
+                let c::Asset::Coin { symbol, amount } = asset else { c::abort(b"only coins can be deposited") };
+                if amount <= 100 {
+                    c::abort(b"deposit amount less than 100");
+                }
+                last = c::kv_increment(&vault_key(&symbol), amount);
+            }
+            ret_int(last)
         }
         b"withdraw" => {
             let (symbol, amount) = (arg(0), arg(1));
@@ -42,7 +49,7 @@ fn dispatch(f: &[u8]) {
                 c::abort(b"insufficient funds");
             }
             c::kv_increment(&key, -amount_int);
-            c::call(b"Coin", b"transfer", &[&c::account_caller(), &amount, &symbol], None);
+            c::call(b"Coin", b"transfer", &[&c::account_caller(), &amount, &symbol], &[]);
             ret_int(balance - amount_int)
         }
         b"burn" => {
@@ -57,7 +64,7 @@ fn dispatch(f: &[u8]) {
                 c::abort(b"insufficient funds");
             }
             c::kv_increment(&key, -amount_int);
-            c::call(b"Coin", b"transfer", &[&c::BURN_ADDRESS, &amount, &symbol], None);
+            c::call(b"Coin", b"transfer", &[&c::BURN_ADDRESS, &amount, &symbol], &[]);
             ret_int(balance - amount_int)
         }
         _ => c::abort(b"unknown function"),

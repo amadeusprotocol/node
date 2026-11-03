@@ -17,10 +17,11 @@ defmodule Ama.Bakeware do
             contract = if byte_size(contract) > 48 do Base58.decode(contract) else contract end
             sk = Application.fetch_env!(:ama, :seed64)
             {args, []} = Code.eval_string(args)
-            [attach_symbol, attach_amount] = if length(rest) != 2 do [nil,nil] else
-              [attach_symbol, attach_amount] = rest
+            attachments = case rest do
+              [attachments] -> {attachments, []} = Code.eval_string(attachments); attachments
+              _ -> nil
             end
-            txu = TX.build(sk, contract, func, args, nil, attach_symbol, attach_amount)
+            txu = TX.build(sk, contract, func, args, nil, attachments)
             IO.puts Base58.encode(txu |> TX.pack())
             :erlang.halt()
 
@@ -29,10 +30,11 @@ defmodule Ama.Bakeware do
             contract = if byte_size(contract) > 48 do Base58.decode(contract) else contract end
             sk = Application.fetch_env!(:ama, :seed64)
             {args, []} = Code.eval_string(args)
-            [attach_symbol, attach_amount] = if length(rest) != 2 do [nil,nil] else
-              [attach_symbol, attach_amount] = rest
+            attachments = case rest do
+              [attachments] -> {attachments, []} = Code.eval_string(attachments); attachments
+              _ -> nil
             end
-            txu = TX.build(sk, contract, func, args, nil, attach_symbol, attach_amount)
+            txu = TX.build(sk, contract, func, args, nil, attachments)
             result = RPC.API.get("/api/tx/submit/#{Base58.encode(txu |> TX.pack())}")
             #IO.puts Base58.encode(packed_tx)
             if result[:error] == "ok" do

@@ -8,10 +8,10 @@ pub struct Action {
     pub contract: Vec<u8>,
     pub function: Vec<u8>,
     pub args: Vec<Vec<u8>>,
-    pub attached_symbol: Option<Vec<u8>>,
-    pub attached_amount: Option<Vec<u8>>,
     //extra budget in flat AMA on top of the default, see protocol::tx_locks
     pub attached_gas: Option<i128>,
+    //canonical vecpak map of coin symbol => amount and collection => {token => amount}
+    pub attachments: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,16 +39,12 @@ impl EncodeToTerm for Action {
             (Term::Binary(b"args".to_vec()), Term::List(args_list)),
         ];
 
-        if let Some(ref sym) = self.attached_symbol {
-            pairs.push((Term::Binary(b"attached_symbol".to_vec()), Term::Binary(sym.clone())));
-        }
-
-        if let Some(ref amt) = self.attached_amount {
-            pairs.push((Term::Binary(b"attached_amount".to_vec()), Term::Binary(amt.clone())));
-        }
-
         if let Some(gas) = self.attached_gas {
             pairs.push((Term::Binary(b"attached_gas".to_vec()), Term::VarInt(gas)));
+        }
+
+        if let Some(ref attachments) = self.attachments {
+            pairs.push((Term::Binary(b"attachments".to_vec()), vecpak::decode(attachments).map_err(|_| "invalid_attachments")?));
         }
 
         Ok(Term::PropList(pairs))
@@ -72,11 +68,10 @@ impl DecodeFromTerm for Action {
             })
             .collect();
 
-        let attached_symbol = codec::pl_get_bytes_opt(pairs, b"attached_symbol").map(|b| b.to_vec());
-        let attached_amount = codec::pl_get_bytes_opt(pairs, b"attached_amount").map(|b| b.to_vec());
         let attached_gas = codec::pl_get_varint_opt(pairs, b"attached_gas");
+        let attachments = pairs.iter().find(|(k, _)| matches!(k, Term::Binary(k) if k.as_slice() == b"attachments")).and_then(|(_, v)| vecpak::encode(v.clone()).ok());
 
-        Action { op, contract, function, args, attached_symbol, attached_amount, attached_gas }
+        Action { op, contract, function, args, attached_gas, attachments }
     }
 }
 

@@ -172,7 +172,7 @@ impl Chain {
     fn run(&self, mut env: ApplyEnv<'static>, contract: &[u8], function: &[u8], args: &[&[u8]]) -> Result<(), String> {
         let args: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
         let result = catch_unwind(AssertUnwindSafe(|| {
-            call_bic(&mut env, contract.to_vec(), function.to_vec(), args, None, None);
+            call_bic(&mut env, contract.to_vec(), function.to_vec(), args);
         }));
         match result {
             Ok(()) => {

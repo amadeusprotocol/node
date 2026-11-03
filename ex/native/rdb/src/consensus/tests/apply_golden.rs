@@ -31,9 +31,8 @@ pub(crate) fn txu_attached(signer: &Wallet, nonce: u64, contract: &[u8], functio
                 contract: contract.to_vec(),
                 function: function.to_vec(),
                 args,
-                attached_symbol: attached.map(|(sym, _)| sym.to_vec()),
-                attached_amount: attached.map(|(_, amt)| amt.to_string().into_bytes()),
                 attached_gas: None,
+                attachments: attached.map(|(sym, amt)| vecpak::encode(vecpak::Term::PropList(vec![(vecpak::Term::Binary(sym.to_vec()), vecpak::Term::VarInt(amt))])).unwrap()),
             },
         },
     }
@@ -309,6 +308,6 @@ fn mainnet_contract_calls_are_pinned() {
     assert_eq!(hex(&a), GOLDEN_MAINNET_CONTRACTS, "mainnet apply_entry output changed");
 }
 
-const GOLDEN_MAINNET_CONTRACTS: &str = "0e4ff1c33657d5481cc742cebacce734790307487d59951f2cda8280c81a3735";
+const GOLDEN_MAINNET_CONTRACTS: &str = "0799f5bb6aa1c37504331b059a00cb5ebf7d428e0792ac76cf60ceb512e687a7";
 const GOLDEN: &str = "060254327e907419385e434f9367378d37a4651a4dbe841f2f0c8fe9d14f46f1";
-const GOLDEN_EXTENDED: &str = "7c97e3404626d1e0383c9771630437ad764e1d23094377debc8d9b0e2f98b2a1";
+const GOLDEN_EXTENDED: &str = "8f24c1e0e003289b76632421d6e02d45273296451823dac8e3032972653972b5";

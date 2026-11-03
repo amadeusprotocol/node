@@ -59,7 +59,7 @@ caller-provided buffer and the full length is returned (copy is truncated to the
 |---|---|---|---|
 | 1 | log | ptr, len | |
 | 2 | return | ptr, len (max 128 bytes) | stops, success |
-| 3 | call contract | args table, attachment table or 0, out, cap | result length |
+| 3 | call contract | args table, attachments ptr, len (0 for none), out, cap | result length |
 | 4 | kv_put | key, klen, value, vlen | |
 | 5 | kv_increment | key, klen, delta (decimal string), dlen, out, cap | new value length |
 | 6 | kv_delete | key, klen | |
@@ -80,12 +80,29 @@ caller-provided buffer and the full length is returned (copy is truncated to the
 | 93 | exit | code | 0 succeeds, anything else reverts (`abort`) |
 
 Storage keys are scoped to the contract (`account:<contract>:storage:<key>`). The call table is
-`[u64 count][(u64 ptr, u64 len) * count]` with contract and function as the first two entries; the
-attachment table holds symbol and amount.
+`[u64 count][(u64 ptr, u64 len) * count]` with contract and function as the first two entries.
+
+## Attachments
+
+A call can carry any number of coins and NFTs, sent from the caller to the called contract before it runs.
+They are one vecpak map: a coin symbol maps to a positive integer amount, an NFT collection maps to a map
+of token => amount.
+
+```elixir
+Testnet.call sk, contract, "deposit", [], %{"AMA" => 100_000, "USDFAKE" => 5, "RPG" => %{"gold" => 2}}
+```
+
+Each entry is checked like a built-in transfer (the coin or collection and token must exist, the caller
+must hold enough, paused coins and soulbound coins, collections or tokens are refused); any failure
+reverts the whole call. Attaching to a built-in (`Coin`, `Nft`, ...) fails with
+`attachments_not_allowed_on_builtin`; attaching to an account without bytecode fails as any call to it
+does. In a contract, `c::attachments()` returns what was attached and `c::call(.., &[c::Asset::coin(b"AMA",
+5)])` attaches to a nested call. Decoding costs 1 exec unit per byte and each transfer pays the normal
+storage costs (about 65,000-75,000 units), so a transaction fits roughly 25 attachments.
 
 `env` fields, grouped with room to grow: 0 seed; entry 10 slot, 11 height, 12 epoch (u64 LE), 13 signer,
 14 prev hash, 15 vr, 16 dr; tx 30 nonce (u64 LE), 31 signer, 32 hash; accounts 50 current, 51 caller,
-52 origin; attachment 70 symbol, 71 amount.
+52 origin; 70 attachments (the canonical vecpak map, empty if none).
 
 ## Gas
 

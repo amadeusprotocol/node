@@ -1,6 +1,6 @@
 defmodule Testnet do
-  def call(sk, contract, function, args, attach_symbol \\ nil, attach_amount \\ nil) do
-    txu = TX.build(sk, contract, function, args, nil, attach_symbol, attach_amount)
+  def call(sk, contract, function, args, attachments \\ nil) do
+    txu = TX.build(sk, contract, function, args, nil, attachments)
     API.TX.submit_and_wait(txu |> TX.pack(), false, false)
   end
 
@@ -18,7 +18,7 @@ defmodule Testnet do
     bytecode = File.read!(path)
     args = if init_func do [bytecode, init_func] else [bytecode] end
     gas = RDBProtocol.cost_per_new_leaf_merkle() + (RDBProtocol.cost_per_byte_state() + RDBProtocol.cost_per_byte_historical()) * byte_size(bytecode) + 10 * RDBProtocol.ama_1_cent()
-    txu = TX.build(key.seed, "Contract", "deploy", args, nil, nil, nil, gas)
+    txu = TX.build(key.seed, "Contract", "deploy", args, nil, nil, gas)
     API.TX.submit_and_wait(txu |> TX.pack(), false, false)
   end
 

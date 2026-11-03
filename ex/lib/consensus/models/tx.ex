@@ -33,7 +33,7 @@ defmodule TX do
 
    @fields [:tx, :hash, :signature]
    @fields_tx [:action, :signer, :nonce]
-   @fields_action [:op, :contract, :function, :args, :attached_symbol, :attached_amount, :attached_gas]
+   @fields_action [:op, :contract, :function, :args, :attachments, :attached_gas]
 
    def pack(txu) do
      txu = Map.take(txu, @fields)
@@ -100,15 +100,7 @@ defmodule TX do
          if !:lists.member(action.function, ["slash_trainer"]), do: throw %{error: :invalid_function_for_special_meeting}
       end
 
-      #attachment
-      if !!action[:attached_symbol] and !is_binary(action.attached_symbol), do: throw %{error: :attached_symbol_must_be_binary}
-      if !!action[:attached_symbol] and (byte_size(action.attached_symbol) < 1 or byte_size(action.attached_symbol) > 32),
-        do: throw %{error: :attached_symbol_wrong_size}
-
-      if !!action[:attached_amount] and !is_binary(action.attached_amount), do: throw %{error: :attached_amount_must_be_binary}
-
-      if !!action[:attached_symbol] and !action[:attached_amount], do: throw %{error: :attached_amount_must_be_included}
-      if !!action[:attached_amount] and !action[:attached_symbol], do: throw %{error: :attached_symbol_must_be_included}
+      if Map.has_key?(action, :attachments), do: validate_attachments(action.attachments)
 
       if Map.has_key?(action, :attached_gas) and !(is_integer(action.attached_gas) and action.attached_gas > 0 and action.attached_gas <= 9_223_372_036_854_775_807),
         do: throw %{error: :attached_gas_invalid}
@@ -144,13 +136,38 @@ defmodule TX do
     end
    end
 
-   def build(sk, contract, function, args, nonce \\ nil, attached_symbol \\ nil, attached_amount \\ nil, attached_gas \\ nil) do
+   @max_i128 170_141_183_460_469_231_731_687_303_715_884_105_727
+
+   #coin symbol => amount, collection => %{token => amount}; amounts are positive integers
+   def validate_attachments(attachments) do
+     if !is_map(attachments) or map_size(attachments) == 0, do: throw %{error: :attachments_must_be_non_empty_map}
+     Enum.each(attachments, fn {name, value} ->
+       validate_attachment_name(name)
+       cond do
+         is_integer(value) -> validate_attachment_amount(value)
+         is_map(value) and map_size(value) > 0 ->
+           Enum.each(value, fn {token, amount} -> validate_attachment_name(token); validate_attachment_amount(amount) end)
+         true -> throw %{error: :attachments_invalid_amount}
+       end
+     end)
+   end
+
+   #true, false and nil decode to atoms that re-encode as bool/nil, so they cannot be names
+   defp validate_attachment_name(name) do
+     name = if is_atom(name) and name not in [true, false, nil] do Atom.to_string(name) else name end
+     if !is_binary(name) or name in ["true", "false", "nil"] or !Regex.match?(~r/\A[A-Za-z0-9]{1,32}\z/, name),
+       do: throw %{error: :attachments_invalid_name}
+   end
+
+   defp validate_attachment_amount(amount) do
+     if !(is_integer(amount) and amount > 0 and amount <= @max_i128), do: throw %{error: :attachments_invalid_amount}
+   end
+
+   def build(sk, contract, function, args, nonce \\ nil, attachments \\ nil, attached_gas \\ nil) do
      pk = BlsEx.get_public_key!(sk)
      nonce = if !nonce do :os.system_time(:nanosecond) else nonce end
      action = %{op: "call", contract: contract, function: function, args: args}
-     action = if is_binary(attached_symbol) and is_binary(attached_amount) do
-        Map.merge(action, %{attached_symbol: attached_symbol, attached_amount: attached_amount})
-     else action end
+     action = if is_map(attachments) and map_size(attachments) > 0 do Map.put(action, :attachments, attachments) else action end
      action = if is_integer(attached_gas) and attached_gas > 0 do Map.put(action, :attached_gas, attached_gas) else action end
      tx = %{
         signer: pk,

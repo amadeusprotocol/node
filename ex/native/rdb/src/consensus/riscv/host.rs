@@ -50,8 +50,7 @@ pub mod field {
     pub const ACCOUNT_CURRENT: u64 = 50;
     pub const ACCOUNT_CALLER: u64 = 51;
     pub const ACCOUNT_ORIGIN: u64 = 52;
-    pub const ATTACHED_SYMBOL: u64 = 70;
-    pub const ATTACHED_AMOUNT: u64 = 71;
+    pub const ATTACHMENTS: u64 = 70;
 }
 
 const NOT_FOUND: u64 = u64::MAX;
@@ -253,11 +252,10 @@ fn arg_table(env: &mut ApplyEnv, m: &Machine, table: u64) -> Vec<(u64, u64)> {
     raw.chunks_exact(16).map(|c| (u64::from_le_bytes(c[..8].try_into().unwrap()), u64::from_le_bytes(c[8..].try_into().unwrap()))).collect()
 }
 
-fn call_out(env: &mut ApplyEnv, m: &mut Machine, table: u64, extra: u64) -> Vec<u8> {
+fn call_out(env: &mut ApplyEnv, m: &mut Machine, table: u64, attachments_ptr: u64, attachments_len: u64) -> Vec<u8> {
     let main = arg_table(env, m, table);
-    let extra = if extra == 0 { Vec::new() } else { arg_table(env, m, extra) };
     let mut total: u64 = 0;
-    for &(_, len) in main.iter().chain(&extra) {
+    for &(_, len) in main.iter() {
         if len > protocol::MAX_PTR_LEN as u64 {
             panic_any("riscv_call_ptr_too_long")
         }
@@ -267,12 +265,14 @@ fn call_out(env: &mut ApplyEnv, m: &mut Machine, table: u64, extra: u64) -> Vec<
         panic_any("host_call_total_args_too_long")
     }
     let main: Vec<Vec<u8>> = main.iter().map(|&(p, l)| read(env, m, p, l)).collect();
-    let extra: Vec<Vec<u8>> = extra.iter().map(|&(p, l)| read(env, m, p, l)).collect();
     if main.len() < 2 {
         panic_any("host_call_missing_args")
     }
     let (contract, function, args) = (main[0].clone(), main[1].clone(), main[2..].to_vec());
-    let (attached_symbol, attached_amount) = if extra.len() == 2 { (Some(extra[0].clone()), Some(extra[1].clone())) } else { (None, None) };
+    let attachments = match attachments_len {
+        0 => None,
+        len => Some(read(env, m, attachments_ptr, len)),
+    };
 
     exec_budget_decr(env, protocol::RISCV_CALL_COST);
     if env.call_depth >= protocol::MAX_CALL_DEPTH {
@@ -280,8 +280,7 @@ fn call_out(env: &mut ApplyEnv, m: &mut Machine, table: u64, extra: u64) -> Vec<
     }
     let og_caller = env.caller_env.account_caller.clone();
     let og_current = env.caller_env.account_current.clone();
-    let og_symbol = env.caller_env.attached_symbol.clone();
-    let og_amount = env.caller_env.attached_amount.clone();
+    let og_attachments = env.caller_env.attachments.clone();
     let og_seed = env.caller_env.seed.clone();
     env.caller_env.account_caller = og_current.clone();
     env.caller_env.account_current = contract.clone();
@@ -289,17 +288,19 @@ fn call_out(env: &mut ApplyEnv, m: &mut Machine, table: u64, extra: u64) -> Vec<
     env.caller_env.call_return_value = Vec::new();
 
     let result = match contract.len() {
-        48 => crate::consensus::consensus_apply::call_vm(env, contract, function, args, attached_symbol, attached_amount),
+        48 => crate::consensus::consensus_apply::call_vm(env, contract, function, args, attachments),
         _ => {
-            crate::consensus::consensus_apply::call_bic(env, contract, function, args, attached_symbol, attached_amount);
+            if attachments.is_some() {
+                panic_any("attachments_not_allowed_on_builtin")
+            }
+            crate::consensus::consensus_apply::call_bic(env, contract, function, args);
             b"ok".to_vec()
         }
     };
 
     env.caller_env.account_caller = og_caller;
     env.caller_env.account_current = og_current;
-    env.caller_env.attached_symbol = og_symbol;
-    env.caller_env.attached_amount = og_amount;
+    env.caller_env.attachments = og_attachments;
     env.caller_env.seed = og_seed;
     env.caller_env.call_return_value = Vec::new();
     result
@@ -322,8 +323,7 @@ fn env_field(env: &ApplyEnv, f: u64) -> Vec<u8> {
         field::ACCOUNT_CURRENT => c.account_current.clone(),
         field::ACCOUNT_CALLER => c.account_caller.clone(),
         field::ACCOUNT_ORIGIN => c.account_origin.clone(),
-        field::ATTACHED_SYMBOL => c.attached_symbol.clone(),
-        field::ATTACHED_AMOUNT => c.attached_amount.clone(),
+        field::ATTACHMENTS => c.attachments.clone(),
         _ => panic_any("host_invalid_env_field"),
     }
 }
@@ -358,8 +358,8 @@ fn host(env: &mut ApplyEnv, call: &mut Call, m: &mut Machine) -> Ecall {
             return Ecall::Done(0);
         }
         id::CALL => {
-            let result = call_out(env, m, a0, a1);
-            write(env, m, a2, a3, &result)
+            let result = call_out(env, m, a0, a1, a2);
+            write(env, m, a3, a4, &result)
         }
         id::KV_PUT => {
             let (key, value) = (read(env, m, a0, a1), read(env, m, a2, a3));

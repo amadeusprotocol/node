@@ -29,7 +29,19 @@ pub(crate) fn install(chain: &Chain, code: &[u8]) -> [u8; 48] {
     w.pk
 }
 
-fn run(chain: &Chain, caller: &[u8], contract: &[u8], function: &[u8], args: &[&[u8]], attach: Option<(&[u8], &[u8])>, testnet: bool) -> Out {
+fn attachments(entries: Vec<(&[u8], vecpak::Term)>) -> Vec<u8> {
+    vecpak::encode(vecpak::Term::PropList(entries.into_iter().map(|(k, v)| (vecpak::Term::Binary(k.to_vec()), v)).collect())).unwrap()
+}
+
+fn coins(list: &[(&[u8], i128)]) -> Vec<u8> {
+    attachments(list.iter().map(|&(s, a)| (s, vecpak::Term::VarInt(a))).collect())
+}
+
+fn tokens(list: &[(&[u8], i128)]) -> vecpak::Term {
+    vecpak::Term::PropList(list.iter().map(|&(t, a)| (vecpak::Term::Binary(t.to_vec()), vecpak::Term::VarInt(a))).collect())
+}
+
+fn run(chain: &Chain, caller: &[u8], contract: &[u8], function: &[u8], args: &[&[u8]], attach: Option<Vec<u8>>, testnet: bool) -> Out {
     let args: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         chain.with_env(caller, |env| {
@@ -40,8 +52,7 @@ fn run(chain: &Chain, caller: &[u8], contract: &[u8], function: &[u8], args: &[&
             env.exec_max = protocol::TX_EXEC_LOCK;
             env.storage_left = protocol::AMA_1_DOLLAR;
             env.storage_max = protocol::AMA_1_DOLLAR;
-            let attach = attach.map(|(s, a)| (s.to_vec(), a.to_vec()));
-            let r = catch_unwind(AssertUnwindSafe(|| call_vm(env, contract.to_vec(), function.to_vec(), args, attach.as_ref().map(|a| a.0.clone()), attach.map(|a| a.1))));
+            let r = catch_unwind(AssertUnwindSafe(|| call_vm(env, contract.to_vec(), function.to_vec(), args, attach)));
             let out = (r.map_err(panic_message), env.logs.clone(), protocol::TX_EXEC_LOCK - env.exec_left, protocol::AMA_1_DOLLAR - env.storage_left);
             if out.0.is_err() {
                 std::panic::panic_any(out);
@@ -201,7 +212,7 @@ fn attachments_enforce_coin_transfer_policies() {
     let chain = Chain::new();
     let caller = chain.wallet(0);
     let contract = install(&chain, EMPTY);
-    let attached = |symbol: &[u8]| run(&chain, &caller.pk, &contract, b"run", &[], Some((symbol, b"1")), true).result;
+    let attached = |symbol: &[u8]| run(&chain, &caller.pk, &contract, b"run", &[], Some(coins(&[(symbol, 1)])), true).result;
 
     chain.put(&bcat(&[b"account:", &caller.pk, b":balance:AMA"]), b"10");
     assert_eq!(attached(b"AMA"), Ok(Vec::new()));
@@ -211,11 +222,11 @@ fn attachments_enforce_coin_transfer_policies() {
     put_coin(&chain, &caller.pk, b"PAUSED");
     chain.put(b"coin:PAUSED:pausable", b"true");
     chain.put(b"coin:PAUSED:paused", b"true");
-    assert_eq!(attached(b"PAUSED"), Err("paused".to_string()));
+    assert_eq!(attached(b"PAUSED"), Err("attachments_paused".to_string()));
 
     put_coin(&chain, &caller.pk, b"SOULBOUND");
     chain.put(b"coin:SOULBOUND:soulbound", b"true");
-    assert_eq!(attached(b"SOULBOUND"), Err("soulbound".to_string()));
+    assert_eq!(attached(b"SOULBOUND"), Err("attachments_soulbound".to_string()));
 
     for symbol in [b"PAUSED".as_slice(), b"SOULBOUND".as_slice()] {
         assert_eq!(chain.get(&bcat(&[b"account:", &contract, b":balance:", symbol])), None);
@@ -297,7 +308,7 @@ fn deposit_contract_holds_and_returns_funds() {
     let caller = chain.wallet(0);
     chain.put(&bcat(&[b"account:", &caller.pk, b":balance:AMA"]), b"1000");
     let vault = install(&chain, DEPOSIT);
-    let deposit = |amount: &[u8]| run(&chain, &caller.pk, &vault, b"deposit", &[], Some((b"AMA", amount)), true);
+    let deposit = |amount: &[u8]| run(&chain, &caller.pk, &vault, b"deposit", &[], Some(coins(&[(b"AMA", std::str::from_utf8(amount).unwrap().parse().unwrap())])), true);
 
     assert_eq!(ok(&deposit(b"500")), b"500");
     assert_eq!(deposit(b"50").result, Err("abort".to_string()));
@@ -357,7 +368,7 @@ fn rpg_heroes_fight_monsters_and_loot_nfts() {
             env.caller_env.account_current = rpg.to_vec();
             (env.exec_track, env.exec_left, env.exec_max) = (true, protocol::TX_EXEC_LOCK, protocol::TX_EXEC_LOCK);
             (env.storage_left, env.storage_max) = (protocol::AMA_1_DOLLAR, protocol::AMA_1_DOLLAR);
-            call_vm(env, rpg.to_vec(), b"fight".to_vec(), vec![], None, None);
+            call_vm(env, rpg.to_vec(), b"fight".to_vec(), vec![], None);
             env.logs.iter().map(|l| String::from_utf8_lossy(l).into_owned()).collect::<Vec<_>>()
         })
     };
@@ -378,7 +389,7 @@ fn deposit_burn_requires_and_debits_the_callers_vault() {
     let (alice, mallory) = (chain.wallet(0), chain.wallet(0));
     chain.put(&bcat(&[b"account:", &alice.pk, b":balance:AMA"]), b"1000");
     let vault = install(&chain, DEPOSIT);
-    ok(&run(&chain, &alice.pk, &vault, b"deposit", &[], Some((b"AMA", b"500")), true));
+    ok(&run(&chain, &alice.pk, &vault, b"deposit", &[], Some(coins(&[(b"AMA", 500)])), true));
     assert_eq!(testnet(&chain, &mallory.pk, &vault, b"burn", &[b"AMA", b"100"]).result, Err("abort".to_string()));
     assert_eq!(balance(&chain, &vault, b"AMA"), 500);
     assert_eq!(ok(&testnet(&chain, &alice.pk, &vault, b"burn", &[b"AMA", b"100"])), b"400");
@@ -397,7 +408,7 @@ fn nested_calls_do_not_leak_frame_state() {
     chain.put(&bcat(&[b"account:", &caller.pk, b":balance:AMA"]), b"10");
     let kitchen = install(&chain, KITCHEN);
     let counter = install(&chain, COUNTER);
-    let out = run(&chain, &caller.pk, &kitchen, b"frame", &[&counter], Some((b"AMA", b"1")), true);
+    let out = run(&chain, &caller.pk, &kitchen, b"frame", &[&counter], Some(coins(&[(b"AMA", 1)])), true);
     assert_eq!(out.result, Ok(Vec::new()));
     assert_eq!(out.logs, vec![b"same".to_vec()]);
     let out = testnet(&chain, &caller.pk, &kitchen, b"frame", &[&counter]);
@@ -429,16 +440,24 @@ fn host_byte_charges_are_exact() {
 }
 
 
+fn action(contract: &[u8], function: &[u8], args: Vec<Vec<u8>>) -> crate::model::tx::Action {
+    crate::model::tx::Action {
+        op: b"call".to_vec(), contract: contract.to_vec(), function: function.to_vec(), args,
+        attached_gas: None, attachments: None,
+    }
+}
+
 fn deploy_tx(chain: &Chain, signer: &crate::consensus::tests::chain_harness::Wallet, nonce: u64, height: u64, code: &[u8], attached_gas: Option<i128>) -> crate::model::tx_receipt::TXReceipt {
+    apply_tx(chain, signer, nonce, height, crate::model::tx::Action { attached_gas, ..action(b"Contract", b"deploy", vec![code.to_vec()]) })
+}
+
+fn apply_tx(chain: &Chain, signer: &crate::consensus::tests::chain_harness::Wallet, nonce: u64, height: u64, action: crate::model::tx::Action) -> crate::model::tx_receipt::TXReceipt {
     use crate::consensus::tests::apply_golden::entry;
-    use crate::model::tx::{Action, TX, TXU};
+    use crate::model::tx::{TX, TXU};
     let txu = TXU {
         hash: blake3::hash(&[&signer.pk[..], &nonce.to_be_bytes()].concat()).as_bytes().to_vec(),
         signature: vec![0u8; 96],
-        tx: TX { signer: signer.pk.to_vec(), nonce, action: Action {
-            op: b"call".to_vec(), contract: b"Contract".to_vec(), function: b"deploy".to_vec(), args: vec![code.to_vec()],
-            attached_symbol: None, attached_amount: None, attached_gas,
-        } },
+        tx: TX { signer: signer.pk.to_vec(), nonce, action },
     };
     let txn = chain.db.transaction();
     let (txn, _, _, mut receipts, _, _) = crate::consensus::consensus_apply::apply_entry(chain.db, txn, entry(height, signer, vec![txu]), &[0u8; 48], &[0u8; 64], true);
@@ -504,4 +523,120 @@ fn nested_call_arguments_cost_only_their_copies() {
     };
     let extra = used(&[1u8; 4096]) - used(b"");
     assert!(extra > 0 && extra < 4096, "{extra}");
+}
+
+fn put_nft(chain: &Chain, owner: &[u8], collection: &[u8], token: &[u8], amount: &[u8]) {
+    chain.put(&bcat(&[b"nft:", collection, b":permission"]), owner);
+    chain.put(&bcat(&[b"nft:", collection, b":", token, b":totalSupply"]), amount);
+    chain.put(&bcat(&[b"account:", owner, b":nft:", collection, b":", token]), amount);
+}
+
+fn held(chain: &Chain, owner: &[u8], key: &[&[u8]]) -> Option<Vec<u8>> {
+    chain.get(&bcat(&[&[b"account:".as_slice(), owner].concat(), &key.concat()]))
+}
+
+#[test]
+fn attachments_move_coins_and_nfts_together() {
+    let chain = Chain::new();
+    let caller = chain.wallet(0);
+    let kitchen = install(&chain, KITCHEN);
+    chain.put(&bcat(&[b"account:", &caller.pk, b":balance:AMA"]), b"100");
+    put_coin(&chain, &caller.pk, b"USDFAKE");
+    put_nft(&chain, &caller.pk, b"RPG", b"gold", b"5");
+    put_nft(&chain, &caller.pk, b"RPG", b"sword", b"1");
+    let att = attachments(vec![(b"USDFAKE", vecpak::Term::VarInt(3)), (b"AMA", vecpak::Term::VarInt(7)), (b"RPG", tokens(&[(b"sword", 1), (b"gold", 2)]))]);
+    let out = run(&chain, &caller.pk, &kitchen, b"env", &[], Some(att.clone()), true);
+    ok(&out);
+    assert_eq!(out.logs.last(), Some(&att));
+    assert_eq!(held(&chain, &caller.pk, &[b":balance:AMA"]), Some(b"93".to_vec()));
+    assert_eq!(held(&chain, &kitchen, &[b":balance:AMA"]), Some(b"7".to_vec()));
+    assert_eq!(held(&chain, &caller.pk, &[b":balance:USDFAKE"]), Some(b"7".to_vec()));
+    assert_eq!(held(&chain, &kitchen, &[b":balance:USDFAKE"]), Some(b"3".to_vec()));
+    assert_eq!(held(&chain, &caller.pk, &[b":nft:RPG:gold"]), Some(b"3".to_vec()));
+    assert_eq!(held(&chain, &kitchen, &[b":nft:RPG:gold"]), Some(b"2".to_vec()));
+    assert_eq!(held(&chain, &caller.pk, &[b":nft:RPG:sword"]), None);
+    assert_eq!(held(&chain, &kitchen, &[b":nft:RPG:sword"]), Some(b"1".to_vec()));
+    assert_eq!(ok(&testnet(&chain, &caller.pk, &kitchen, b"env", &[])).len(), 0);
+}
+
+#[test]
+fn attachments_check_every_entry_and_revert_all_on_failure() {
+    let chain = Chain::new();
+    let caller = chain.wallet(0);
+    let contract = install(&chain, EMPTY);
+    chain.put(&bcat(&[b"account:", &caller.pk, b":balance:AMA"]), b"100");
+    put_coin(&chain, &caller.pk, b"USDFAKE");
+    put_nft(&chain, &caller.pk, b"RPG", b"gold", b"5");
+    put_nft(&chain, &caller.pk, b"RPG", b"sword", b"1");
+    chain.put(b"nft:RPG:sword:soulbound", b"true");
+    put_nft(&chain, &caller.pk, b"BOUND", b"ring", b"1");
+    chain.put(b"nft:BOUND:soulbound", b"true");
+    let fail = |att: Vec<u8>| run(&chain, &caller.pk, &contract, b"run", &[], Some(att), true).result.unwrap_err();
+    let int = vecpak::Term::VarInt;
+    let cases: Vec<(Vec<u8>, &str)> = vec![
+        (coins(&[(b"NOPE", 1)]), "attachments_unknown_coin"),
+        (coins(&[(b"RPG", 1)]), "attachments_unknown_coin"),
+        (attachments(vec![(b"USDFAKE", tokens(&[(b"x", 1)]))]), "attachments_unknown_collection"),
+        (attachments(vec![(b"RPG", tokens(&[(b"nope", 1)]))]), "attachments_unknown_token"),
+        (coins(&[(b"AMA", 101)]), "attachments_insufficient_funds"),
+        (attachments(vec![(b"RPG", tokens(&[(b"gold", 6)]))]), "attachments_insufficient_tokens"),
+        (attachments(vec![(b"RPG", tokens(&[(b"sword", 1)]))]), "attachments_soulbound"),
+        (attachments(vec![(b"BOUND", tokens(&[(b"ring", 1)]))]), "attachments_soulbound"),
+        (coins(&[(b"AMA", 0)]), "attachments_invalid_amount"),
+        (coins(&[(b"AMA", -5)]), "attachments_invalid_amount"),
+        (attachments(vec![(b"AMA", vecpak::Term::Binary(b"5".to_vec()))]), "attachments_invalid_amount"),
+        (attachments(vec![(b"RPG", tokens(&[]))]), "attachments_invalid_amount"),
+        (coins(&[(b"AM-A", 1)]), "attachments_invalid_name"),
+        (coins(&[(b"AMA\n", 1)]), "attachments_invalid_name"),
+        (coins(&[(b"nil", 1)]), "attachments_invalid_name"),
+        (attachments(vec![(b"RPG", tokens(&[(b"true", 1)]))]), "attachments_invalid_name"),
+        (attachments(vec![(b"RPG", tokens(&[(b"go ld", 1)]))]), "attachments_invalid_name"),
+        (attachments(vec![]), "attachments_empty"),
+        (b"\x07\x01".to_vec(), "attachments_invalid"),
+        (vec![0u8; protocol::TX_EXEC_LOCK as usize + 1], "exec_insufficient_exec_budget"),
+        (attachments(vec![(b"AMA", int(5)), (b"RPG", tokens(&[(b"gold", 1), (b"nope", 1)]))]), "attachments_unknown_token"),
+    ];
+    for (att, err) in cases {
+        assert_eq!(fail(att), err);
+    }
+    assert_eq!(held(&chain, &caller.pk, &[b":balance:AMA"]), Some(b"100".to_vec()));
+    assert_eq!(held(&chain, &caller.pk, &[b":nft:RPG:gold"]), Some(b"5".to_vec()));
+    assert_eq!(held(&chain, &contract, &[b":balance:AMA"]), None);
+    assert_eq!(held(&chain, &contract, &[b":nft:RPG:gold"]), None);
+}
+
+#[test]
+fn attachments_are_rejected_on_builtin_calls_and_need_a_contract() {
+    use crate::consensus::tests::apply_golden::{seed_tree, wallet_from, HEIGHT};
+    let chain = Chain::new();
+    let signer = wallet_from(12);
+    let to = wallet_from(13);
+    chain.fund(&signer.pk, 100 * protocol::AMA_1_DOLLAR);
+    seed_tree(&chain);
+    let transfer = action(b"Coin", b"transfer", vec![to.pk.to_vec(), b"1".to_vec(), b"AMA".to_vec()]);
+    let r = apply_tx(&chain, &signer, 1, HEIGHT, crate::model::tx::Action { attachments: Some(coins(&[(b"AMA", 1)])), ..transfer.clone() });
+    assert_eq!((r.success, r.result.as_slice()), (false, b"attachments_not_allowed_on_builtin".as_slice()));
+    assert!(apply_tx(&chain, &signer, 2, HEIGHT + 1, transfer).success);
+
+    let caller = chain.wallet(0);
+    let kitchen = install(&chain, KITCHEN);
+    chain.put(&bcat(&[b"account:", &kitchen, b":balance:AMA"]), b"3");
+    let nested = testnet(&chain, &caller.pk, &kitchen, b"call_attached", &[b"Coin", b"transfer", b"AMA", b"1"]);
+    assert_eq!(nested.result, Err("attachments_not_allowed_on_builtin".to_string()));
+    chain.put(&bcat(&[b"account:", &caller.pk, b":balance:AMA"]), b"10");
+    let wallet = chain.wallet(0);
+    assert_eq!(run(&chain, &caller.pk, &wallet.pk, b"run", &[], Some(coins(&[(b"AMA", 1)])), true).result, Err("account_has_no_bytecode".to_string()));
+}
+
+
+#[test]
+fn attachments_to_self_debit_before_crediting() {
+    let chain = Chain::new();
+    let caller = chain.wallet(0);
+    let kitchen = install(&chain, KITCHEN);
+    put_coin(&chain, &kitchen, b"BIG");
+    let max = i128::MAX.to_string();
+    chain.put(&bcat(&[b"account:", &kitchen, b":balance:BIG"]), max.as_bytes());
+    ok(&testnet(&chain, &caller.pk, &kitchen, b"call_attached", &[&kitchen, b"echo", b"BIG", b"1"]));
+    assert_eq!(held(&chain, &kitchen, &[b":balance:BIG"]), Some(max.into_bytes()));
 }

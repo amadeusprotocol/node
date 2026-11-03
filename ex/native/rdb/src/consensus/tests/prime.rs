@@ -31,7 +31,7 @@ fn call_mainnet(chain: &Chain, signer: &[u8], contract: &[u8], function: &[u8], 
     catch_unwind(AssertUnwindSafe(|| {
         chain.with_env(signer, |env| {
             env.testnet = false;
-            call_bic(env, contract.to_vec(), function.to_vec(), args.clone(), None, None);
+            call_bic(env, contract.to_vec(), function.to_vec(), args.clone());
         })
     }))
     .map_err(panic_message)

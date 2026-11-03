@@ -43,8 +43,6 @@ rustler::atoms! {
     contract,
     function,
     args,
-    attached_symbol,
-    attached_amount,
 
     member,
     nonmember,

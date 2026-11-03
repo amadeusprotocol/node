@@ -24,7 +24,7 @@ fn dispatch(f: &[u8]) {
             assert!(c::arg(c::arg_count()).is_none());
         }
         b"env" => {
-            for fld in [c::field::SEED, c::field::ENTRY_HEIGHT, c::field::TX_SIGNER, c::field::ACCOUNT_CURRENT, c::field::ACCOUNT_CALLER, c::field::ACCOUNT_ORIGIN, c::field::ATTACHED_SYMBOL, c::field::ATTACHED_AMOUNT] {
+            for fld in [c::field::SEED, c::field::ENTRY_HEIGHT, c::field::TX_SIGNER, c::field::ACCOUNT_CURRENT, c::field::ACCOUNT_CALLER, c::field::ACCOUNT_ORIGIN, c::field::ATTACHMENTS] {
                 c::log(&c::env(fld));
             }
         }
@@ -60,7 +60,7 @@ fn dispatch(f: &[u8]) {
         b"callloop" => {
             let contract = arg(1);
             for _ in 0..c::atoi(&arg(0)) {
-                core::hint::black_box(c::call(&contract, b"run", &[], None));
+                core::hint::black_box(c::call(&contract, b"run", &[], &[]));
             }
         }
         b"hashes" => {
@@ -96,11 +96,12 @@ fn dispatch(f: &[u8]) {
             let (contract, function) = (arg(0), arg(1));
             let rest: Vec<Vec<u8>> = (2..c::arg_count()).map(arg).collect();
             let refs: Vec<&[u8]> = rest.iter().map(|a| a.as_slice()).collect();
-            c::ret(&c::call(&contract, &function, &refs, None));
+            c::ret(&c::call(&contract, &function, &refs, &[]));
         }
         b"call_attached" => {
-            let (contract, function, sym, amt) = (arg(0), arg(1), arg(2), arg(3));
-            c::ret(&c::call(&contract, &function, &[], Some((&sym, &amt))));
+            let (contract, function) = (arg(0), arg(1));
+            let assets: Vec<c::Asset> = (2..c::arg_count()).step_by(2).map(|i| c::Asset::coin(&arg(i), c::atoi(&arg(i + 1)))).collect();
+            c::ret(&c::call(&contract, &function, &[], &assets));
         }
         b"vecpak" => {
             let bytes = arg(0);
@@ -113,9 +114,9 @@ fn dispatch(f: &[u8]) {
             c::ret(if out == bytes { b"same" } else { b"diff" });
         }
         b"frame" => {
-            let before = (c::attachment(), c::seed());
-            c::call(&arg(0), b"inc", &[], None);
-            let after = (c::attachment(), c::seed());
+            let before = (c::attachments(), c::seed());
+            c::call(&arg(0), b"inc", &[], &[]);
+            let after = (c::attachments(), c::seed());
             c::log(if before == after { b"same" } else { b"leaked" });
             c::exit(0)
         }

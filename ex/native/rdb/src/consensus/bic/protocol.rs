@@ -7,6 +7,10 @@ pub const FORKHEIGHT_TESTNET: u64 = 0;
 pub const BRIDGE_FORKHEIGHT: u64 = u64::MAX;
 pub const BRIDGE_FORKHEIGHT_TESTNET: u64 = 0;
 
+pub fn riscv_enabled(env: &crate::consensus::consensus_apply::ApplyEnv) -> bool {
+    env.testnet
+}
+
 pub fn bridge_forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
     if env.testnet { BRIDGE_FORKHEIGHT_TESTNET } else { BRIDGE_FORKHEIGHT }
 }
@@ -73,6 +77,7 @@ pub const MAX_CONTRACT_SIZE: usize = 524288;
 pub const MAX_CALL_ARGS_TOTAL: usize = 1 * 1024 * 1024;
 
 pub const MAX_CALL_DEPTH: u32 = 16;
+pub const ATTACHMENTS_DECODE_BYTE_COST: i128 = 1;
 
 pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i128) {
     if cost < 0 {

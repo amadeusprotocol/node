@@ -146,7 +146,7 @@ fn fight() {
                 if dice.roll(100) <= chance {
                     c::log(&[mob.name, b" dropped ", nft].concat());
                     let args = named(&[(b"receiver", &c::account_caller()), (b"amount", b"1"), (b"collection", COLLECTION), (b"token", nft), (b"soulbound", b"false")]);
-                    c::call(b"Nft", b"mint", &[&args], None);
+                    c::call(b"Nft", b"mint", &[&args], &[]);
                 }
             }
             break;
@@ -168,7 +168,7 @@ fn dispatch(f: &[u8]) {
         b"init" => {
             for (collection, soulbound) in [(COLLECTION, b"false".as_slice()), (COLLECTION_SOULBOUND, b"true")] {
                 let args = named(&[(b"collection", collection), (b"soulbound", soulbound), (b"nonfungible", b"false")]);
-                c::call(b"Nft", b"create_collection", &[&args], None);
+                c::call(b"Nft", b"create_collection", &[&args], &[]);
             }
         }
         b"create_hero" => {

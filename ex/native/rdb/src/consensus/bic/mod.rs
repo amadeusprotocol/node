@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod bridge;
 pub mod coin;
 pub mod coin_symbol_reserved;

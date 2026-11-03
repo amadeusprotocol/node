@@ -200,7 +200,7 @@ fn storage_write_cost() {
                 signature: vec![0u8; 96],
                 tx: TX { signer: signer.pk.to_vec(), nonce: *nonce, action: Action {
                     op: b"call".to_vec(), contract: contract.to_vec(), function: b"fill".to_vec(), args: a,
-                    attached_symbol: None, attached_amount: None, attached_gas: Some(protocol::AMA_1_DOLLAR),
+                    attached_gas: Some(protocol::AMA_1_DOLLAR), attachments: None,
                 } },
             }
         }).collect();

@@ -16,7 +16,7 @@ fn named(pairs: &[(&[u8], &[u8])]) -> Vec<u8> {
 
 fn mint(token: &[u8]) {
     let args = named(&[(b"receiver", &c::account_caller()), (b"amount", b"1"), (b"collection", COLLECTION), (b"token", token), (b"soulbound", b"false")]);
-    c::call(b"Nft", b"mint", &[&args], None);
+    c::call(b"Nft", b"mint", &[&args], &[]);
 }
 
 fn roll_dice() -> u8 {
@@ -32,7 +32,7 @@ fn dispatch(f: &[u8]) {
     match f {
         b"init" => {
             let args = named(&[(b"collection", COLLECTION), (b"soulbound", b"false"), (b"nonfungible", b"false")]);
-            c::call(b"Nft", b"create_collection", &[&args], None);
+            c::call(b"Nft", b"create_collection", &[&args], &[]);
         }
         b"view_nft" => {
             let token = c::arg(1).unwrap_or_default();

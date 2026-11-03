@@ -266,7 +266,7 @@ defmodule SpecialMeetingGen do
 
   def build_slash_tx(sk, mpk, epoch, aggsig, mask, mask_size) do
     gas = slash_attached_gas(sk, DB.Chain.height() + 1)
-    TX.build(sk, "Epoch", "slash_trainer", [mpk, "#{epoch}", aggsig, "#{mask_size}", mask], nil, nil, nil, gas)
+    TX.build(sk, "Epoch", "slash_trainer", [mpk, "#{epoch}", aggsig, "#{mask_size}", mask], nil, nil, gas)
   end
 
   #a slash writes the roster and active mask as a new state key, which outgrows
