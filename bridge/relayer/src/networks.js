@@ -84,11 +84,11 @@ export default {
         listFrom: '3', amaPerGasCoin: '28148',
       }),
       //Polygon PoS on Sepolia: orders reach Amadeus once a checkpoint covers them (~10 min apart) and
-      //Sepolia finalized it (chains/polygon.js). 1.13 = POL $0.0905 / AMA $0.08
+      //Sepolia finalized it (chains/polygon.js). Deliveries measured 1.04-1.07M gas. 1.13 = POL $0.0905 / AMA $0.08
       polygon: chain({
         name: 'polygon-testnet', label: 'Polygon Amoy', chainId: 80002, rpc: 'https://polygon-amoy-bor-rpc.publicnode.com', explorer: 'https://amoy.polygonscan.com', gasSymbol: 'POL', finality: 'polygon',
         polygon: { parent: 'eth', rootChain: '0xbd07D7E1E93c8d4b2a261327F3C28a8EA7167209' },
-        deliveryGas: 900000, gasDrop: '0.02', maxGasDrop: '200000000000000000', amadeusCost: '100000000',
+        deliveryGas: 1300000, gasDrop: '0.02', maxGasDrop: '200000000000000000', amadeusCost: '100000000',
         bridge: '0x9d9Af25190820fdbd18336C00959875AE9517817', lightClient: '0xfb65aEB4479b7e537b2a3a53E3b434345b7E8410',
         wama: '0xC15644e8885f9edB05F0D6eaBE1701C7d80D132B', from: '51802481',
         amaPerGasCoin: '1.13',
