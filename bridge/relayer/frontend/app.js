@@ -124,8 +124,10 @@ function render() {
   const gasCoin = to === AMA ? 'AMA' : chainOf(to).gasSymbol
   const dropText = to === AMA ? `${settings.gasDropAma} AMA` : `${chainOf(to).gasDrop} ${gasCoin}`
   const has = recipientGas === null ? '' : ` · recipient has ${to === AMA ? fmt(recipientGas) : Number(formatEther(recipientGas)).toFixed(5)} ${gasCoin}`
-  $('delivery').innerHTML = `<label class="drop"><input type="checkbox" id="drop"${drop ? ' checked' : ''}> Drop ${dropText} of gas to the recipient<small>${has}</small></label>`
-  $('drop').onchange = e => { drop = e.target.checked; dropTouched = true; render() }
+  //into Amadeus what arrives is AMA, which already pays its gas: a drop there would only move AMA around
+  if (to === AMA) drop = false
+  $('delivery').innerHTML = to === AMA ? '' : `<label class="drop"><input type="checkbox" id="drop"${drop ? ' checked' : ''}> Drop ${dropText} of gas to the recipient<small>${has}</small></label>`
+  if ($('drop')) $('drop').onchange = e => { drop = e.target.checked; dropTouched = true; render() }
 
   const c = cost(), a = amount()
   const rows = []
@@ -181,12 +183,7 @@ async function signAndSubmitOnAmadeus(params) {
 async function checkRecipientGas() {
   try {
     if (to === AMA) {
-      const who = $('recipient').value || amaAddress
-      if (!who) { recipientGas = null; return }
-      recipientGas = await amaBalance(who)
-      //what arrives is AMA itself, which pays Amadeus fees: count it net of the relay's cost
-      const arriving = (amount() ?? 0n) - costToAmadeus(settings, 0n, chainOf(from))
-      if (!dropTouched) drop = recipientGas + (arriving > 0n ? arriving : 0n) < AMA_FOR_TWO_TXS
+      recipientGas = null
     } else {
       const who = $('recipient').value || evmAddress
       if (!who || !isAddress(who)) { recipientGas = null; return }
