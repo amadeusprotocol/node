@@ -32,6 +32,22 @@ fn bridge_order_packs_and_names_chains() {
 }
 
 #[test]
+fn bridge_send_refuses_the_zero_address() {
+    let chain = Chain::new();
+    let w = chain.wallet(10 * AMA);
+    assert_eq!(send(&chain, &w, AMA, &[0u8; 20]), Err("bridge_invalid_address".into()));
+}
+
+#[test]
+fn bridge_mainnet_config_is_complete_once_activated() {
+    if crate::consensus::bic::protocol::BRIDGE_FORKHEIGHT == u64::MAX { return; }
+    assert_ne!(bridge::ADMIN, [0u8; 48], "mainnet bridge ADMIN not set");
+    assert_ne!(bridge::BSC.contract, [0u8; 20], "mainnet BSC bridge address not set");
+    assert!(!bridge::BSC_TRUST_EPOCH_HEADER.is_empty(), "mainnet BSC trust header not set");
+    assert_ne!(bridge::ROUTES.iter().find(|r| r.remote_chain == b"bsc").unwrap().remote_coin, &[0u8; 20], "mainnet BSC wAMA not set");
+}
+
+#[test]
 fn bridge_sends_are_feeless_by_default() {
     let chain = Chain::new();
     let w = chain.wallet(1_000 * AMA);

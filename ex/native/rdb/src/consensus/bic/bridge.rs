@@ -82,7 +82,7 @@ pub struct Remote {
 //TODO before the mainnet bridge fork: deployed BSC bridge, wAMA and the trust epoch header
 pub const BSC: Remote = Remote { name: b"bsc", address_len: 20, contract: [0u8; 20], orders_slot: 0 };
 const BSC_WAMA: [u8; 20] = [0u8; 20];
-const BSC_TRUST_EPOCH_HEADER: &[u8] = &[];
+pub const BSC_TRUST_EPOCH_HEADER: &[u8] = &[];
 pub const ROUTES: &[Route] = &[
     Route { id: b"ama-to-bsc", outbound: true, remote_chain: b"bsc", local_coin: b"AMA", remote_coin: &BSC_WAMA, kind: Kind::Native },
     Route { id: b"bsc-to-ama", outbound: false, remote_chain: b"bsc", local_coin: b"AMA", remote_coin: &BSC_WAMA, kind: Kind::Native },
@@ -338,7 +338,7 @@ pub fn call_send(env: &mut ApplyEnv, mut args: Vec<Vec<u8>>) {
     let dst = chain_name(&dst_chain).unwrap_or_else(|| panic_any("bridge_invalid_chain"));
     let r = route(env, true, &dst_chain, &src_coin, &dst_coin);
     if amount == 0 { panic_any("invalid_amount") }
-    if recipient.len() != remote(env, &dst_chain).address_len || refund_to.len() > 48 { panic_any("bridge_invalid_address") }
+    if recipient.len() != remote(env, &dst_chain).address_len || recipient.iter().all(|b| *b == 0) || refund_to.len() > 48 { panic_any("bridge_invalid_address") }
     check_open(env, r);
 
     let caller = env.caller_env.account_caller.clone();
