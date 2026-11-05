@@ -217,6 +217,8 @@ contract BridgeTest is Test {
         bridge.send(1e9, bytes32("base-testnet"), baseWama, vm.parseJsonBytesArray(json, ".roster_b_compressed")[0], "", 0, 0, 0);
         vm.expectRevert(AmaBridge.WrongChain.selector);
         bridge.send(1e9, bytes32("bsc-testnet"), baseWama, abi.encodePacked(to), "", 0, 0, 0);
+        vm.expectRevert(AmaBridge.BadAddress.selector);
+        bridge.send(1e9, bytes32("base-testnet"), baseWama, abi.encodePacked(address(0)), "", 0, 0, 0);
         vm.expectRevert(AmaBridge.WrongCoin.selector);
         bridge.send(1e9, bytes32("amadeus-testnet"), baseWama, vm.parseJsonBytesArray(json, ".roster_b_compressed")[0], "", 0, 0, 0);
         vm.stopPrank();
@@ -241,6 +243,24 @@ contract BridgeTest is Test {
         vm.prank(recipient);
         bridge.send(1e9, key, "", 0, 0, 0);
         assertEq(arbSys.calls(), 1);
+    }
+
+    function test_admin_hands_over_in_two_steps() public {
+        address next = address(0xbeef);
+        vm.expectRevert(AmaBridge.OnlyAdmin.selector);
+        bridge.transferAdmin(next);
+        vm.prank(admin);
+        bridge.transferAdmin(next);
+        assertEq(bridge.admin(), admin);
+        vm.expectRevert(AmaBridge.OnlyAdmin.selector);
+        bridge.acceptAdmin();
+        vm.prank(next);
+        bridge.acceptAdmin();
+        assertEq(bridge.admin(), next);
+        assertEq(bridge.pendingAdmin(), address(0));
+        vm.prank(admin);
+        vm.expectRevert(AmaBridge.OnlyAdmin.selector);
+        bridge.pause(true, true);
     }
 
     function test_admin_sets_the_fee_on_sends_to_another_chain() public {

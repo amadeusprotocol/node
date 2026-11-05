@@ -34,7 +34,8 @@ contract AmaBridge {
     uint256 public constant GAS_DROP_GAS = 30_000;
     bytes32 public immutable localChain;
     bytes32 public immutable amadeusChain;
-    address public immutable admin;
+    address public admin;
+    address public pendingAdmin;
     AmadeusLightClient public immutable lightClient;
     WAMA public immutable wama;
     /// on an Arbitrum chain each order's hash also goes out as an L2 -> L1 message: Amadeus proves it
@@ -42,6 +43,7 @@ contract AmaBridge {
     bool public immutable arbitrum;
 
     event OrderCreated(uint64 indexed nonce, bytes order);
+    event AdminChanged(address indexed admin);
     event OrderReceived(uint64 indexed nonce, address indexed recipient, uint256 amount, address deliverer, uint256 gasDrop);
 
     error Paused();
@@ -109,7 +111,7 @@ contract AmaBridge {
             if (recipient.length != 48 || uint8(recipient[0]) & 0xc0 != 0x80) revert BadAddress();
         } else {
             if (dstChain == localChain || dstChain == bytes32(0)) revert WrongChain();
-            if (dstCoin.length != 20 || recipient.length != 20) revert BadAddress();
+            if (dstCoin.length != 20 || recipient.length != 20 || bytes20(recipient) == bytes20(0)) revert BadAddress();
         }
         if (refundTo.length > 48) revert BadAddress();
         if ((sentPerDay[block.timestamp / 1 days] += amount) > CAP_PER_DAY) revert CapReached();
@@ -189,5 +191,17 @@ contract AmaBridge {
         if (msg.sender != admin) revert OnlyAdmin();
         sendPaused = send_;
         receivePaused = receive_;
+    }
+
+    function transferAdmin(address next) external {
+        if (msg.sender != admin) revert OnlyAdmin();
+        pendingAdmin = next;
+    }
+
+    function acceptAdmin() external {
+        if (msg.sender != pendingAdmin || msg.sender == address(0)) revert OnlyAdmin();
+        admin = msg.sender;
+        pendingAdmin = address(0);
+        emit AdminChanged(msg.sender);
     }
 }
