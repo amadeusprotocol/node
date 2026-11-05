@@ -89,7 +89,6 @@ export function parentDelivery({ chain, parentChain, parent, ama, log, method, c
   return { deliver }
 }
 
-/// Amadeus follows these chains through their parent's light client: nothing of their own to sync
-export function parentFinality() {
-  return { rootArgs: async () => null, sync: async () => ({}), trust: async () => null }
+export function parentFinality({ chain }) {
+  return { rootArgs: async () => null, sync: async () => ({}), trust: async () => ({ via: (chain.arbitrum ?? chain.polygon).parent }) }
 }

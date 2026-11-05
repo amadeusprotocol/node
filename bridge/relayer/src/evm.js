@@ -214,7 +214,7 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
 
   //a chain Amadeus cannot verify yet (inbound: false, Base): the relay only delivers to it
   if (chain.inbound === false) {
-    return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, amadeusSetLag, syncAmadeusLightClient: async () => ({}), lightClientTrust: async () => null,
+    return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, amadeusSetLag, syncAmadeusLightClient: async () => ({}), lightClientTrust: async () => ({ receiveOnly: true }),
              deliverAmadeusOrder, findTippedOrders: async () => [], orderCreatedBy: async () => null, deliverToAmadeus: async () => [] }
   }
   return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, amadeusSetLag, syncAmadeusLightClient: () => (finality.keepCurrent ?? finality.sync)(), lightClientTrust: () => finality.trust(),

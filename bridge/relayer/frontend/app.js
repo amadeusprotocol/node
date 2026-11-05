@@ -78,7 +78,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && menuOpen) 
 function setRoute(f, t) {
   from = f
   to = destinations(f).includes(t) ? t : destinations(f)[0]
-  dropTouched = false; recipientGas = null; gasPrice = null; l1Fee = 0n
+  dropTouched = false; recipientGas = null; gasPrice = null; l1Fee = 0n; gasUnreachable = null
   $('recipient').value = ''
   const lc = chainOf(to === AMA ? from : to)
   if (lc?.explorer) $('lc-link').href = `${lc.explorer}/address/${lc.lightClient}`
@@ -146,7 +146,7 @@ function render() {
     rows.push(['Bridge fee', ppm > 0n ? `${fmt(bp)} ${f.coin}` : '0.0'])
     rows.push([`Gas on ${gasOn}${drop ? ` + ${dropText} gas drop` : ''}, at cost`, `${fmt(c)} ${f.coin}`])
   } else if (to !== AMA && c === null) {
-    rows.push([`Gas on ${gasOn}`, 'reading gas price…'])
+    rows.push([`Gas on ${gasOn}`, gasUnreachable ? `${gasUnreachable} RPC unreachable, retrying…` : 'reading gas price…'])
   }
   rows.push(['Estimated time', arrival()])
   $('receive').textContent = receive === null ? '0.0' : receive > 0n ? fmt(receive) : '–'
@@ -201,13 +201,24 @@ async function checkRecipientGas() {
 }
 
 /// the destination's gas price and, on OP-stack chains, the L1 data fee of a delivery
+let gasUnreachable = null
+const GAS_RETRY_MS = 3000
+
 async function readGas() {
   if (to === AMA) return
   const k = to, c = chainOf(k), p = rpcOf(c)
-  const price = BigInt(await p.send('eth_gasPrice', []))
-  const fee = c.opStack ? BigInt(await p.call({ to: '0x420000000000000000000000000000000000000F', data: '0xf1c7a58b' + DELIVERY_BYTES.toString(16).padStart(64, '0') })) : 0n
-  //a slower answer for a destination switched away from meanwhile is dropped
-  if (k === to) [gasPrice, l1Fee] = [price, fee]
+  try {
+    const price = BigInt(await p.send('eth_gasPrice', []))
+    const fee = c.opStack ? BigInt(await p.call({ to: '0x420000000000000000000000000000000000000F', data: '0xf1c7a58b' + DELIVERY_BYTES.toString(16).padStart(64, '0') })) : 0n
+    //a slower answer for a destination switched away from meanwhile is dropped
+    if (k === to) [gasPrice, l1Fee, gasUnreachable] = [price, fee, null]
+  } catch (e) {
+    if (k !== to) return
+    gasUnreachable = c.label
+    render()
+    setTimeout(() => { if (to === k && gasPrice === null) refresh().catch(() => {}) }, GAS_RETRY_MS)
+    throw e
+  }
 }
 
 async function refresh() {
