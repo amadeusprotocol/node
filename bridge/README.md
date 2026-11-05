@@ -14,7 +14,11 @@ ever leave a chain out of that chain's own backing. The bridge is **feeless**: u
 delivery (the relay's gas, at cost) or claim themselves. Each side's admin may set a fee, taken off the
 source asset at the source (Amadeus `Bridge.set_fee`, burned; EVM `setFee`, to the admin, on moves
 between chains; parts per million, at most 1%; orders already made keep theirs), and pauses its own
-side (`pause`).
+side (`pause`). An EVM admin hands over in two steps (`transferAdmin`, then `acceptAdmin` by the new
+one); the Amadeus admin is a BIC constant (`bridge.rs` ADMIN, set before the mainnet bridge fork: a test
+fails while it, the BSC contract, wAMA or trust header are placeholders). Run the bridge tests locally
+before a release: `forge test` (bridge/evm), `npm test` (bridge/relayer), `cargo test --release --
+tests::bridge tests::eth tests::arb tests::polygon` (ex/native/rdb).
 
 | Chain | Amadeus follows | Status |
 |---|---|---|

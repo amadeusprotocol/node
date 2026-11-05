@@ -18,6 +18,10 @@
   ],
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": ["/", "/index.html"] },
   "durable_objects": { "bindings": [{ "name": "RELAY", "class_name": "Relay" }] },
+  "ratelimits": [
+    { "name": "DELIVER_LIMIT", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } },
+    { "name": "STATUS_LIMIT", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } }
+  ],
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Relay"] }],
   "vars": { "DEV_NETWORK": "testnet" }
 }

@@ -19,6 +19,7 @@ const MAX_PER_ALARM = 20
 const AMA_SCAN = 50
 const SCAN_BLOCKS = 20_000
 const WAKE_MS = 10_000
+const STATUS_MS = 3_000
 
 const networkOf = (host, env) => host.startsWith('testnet-bridge.') ? 'testnet' : host.startsWith('mainnet-bridge.') ? 'mainnet' : env.DEV_NETWORK
 const keyOf = (env, net) => env[`${net.toUpperCase()}_PRIVATE_KEY`]
@@ -91,6 +92,13 @@ export class Relay extends DurableObject {
 
   async status(net) {
     await this.use(net)
+    if (this.statusCache && Date.now() - this.statusCache.at < STATUS_MS) return this.statusCache.value
+    const value = await this.freshStatus(net)
+    this.statusCache = { at: Date.now(), value }
+    return value
+  }
+
+  async freshStatus(net) {
     const s = this.ctx.storage
     const err = this.configError()
     const list = async prefix => [...(await s.list({ prefix })).entries()].map(([k, v]) => ({ order: k.slice(prefix.length), ...v }))
@@ -99,6 +107,8 @@ export class Relay extends DurableObject {
       amaNext: await s.get('amaNext'), from: Object.fromEntries(await s.list({ prefix: 'from:' })),
       lightClients: err ? {} : Object.fromEntries(await Promise.all(Object.values(this.relay.chains).map(async c =>
         [c.key, await c.lightClientTrust().catch(e => ({ error: e.shortMessage ?? e.message }))]))),
+      amadeusSets: err ? {} : Object.fromEntries(await Promise.all(Object.values(this.relay.chains).map(async c =>
+        [c.key, await c.amadeusSetLag().catch(e => ({ error: e.shortMessage ?? e.message }))]))),
       nextSweep: await s.get('sweepAt'), alarm: await s.getAlarm(), queue: await list('q:'), failed: await list('failed:'), log: this.logs,
     }
   }
@@ -217,6 +227,9 @@ export default {
     if (!networks[net]) return json({ error: `no network for ${url.hostname}` }, 404)
     const relay = relayFor(env, net)
     if (url.pathname === '/' || url.pathname === '/index.html') return pageWithSettings(req, env, net)
+    const ip = req.headers.get('cf-connecting-ip') ?? 'local'
+    const limiter = url.pathname === '/deliver' ? env.DELIVER_LIMIT : url.pathname === '/status' ? env.STATUS_LIMIT : null
+    if (limiter && !(await limiter.limit({ key: ip })).success) return json({ error: 'rate limited, retry in a minute' }, 429)
     if (url.pathname === '/deliver' && req.method === 'POST') {
       try { return json(await relay.deliver(net, await req.json().catch(() => null))) } catch (e) { return json({ error: e.message }, 400) }
     }

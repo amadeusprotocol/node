@@ -1,6 +1,7 @@
 // The bridge page (bundled by Vite into public/; the worker injects the network's settings)
 import { BrowserProvider, JsonRpcProvider, Contract, getBytes, hexlify, formatUnits, parseUnits, parseEther, formatEther, isAddress, keccak256, encodeBytes32String } from 'ethers'
 import { fromBase58, toBase58 } from '@amadeus-protocol/sdk'
+import { bls12_381 } from '@noble/curves/bls12-381'
 import { unpackOrder, decodeValidatorRecord, rosterEip, g2Eip, pad20 } from '../src/codec.js'
 import { bridgeAbi, lightClientAbi, tokenAbi } from '../src/abi.js'
 import { costToChain, costToAmadeus, costThroughAmadeus, AVG_TX_GAS, AMA_FOR_TWO_TXS, DELIVERY_BYTES } from '../src/tips.js'
@@ -85,6 +86,9 @@ function setRoute(f, t) {
   refresh().catch(e => log(e.message))
 }
 
+const amadeusKeyValid = key => { try { return key.length === 48 && !bls12_381.G1.ProjectivePoint.fromHex(key).is0() } catch { return false } }
+const evmAddressValid = a => Boolean(a) && isAddress(a) && BigInt(a) !== 0n
+
 const amount = () => { try { return parseUnits($('amount').value || '0', 9) } catch { return null } }
 const dropOn = () => to === AMA ? parseUnits(settings.gasDropAma, 9) : parseEther(chainOf(to).gasDrop)
 
@@ -168,8 +172,11 @@ const askRelayToStartNow = body => fetch('/deliver', { method: 'POST', body: JSO
 async function showRelayStatus() {
   const s = await (await fetch('/status')).json()
   const behind = Object.entries(s.lightClients ?? {}).filter(([, v]) => v?.alert).map(([k]) => chainOf(k)?.label ?? k)
+  const setsBehind = Object.entries(s.amadeusSets ?? {}).filter(([, v]) => v?.alert).map(([k]) => chainOf(k)?.label ?? k)
   const issues = s.configError ? ['⚠ Relay offline: deliveries wait (you can still claim yourself)']
-    : [...(behind.length ? [`⚠ ${behind.join(', ')} light client behind: deliveries from it wait`] : []), ...(s.queue.length >= 5 ? [`${s.queue.length} deliveries queued`] : [])]
+    : [...(behind.length ? [`⚠ ${behind.join(', ')} light client behind: deliveries from it wait`] : []),
+       ...(setsBehind.length ? [`⚠ Amadeus validator set behind on ${setsBehind.join(', ')}: deliveries to it wait`] : []),
+       ...(s.queue.length >= 5 ? [`${s.queue.length} deliveries queued`] : [])]
   $('relay-status').textContent = issues.join(' · ')
 }
 
@@ -370,7 +377,7 @@ $('max').onclick = () => {
 async function bridgeFromAmadeus(a) {
   const c = chainOf(to)
   const who = $('recipient').value || evmAddress
-  if (!who || !isAddress(who)) return log(`enter a ${c.label} address, or connect MetaMask`)
+  if (!evmAddressValid(who)) return log(`enter a ${c.label} address, or connect MetaMask`)
   await readGas()
   const gasDrop = drop ? dropOn() : 0n
   const fee = cost()
@@ -395,13 +402,13 @@ async function bridgeFromChain(a) {
     const who = $('recipient').value || amaAddress
     let key
     try { key = fromBase58(who || '') } catch { key = new Uint8Array() }
-    if (key.length !== 48) return log('enter an Amadeus address, or connect the Amadeus wallet')
+    if (!amadeusKeyValid(key)) return log('enter a valid Amadeus address, or connect the Amadeus wallet')
     log(`burning ${fmt(a)} wAMA on ${src.label} for ${who}, relay cost ${fmt(fee)} wAMA`)
     tx = await bridge.getFunction(SEND)(a, key, '0x', 0, gasDrop, fee)
   } else {
     const dst = chainOf(to)
     const who = $('recipient').value || evmAddress
-    if (!who || !isAddress(who)) return log(`enter a ${dst.label} address`)
+    if (!evmAddressValid(who)) return log(`enter a ${dst.label} address`)
     log(`burning ${fmt(a)} wAMA on ${src.label} for ${who} on ${dst.label} (via Amadeus), relay cost ${fmt(fee)} wAMA`)
     tx = await bridge.getFunction(SEND_TO)(a, encodeBytes32String(dst.name), getBytes(dst.wama), getBytes(who), '0x', 0, gasDrop, fee)
   }

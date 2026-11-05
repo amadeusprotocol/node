@@ -11,6 +11,7 @@ import { parentChainOf } from './chains/parent.js'
 import { paysToChain, costToChain, DELIVERY_BYTES } from './tips.js'
 
 const LOG_QUERY_BLOCKS = 1000
+const AMADEUS_EPOCH_BLOCKS = 100_000
 //how far back a reorg could have moved an order's event
 const REORG_BLOCKS = 200
 
@@ -79,6 +80,12 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
     const tx = await lc.submitValidatorSet(record - 1, value, toSolidityProof(vr.proof), rosterEip(decodeValidatorRecord(value).validators))
     await tx.wait()
     log(key, 'validator set', record, tx.hash)
+  }
+
+  async function amadeusSetLag() {
+    const latest = (await ama.validatorSet(await ama.rootedHeight())).height
+    const set = Number(await lc.setHeight())
+    return { set, latest, alert: latest - set > AMADEUS_EPOCH_BLOCKS }
   }
 
   async function adoptNewAmadeusValidatorRecord() {
@@ -207,9 +214,9 @@ export function createEvmChain({ key, chain, ama, privateKey, paysForDeliveryToA
 
   //a chain Amadeus cannot verify yet (inbound: false, Base): the relay only delivers to it
   if (chain.inbound === false) {
-    return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, syncAmadeusLightClient: async () => ({}), lightClientTrust: async () => null,
+    return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, amadeusSetLag, syncAmadeusLightClient: async () => ({}), lightClientTrust: async () => null,
              deliverAmadeusOrder, findTippedOrders: async () => [], orderCreatedBy: async () => null, deliverToAmadeus: async () => [] }
   }
-  return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, syncAmadeusLightClient: () => (finality.keepCurrent ?? finality.sync)(), lightClientTrust: () => finality.trust(),
+  return { key, name: chain.name, head, finalizedHead, gasPrice, l1Fee, adoptNewAmadeusValidatorRecord, amadeusSetLag, syncAmadeusLightClient: () => (finality.keepCurrent ?? finality.sync)(), lightClientTrust: () => finality.trust(),
            deliverAmadeusOrder, findTippedOrders, orderCreatedBy, deliverToAmadeus }
 }
