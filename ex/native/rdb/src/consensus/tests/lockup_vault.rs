@@ -46,6 +46,11 @@ fn create(chain: &Chain, w: &Wallet, amount: i128, tier: &[u8]) -> Result<(), St
     )
 }
 
+fn register_pop(chain: &Chain, v: &Wallet) {
+    let pop = crate::consensus::bls12_381::sign(&v.sk, &v.pk, crate::consensus::aggsig::DST_POP).unwrap();
+    chain.call(v, b"Epoch", b"register_pop", &[&v.pk, &pop]).unwrap();
+}
+
 fn vault_key(owner: &[u8], index: u64) -> Vec<u8> {
     bcat(&[b"bic:lockup_vault:vault:", owner, b":", index.to_string().as_bytes()])
 }
@@ -346,6 +351,7 @@ fn create_validates_optional_pks() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let v = new_wallet();
+    register_pop(&chain, &v);
     let burn = [0u8; 48];
 
     //validator, payout, and owner pks are each validated (burn / wrong length)
@@ -740,6 +746,7 @@ fn set_validator_queues_two_epochs() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let validator = new_wallet();
+    register_pop(&chain, &validator);
     create(&chain, &w, to_flat(1000), b"12m").unwrap();
 
     chain.call(&w, LV, b"set_validator", &[b"1", &validator.pk]).unwrap();
@@ -763,6 +770,7 @@ fn set_validator_queues_two_epochs() {
 
     //replacing queues again; the active validator holds until the switch
     let validator2 = new_wallet();
+    register_pop(&chain, &validator2);
     chain.call(&w, LV, b"set_validator", &[b"1", &validator2.pk]).unwrap();
     let vault = get_vault(&chain, &w.pk, 1);
     assert_eq!(vault.validator, Some(validator.pk.to_vec()));
@@ -776,6 +784,7 @@ fn clear_validator_queues_two_epochs() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let validator = new_wallet();
+    register_pop(&chain, &validator);
     create(&chain, &w, to_flat(1000), b"12m").unwrap();
 
     chain.call(&w, LV, b"set_validator", &[b"1", &validator.pk]).unwrap();
@@ -806,6 +815,7 @@ fn create_validator_enters_queue() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let v = new_wallet();
+    register_pop(&chain, &v);
     let payee = new_wallet();
 
     //a validator chosen at creation enters the 2-epoch queue, not live at once
@@ -846,6 +856,7 @@ fn create_validator_enters_queue() {
 
     //replacing the still-queued validator resets to the new pending one
     let v2 = new_wallet();
+    register_pop(&chain, &v2);
     chain.call(&w, LV, b"set_validator", &[b"1", &v2.pk]).unwrap();
     let vault = get_vault(&chain, &w.pk, 1);
     assert_eq!(vault.validator, None);
@@ -858,6 +869,7 @@ fn set_validator_same_address_is_noop() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let v = new_wallet();
+    register_pop(&chain, &v);
     create(&chain, &w, to_flat(1000), b"12m").unwrap();
 
     //queue v at epoch 0 -> posts at epoch 2
@@ -873,6 +885,7 @@ fn set_validator_same_address_is_noop() {
 
     //a different pk resets the clock to now + 2
     let v2 = new_wallet();
+    register_pop(&chain, &v2);
     chain.call(&w, LV, b"set_validator", &[b"1", &v2.pk]).unwrap();
     let vault = get_vault(&chain, &w.pk, 1);
     assert_eq!(vault.validator_pending, Some(v2.pk.to_vec()));
@@ -894,7 +907,9 @@ fn clear_validator_while_queuing_cancels_the_queue() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let v = new_wallet();
+    register_pop(&chain, &v);
     let v2 = new_wallet();
+    register_pop(&chain, &v2);
 
     //create with a queued validator (none active yet); clear drops the queue
     create_call(
@@ -936,6 +951,7 @@ fn unlocking_vault_allows_repoint_freezes_the_rest() {
     let chain = Chain::new();
     let w = chain.wallet(to_flat(5000));
     let validator = new_wallet();
+    register_pop(&chain, &validator);
     create(&chain, &w, to_flat(1000), b"og").unwrap();
 
     let junk_pk = [7u8; 48];
@@ -1060,6 +1076,7 @@ fn audit_index_args_and_unknown_function() {
 
     //pk length strictness on the setters
     let v = new_wallet();
+    register_pop(&chain, &v);
     let burn = [0u8; 48];
     assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1", &v.pk[..47]]), Err("invalid_payout_pk".to_string()));
     assert_eq!(chain.call(&w, LV, b"set_payout_address", &[b"1", &burn]), Err("invalid_payout_pk".to_string()));
@@ -1140,6 +1157,8 @@ fn cluster_of_validators_stays_in_sync() {
 
     //vaults secure each validator's own key, queued for the next epoch
     for (i, v) in validators.iter().enumerate() {
+        let pop = crate::consensus::bls12_381::sign(&v.sk, &v.pk, crate::consensus::aggsig::DST_POP).unwrap();
+        cluster.call_as(&v.pk, b"Epoch", b"register_pop", &[&v.pk, &pop]).unwrap();
         cluster.call_as(&v.pk, LV, b"set_validator", &[(i + 1).to_string().as_bytes(), &v.pk]).unwrap();
     }
     cluster.assert_in_sync();
@@ -1173,6 +1192,7 @@ fn epoch_751_emission_scenarios_100m_stake() {
         let creator = chain.wallet(to_flat(200_000_000));
         let payee = new_wallet();
         let validator = new_wallet();
+        register_pop(&chain, &validator);
         let solver = new_wallet();
 
         //100 vaults x 1m AMA, 12m tier (locks 2000 bps = 20% pre-1150), yield
@@ -1235,6 +1255,7 @@ fn epoch_751_emission_scenarios_100m_stake() {
 fn commission_raise_queues_cut_is_instant() {
     let mut chain = Chain::new();
     let v = new_wallet();
+    register_pop(&chain, &v);
     let bps_at = |chain: &Chain, epoch: u64| chain.with_env(&v.pk, |env| commission_bps_for_epoch(env, &v.pk, epoch));
 
     //no record = 0 commission; bounds and arg strictness
@@ -1271,6 +1292,7 @@ fn commission_skims_vault_yield_at_boundary() {
     let w = chain.wallet(to_flat(2_000_000));
     let payee = new_wallet();
     let validator = new_wallet();
+    register_pop(&chain, &validator);
     let emis = new_wallet();
 
     //1m AMA at 20% (12m tier), yield to payee, backing `validator`
@@ -1318,7 +1340,9 @@ fn boundary_slash_denies_yield_to_slashed_validators_backers() {
     let mut chain = Chain::new();
     let w = chain.wallet(to_flat(1_000_000));
     let good = new_wallet(); //stays a validator through the boundary
+    register_pop(&chain, &good);
     let bad = new_wallet(); //"slashed" at the boundary block
+    register_pop(&chain, &bad);
     let payee_good = new_wallet();
     let payee_bad = new_wallet();
 
@@ -1396,6 +1420,7 @@ fn matured_vault_auto_closes_to_owner_at_boundary() {
 fn testnet_genesis_vault_backs_validator_without_promotion() {
     let mut chain = Chain::new();
     let v = new_wallet();
+    register_pop(&chain, &v);
     let min = crate::consensus::bic::lockup_vault::VALIDATOR_MIN_STAKE;
 
     //exactly the bytes generate_testnet writes for each key (map key order is
@@ -1446,6 +1471,27 @@ fn testnet_genesis_vault_backs_validator_without_promotion() {
         set.active().iter().any(|pk| pk.as_slice() == v.pk.as_slice()),
         "vault-backed key must be in the post-boundary validator set on stake alone"
     );
+}
+
+#[test]
+fn vaults_name_only_validators_that_proved_their_key() {
+    let chain = Chain::new();
+    let w = chain.wallet(to_flat(10_000));
+    create(&chain, &w, to_flat(1000), b"og").unwrap();
+    let v = new_wallet();
+    assert_eq!(chain.call(&w, LV, b"set_validator", &[b"1", &v.pk]), Err("validator_pop_missing".to_string()));
+    let blob = vp_map(vec![(b"amount", Term::VarInt(to_flat(1000))), (b"tier", Term::Binary(b"og".to_vec())), (b"validator", Term::Binary(v.pk.to_vec()))]);
+    assert_eq!(chain.call(&w, LV, b"create", &[&blob]), Err("validator_pop_missing".to_string()));
+
+    let other = new_wallet();
+    let sign = |sk: &[u8], msg: &[u8], dst: &[u8]| crate::consensus::bls12_381::sign(sk, msg, dst).unwrap();
+    let pop = crate::consensus::aggsig::DST_POP;
+    assert_eq!(chain.call(&w, b"Epoch", b"register_pop", &[&v.pk, &sign(&other.sk, &v.pk, pop)]), Err("invalid_pop".to_string()));
+    assert_eq!(chain.call(&w, b"Epoch", b"register_pop", &[&v.pk, &sign(&v.sk, &other.pk, pop)]), Err("invalid_pop".to_string()));
+    assert_eq!(chain.call(&w, b"Epoch", b"register_pop", &[&v.pk, &sign(&v.sk, &v.pk, crate::consensus::aggsig::DST_ATT)]), Err("invalid_pop".to_string()));
+    chain.call(&w, b"Epoch", b"register_pop", &[&v.pk, &sign(&v.sk, &v.pk, pop)]).unwrap();
+    chain.call(&w, LV, b"set_validator", &[b"1", &v.pk]).unwrap();
+    chain.call(&w, LV, b"create", &[&blob]).unwrap();
 }
 
 fn create_mainnet(chain: &Chain, w: &Wallet, amount: i128, tier: &[u8]) -> Result<(), String> {

@@ -32,6 +32,12 @@ pub const COMMISSION_RAISE_QUEUE_EPOCHS: u64 = VALIDATOR_CHANGE_QUEUE_EPOCHS + 1
 //sized with identical commission — a disclosed cap table in lockup, not one operator
 pub const VALIDATOR_MIN_STAKE: i128 = 1_000_000 * 1_000_000_000; //1m AMA
 
+fn require_pop(env: &mut ApplyEnv, pk: &[u8]) {
+    if !crate::consensus::bic::epoch::has_pop(env, pk) {
+        panic_any("validator_pop_missing")
+    }
+}
+
 pub const APY_EPOCH_DENOM: i128 = 6_307_200; //10_000 bps x 630.72 epochs per 365 day year
 
 const VAULT_KEY_PREFIX: &[u8] = b"bic:lockup_vault:vault:";
@@ -544,6 +550,7 @@ pub fn call_create(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let validator = match map.opt_bin(b"validator", "invalid_validator_pk") {
         Some(pk) => {
             validate_pk(&pk, "invalid_validator_pk");
+            require_pop(env, &pk);
             init_balance_if_missing(env, &pk);
             Some(pk)
         }
@@ -650,6 +657,7 @@ pub fn call_set_validator(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     let (key, mut vault) = load_caller_vault(env, &args[0]);
     let validator = args[1].as_slice();
     validate_pk(validator, "invalid_validator_pk");
+    require_pop(env, validator);
     init_balance_if_missing(env, validator);
     let heading_to = if vault.validator_pending_epoch.is_some() {
         vault.validator_pending.as_deref()

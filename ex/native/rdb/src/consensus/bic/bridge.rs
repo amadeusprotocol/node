@@ -33,7 +33,6 @@ pub const DEFAULT_FEE_PPM: u128 = 0;
 pub const MAX_FEE_PPM: u128 = 10_000;
 const KEY_FEE_PPM: &[u8] = b"bic:bridge:fee_ppm";
 
-pub const COST_BLS_VERIFY: i128 = 500_000;
 /// subgroup check of one vote key in a caller-supplied signing header
 pub const COST_VOTE_KEY_CHECK: i128 = 20_000;
 /// parsing and hashing one header (a tx may spend at most protocol::TX_EXEC_LOCK)
@@ -608,7 +607,7 @@ pub fn call_eth_update(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
     if signing_period != period { panic_any("bridge_committee_unknown") }
     let c = eth_committee(env, &committee);
     if c.root.as_slice() != current.as_slice() { panic_any("bridge_wrong_committee") }
-    exec_budget_decr(env, COST_BLS_VERIFY);
+    exec_budget_decr(env, protocol::RISCV_BLS_VERIFY_COST);
     if eth::verify_sync_aggregate(net, &c, &bits, &signature, &attested, signature_slot).is_err() { panic_any("bridge_invalid_attestation") }
 
     //an update may only move the committees (a period's best update can lack finality)
@@ -916,7 +915,7 @@ fn update_bsc(env: &mut ApplyEnv, attesting: &[u8], source: &[u8], signing_epoch
             next = Some((next_epoch, next_set));
         }
     }
-    exec_budget_decr(env, COST_BLS_VERIFY);
+    exec_budget_decr(env, protocol::RISCV_BLS_VERIFY_COST);
     match signing_epoch {
         None => {
             check_vouches(epoch, target);

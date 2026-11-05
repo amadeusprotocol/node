@@ -146,6 +146,7 @@ defmodule NodeStatsGen do
                 #any validator can also be solving, so every entry carries its count
                 sols: Map.get(sols, pk, 0),
                 in_validator_set: :lists.member(pk, list),
+                pop: RocksDB.get("account:#{pk}:attribute:pop", contractstate()) != nil,
             }
             {Base58.encode(pk), Map.merge(entry, commission(pk, epoch, opts))}
         end)

@@ -118,6 +118,26 @@ pub fn call_set_emission_address(env: &mut crate::consensus::consensus_apply::Ap
     kv_put(env, &bcat(&[b"account:", &env.caller_env.account_caller, b":attribute:emission_address"]), address);
 }
 
+pub fn has_pop(env: &mut ApplyEnv, pk: &[u8]) -> bool {
+    kv_exists(env, &bcat(&[b"account:", pk, b":attribute:pop"]))
+}
+
+//consensus sums signer keys: a key without a proof of possession could cancel others' out (rogue key)
+pub fn call_register_pop(env: &mut ApplyEnv, args: Vec<Vec<u8>>) {
+    let [pk, pop] = <[Vec<u8>; 2]>::try_from(args).unwrap_or_else(|_| panic_any("invalid_args"));
+    if pk.len() != 48 || !consensus::bls12_381::validate_public_key(&pk) {
+        panic_any("invalid_validator_pk")
+    }
+    if has_pop(env, &pk) {
+        return;
+    }
+    consensus::consensus_kv::exec_budget_decr(env, consensus::bic::protocol::RISCV_BLS_VERIFY_COST);
+    if consensus::bls12_381::verify(&pk, &pop, &pk, consensus::aggsig::DST_POP).is_err() {
+        panic_any("invalid_pop")
+    }
+    kv_put(env, &bcat(&[b"account:", &pk, b":attribute:pop"]), &pop);
+}
+
 pub fn call_submit_sol(env: &mut crate::consensus::consensus_apply::ApplyEnv, args: Vec<Vec<u8>>) {
     if args.len() != 1 {
         panic_any("invalid_args")

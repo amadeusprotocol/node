@@ -872,6 +872,7 @@ pub fn call_bic(
         (b"LockupVault", b"set_commission") => consensus::bic::lockup_vault::call_set_commission(env, args),
 
         (b"Epoch", b"set_emission_address") => consensus::bic::epoch::call_set_emission_address(env, args),
+        (b"Epoch", b"register_pop") => consensus::bic::epoch::call_register_pop(env, args),
         (b"Epoch", b"submit_sol") => consensus::bic::epoch::call_submit_sol(env, args),
         (b"Epoch", b"slash_trainer") => consensus::bic::epoch::call_slash_trainer(env, args),
 
