@@ -946,7 +946,7 @@ pub fn call_vm(
     }
 
     if !protocol::riscv_enabled(env) {
-        std::panic::panic_any(if protocol::gas_fork(env) { "riscv_noop" } else { "wasm_noop" });
+        std::panic::panic_any("riscv_noop");
     }
 
     if let Some(bytes) = attachments {

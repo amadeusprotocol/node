@@ -7,15 +7,8 @@ pub const FORKHEIGHT_TESTNET: u64 = 0;
 pub const BRIDGE_FORKHEIGHT: u64 = u64::MAX;
 pub const BRIDGE_FORKHEIGHT_TESTNET: u64 = 0;
 
-pub const GAS_FORK_EPOCH: u64 = 899;
-pub const GAS_FORK_EPOCH_TESTNET: u64 = 0;
-
 pub fn riscv_enabled(env: &crate::consensus::consensus_apply::ApplyEnv) -> bool {
     env.testnet
-}
-
-pub fn gas_fork(env: &crate::consensus::consensus_apply::ApplyEnv) -> bool {
-    env.caller_env.entry_epoch >= if env.testnet { GAS_FORK_EPOCH_TESTNET } else { GAS_FORK_EPOCH }
 }
 
 pub fn bridge_forkheight(env: &crate::consensus::consensus_apply::ApplyEnv) -> u64 {
@@ -46,12 +39,10 @@ pub const COST_PER_BYTE_HISTORICAL: i128 = 1_111; //cost to increase the ledger 
 pub const COST_PER_BYTE_STATE: i128 = 5_555; //cost to grow the contract state
 
 pub const COST_PER_DB_READ_BASE: i128 = 5_000;
-pub const COST_PER_DB_READ_BYTE: i128 = 5;
-pub const COST_PER_DB_READ_BYTE_FORK: i128 = 1;
+pub const COST_PER_DB_READ_BYTE: i128 = 1;
 
 pub const COST_PER_DB_WRITE_BASE: i128 = 25_000;
-pub const COST_PER_DB_WRITE_BYTE: i128 = 25;
-pub const COST_PER_DB_WRITE_BYTE_FORK: i128 = 1;
+pub const COST_PER_DB_WRITE_BYTE: i128 = 1;
 
 pub const COST_PER_NEW_LEAF_MERKLE: i128 = COST_PER_BYTE_STATE * 128; //cost to grow the merkle tree
 
@@ -95,14 +86,6 @@ pub fn pay_cost(env: &mut crate::consensus::consensus_apply::ApplyEnv, cost: i12
     // Increment validator / burn
     consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &env.caller_env.entry_signer, b":balance:AMA"]), cost / 2);
     consensus_kv::kv_increment(env, &crate::bcat(&[b"account:", &coin::BURN_ADDRESS, b":balance:AMA"]), cost / 2);
-}
-
-pub fn db_read_byte_cost(env: &crate::consensus::consensus_apply::ApplyEnv) -> i128 {
-    if gas_fork(env) { COST_PER_DB_READ_BYTE_FORK } else { COST_PER_DB_READ_BYTE }
-}
-
-pub fn db_write_byte_cost(env: &crate::consensus::consensus_apply::ApplyEnv) -> i128 {
-    if gas_fork(env) { COST_PER_DB_WRITE_BYTE_FORK } else { COST_PER_DB_WRITE_BYTE }
 }
 
 pub fn cost_per_bytes_historical(bytes: usize) -> i128 {

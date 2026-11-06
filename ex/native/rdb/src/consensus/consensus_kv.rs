@@ -288,25 +288,17 @@ pub fn storage_budget_decr(env: &mut ApplyEnv, amount: i128) {
 }
 
 fn charge_read_value(env: &mut ApplyEnv, value_len: usize) {
-    exec_budget_decr(env, protocol::db_read_byte_cost(env) * value_len as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_READ_BYTE * value_len as i128);
 }
 
 fn charge_old_value(env: &mut ApplyEnv, old: &Option<Vec<u8>>) {
-    if protocol::gas_fork(env) {
-        charge_read_value(env, old.as_ref().map_or(0, |v| v.len()));
-    }
+    charge_read_value(env, old.as_ref().map_or(0, |v| v.len()));
 }
 
-fn charge_scan(env: &mut ApplyEnv, prefix: &[u8], found: &Option<(Vec<u8>, Vec<u8>)>, skipped: u64) {
-    if protocol::gas_fork(env) {
-        exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE * skipped as i128);
-        if let Some((_, v)) = found {
-            charge_read_value(env, v.len());
-        }
-    } else if let Some((k, v)) = found {
-        if k.starts_with(prefix) {
-            charge_read_value(env, v.len());
-        }
+fn charge_scan(env: &mut ApplyEnv, found: &Option<(Vec<u8>, Vec<u8>)>, skipped: u64) {
+    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE * skipped as i128);
+    if let Some((_, v)) = found {
+        charge_read_value(env, v.len());
     }
 }
 
@@ -327,7 +319,7 @@ pub fn kv_put(env: &mut ApplyEnv, key: &[u8], value: &[u8]) {
     }
 
     exec_kv_size(key, Some(value));
-    exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::db_write_byte_cost(env) * (key.len() + value.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len() + value.len()) as i128);
 
     let old_value = raw_get(env, key);
     charge_old_value(env, &old_value);
@@ -357,7 +349,7 @@ pub fn kv_increment(env: &mut ApplyEnv, key: &[u8], value: i128) -> i128 {
     }
 
     let value_str = value.to_string().into_bytes();
-    exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::db_write_byte_cost(env) * (key.len() + value_str.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len() + value_str.len()) as i128);
 
     let old_value = raw_get(env, key);
     charge_old_value(env, &old_value);
@@ -390,7 +382,7 @@ pub fn kv_delete(env: &mut ApplyEnv, key: &[u8]) {
         panic!("exec_cannot_write_during_view");
     }
 
-    exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::db_write_byte_cost(env) * (key.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len()) as i128);
 
     let old_value = raw_get(env, key);
     charge_old_value(env, &old_value);
@@ -406,7 +398,7 @@ pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
         panic!("exec_cannot_write_during_view");
     }
 
-    exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::db_write_byte_cost(env) * (key.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_WRITE_BASE + protocol::COST_PER_DB_WRITE_BYTE * (key.len()) as i128);
 
     let own_page = env.overlay.tx.contains_key(key) && !env.overlay.bits.contains_key(key);
     let own_bit = env.overlay.bits.get(key).map_or(false, |set| set.contains(&bit_idx));
@@ -451,7 +443,7 @@ pub fn kv_set_bit(env: &mut ApplyEnv, key: &[u8], bit_idx: u64) -> bool {
 }
 
 pub fn kv_exists(env: &mut ApplyEnv, key: &[u8]) -> bool {
-    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::db_read_byte_cost(env) * (key.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::COST_PER_DB_READ_BYTE * (key.len()) as i128);
 
     match raw_get(env, key) {
         None => false,
@@ -463,7 +455,7 @@ pub fn kv_exists(env: &mut ApplyEnv, key: &[u8]) -> bool {
 }
 
 pub fn kv_get(env: &mut ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
-    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::db_read_byte_cost(env) * (key.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::COST_PER_DB_READ_BYTE * (key.len()) as i128);
 
     let v = raw_get(env, key);
     if let Some(ref val) = v {
@@ -473,13 +465,13 @@ pub fn kv_get(env: &mut ApplyEnv, key: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub fn kv_get_next(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::db_read_byte_cost(env) * (prefix.len() + key.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::COST_PER_DB_READ_BYTE * (prefix.len() + key.len()) as i128);
 
     let seek = [prefix, key].concat();
 
     let (found, skipped) = merged_next_counted(env, &seek, false);
     record(env, Read::Next { seek: seek.clone(), found: digest_found(&found), skipped });
-    charge_scan(env, prefix, &found, skipped);
+    charge_scan(env, &found, skipped);
     match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
@@ -487,13 +479,13 @@ pub fn kv_get_next(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 }
 
 pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::db_read_byte_cost(env) * (prefix.len() + key.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::COST_PER_DB_READ_BYTE * (prefix.len() + key.len()) as i128);
 
     let seek = [prefix, key].concat();
 
     let (found, skipped) = merged_prev_counted(env, &seek, false);
     record(env, Read::Prev { seek: seek.clone(), inclusive: false, found: digest_found(&found), skipped });
-    charge_scan(env, prefix, &found, skipped);
+    charge_scan(env, &found, skipped);
     match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,
@@ -501,13 +493,13 @@ pub fn kv_get_prev(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec
 }
 
 pub fn kv_get_prev_or_first(env: &mut ApplyEnv, prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::db_read_byte_cost(env) * (prefix.len() + key.len()) as i128);
+    exec_budget_decr(env, protocol::COST_PER_DB_READ_BASE + protocol::COST_PER_DB_READ_BYTE * (prefix.len() + key.len()) as i128);
 
     let seek = [prefix, key].concat();
 
     let (found, skipped) = merged_prev_counted(env, &seek, true);
     record(env, Read::Prev { seek: seek.clone(), inclusive: true, found: digest_found(&found), skipped });
-    charge_scan(env, prefix, &found, skipped);
+    charge_scan(env, &found, skipped);
     match found {
         Some((k, v)) if k.starts_with(prefix) => Some((k[prefix.len()..].to_vec(), v)),
         _ => None,

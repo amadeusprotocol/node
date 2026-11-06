@@ -39,8 +39,7 @@ range change data memory only, never the instructions executed.
 - `exit(0)` or `return`: success. Any other exit code or `abort`: `abort`. Trap: `trap` with the
   trap reason logged. Out of gas: `exec_insufficient_exec_budget`. Every failure reverts through the normal
   transaction machinery; the reason strings are fixed constants.
-- Mainnet never executes contracts (`wasm_noop`, renamed `riscv_noop` from the epoch 899 gas fork), and `Contract.deploy`
-  exists on testnet only.
+- Mainnet never executes contracts (`riscv_noop`), and `Contract.deploy` exists on testnet only.
 
 ## Conditions
 

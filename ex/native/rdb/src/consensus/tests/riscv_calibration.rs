@@ -290,7 +290,7 @@ fn storage_read_cost() {
             bytes += k.len() + got.len();
         }
         let ns = t.elapsed().as_nanos() as f64;
-        let charged = items.len() as i128 * protocol::COST_PER_DB_READ_BASE + bytes as i128 * protocol::COST_PER_DB_READ_BYTE_FORK;
+        let charged = items.len() as i128 * protocol::COST_PER_DB_READ_BASE + bytes as i128 * protocol::COST_PER_DB_READ_BYTE;
         println!("  {pass:<34} {:>9.0} ns/read {:>6.2} ns/byte   charged {:>6.2} ns/unit", ns / items.len() as f64, ns / bytes as f64, ns / charged as f64);
     };
     let picks: Vec<_> = (0..20_000).map(|i| small[(i * 7919) % small.len()].clone()).collect();

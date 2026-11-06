@@ -283,17 +283,9 @@ fn mainnet_still_refuses_contract_execution() {
     let caller = chain.wallet(0);
     let contract = install(&chain, COUNTER);
     let out = run(&chain, &caller.pk, &contract, b"inc", &[], None, false);
-    assert_eq!(out.result, Err("wasm_noop".to_string()));
-    let at_epoch = |epoch: u64| chain.with_env(&caller.pk, |env| {
-        env.testnet = false;
-        env.caller_env.entry_epoch = epoch;
-        env.caller_env.account_current = contract.to_vec();
-        let r = catch_unwind(AssertUnwindSafe(|| call_vm(env, contract.to_vec(), b"inc".to_vec(), vec![], Some(coins(&[(b"AMA", 1)]))))).map_err(panic_message);
-        let _ = std::panic::take_hook();
-        r.map(|_| ())
-    });
-    assert_eq!(at_epoch(protocol::GAS_FORK_EPOCH - 1), Err("wasm_noop".to_string()));
-    assert_eq!(at_epoch(protocol::GAS_FORK_EPOCH), Err("riscv_noop".to_string()));
+    assert_eq!(out.result, Err("riscv_noop".to_string()));
+    let attached = run(&chain, &caller.pk, &contract, b"inc", &[], Some(coins(&[(b"AMA", 1)])), false);
+    assert_eq!(attached.result, Err("riscv_noop".to_string()));
     assert_eq!(chain.get(&bcat(&[b"account:", &contract, b":storage:count"])), None);
     assert_eq!(chain.get(&bcat(&[b"account:", &contract, b":storage:count"])), None);
     let _ = call_bic;
@@ -702,13 +694,13 @@ fn replacing_or_scanning_past_a_large_value_pays_for_its_bytes() {
     used(b"fill", &[b"1", b"1", b"sml"]);
     let overwrite_big = used(b"fill", &[b"1", b"1", b"big"]);
     let overwrite_small = used(b"fill", &[b"1", b"1", b"sml"]);
-    assert_eq!(overwrite_big - overwrite_small, (big - 1) as i128 * protocol::COST_PER_DB_READ_BYTE_FORK);
+    assert_eq!(overwrite_big - overwrite_small, (big - 1) as i128 * protocol::COST_PER_DB_READ_BYTE);
 
     used(b"fill", &[b"1", big.to_string().as_bytes(), b"big"]);
     let miss_big = used(b"next", &[b"f:a", b""]);
     let miss_small = used(b"next", &[b"f:r", b""]);
     assert_eq!(ok(&testnet(&chain, &caller.pk, &kitchen, b"next", &[b"f:a", b""])), b"0");
-    assert_eq!(miss_big - miss_small, (big - 1) as i128 * protocol::COST_PER_DB_READ_BYTE_FORK);
+    assert_eq!(miss_big - miss_small, (big - 1) as i128 * protocol::COST_PER_DB_READ_BYTE);
 }
 
 fn with_program_headers(elf: &[u8], extra: &[[u8; 56]]) -> Vec<u8> {

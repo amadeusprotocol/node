@@ -13,7 +13,6 @@ use crate::model::entry::{Entry, Header};
 use crate::model::tx::{Action, TX, TXU};
 
 pub(crate) const HEIGHT: u64 = 90_000_123;
-const PRE_FORK_HEIGHT: u64 = 89_800_123;
 
 pub(crate) fn txu(signer: &Wallet, nonce: u64, contract: &[u8], function: &[u8], args: Vec<Vec<u8>>) -> TXU {
     txu_attached(signer, nonce, contract, function, args, None)
@@ -143,10 +142,6 @@ fn run_blocks() -> [u8; 32] {
     run_blocks_at(HEIGHT)
 }
 
-fn run_blocks_pre_fork() -> [u8; 32] {
-    run_blocks_at(PRE_FORK_HEIGHT)
-}
-
 fn run_blocks_at(height: u64) -> [u8; 32] {
     let chain = Chain::new();
     let producer = wallet_from(1);
@@ -197,10 +192,6 @@ fn run_blocks_extended() -> [u8; 32] {
 
 fn run_blocks_extended_mainnet() -> [u8; 32] {
     run_blocks_extended_with(false, HEIGHT)
-}
-
-fn run_blocks_extended_mainnet_pre_fork() -> [u8; 32] {
-    run_blocks_extended_with(false, PRE_FORK_HEIGHT)
 }
 
 fn run_blocks_extended_with(testnet_block: bool, height: u64) -> [u8; 32] {
@@ -319,13 +310,6 @@ fn apply_entry_output_is_pinned_extended() {
 }
 
 #[test]
-fn apply_entry_output_before_the_gas_fork_is_pinned() {
-    assert!(PRE_FORK_HEIGHT / 100_000 < crate::consensus::bic::protocol::GAS_FORK_EPOCH && HEIGHT / 100_000 >= crate::consensus::bic::protocol::GAS_FORK_EPOCH);
-    assert_eq!(hex(&run_reporting(run_blocks_pre_fork)), GOLDEN_PRE_FORK, "apply_entry output before the gas fork changed");
-    assert_eq!(hex(&run_reporting(run_blocks_extended_mainnet_pre_fork)), GOLDEN_MAINNET_CONTRACTS_PRE_FORK, "mainnet apply_entry output before the gas fork changed");
-}
-
-#[test]
 fn mainnet_contract_calls_are_pinned() {
     let a = run_reporting(run_blocks_extended_mainnet);
     assert_eq!(a, run_reporting(run_blocks_extended_mainnet));
@@ -333,7 +317,5 @@ fn mainnet_contract_calls_are_pinned() {
 }
 
 const GOLDEN_MAINNET_CONTRACTS: &str = "4c7e8e3add2a023f15812deb3da198b89a468fe2fc2b965740ca75c3b534901a";
-const GOLDEN_PRE_FORK: &str = "28188f8e93e5a818dcea6b4be6a1fee38e5db09e365c7430dbc637f142f153ea";
-const GOLDEN_MAINNET_CONTRACTS_PRE_FORK: &str = "ea3735e38a3f86edb34ef56dad51dd0c482b02eeb511bd0e315256439854d9f0";
 const GOLDEN: &str = "e1e19f30a85f0f9be9233d87fc2db1b1b85e50ea913bfd19d6beedae919dc884";
 const GOLDEN_EXTENDED: &str = "843b624e3b9ebeaa80e4fb8ab68529a29505077fbdf0225828ce1914ac611b5d";

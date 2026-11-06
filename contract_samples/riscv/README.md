@@ -114,7 +114,7 @@ contract memory and the host, plus its own cost: 2,000 per contract call, sha256
 per 136 B, blake3 45 per KiB, bls verify 250,000, aggregate +64,000 per key, secp256k1 recover 50,000 /
 verify 25,000, ed25519 verify 10,000. Native operations are priced at about 2.5 ns per unit on a 7950X.
 
-Storage is charged as for built-in contracts, with the per-byte rates of the epoch 899 gas fork: a read costs 5,000 units plus 1 per
+Storage is charged as for built-in contracts: a read costs 5,000 units plus 1 per
 key and value byte, a write 25,000 plus 1 per byte; new state also pays 5,555 per byte (plus 711,040 per new
 key) from the storage budget. Log lines, abort messages and the return value end up in the receipt and pay
 the history rate (1,111 per byte) from the storage budget.

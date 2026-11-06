@@ -8,7 +8,7 @@ use crate::consensus::bic::protocol::{COST_PER_DB_READ_BASE, COST_PER_DB_READ_BY
 use crate::consensus::consensus_apply::make_apply_env;
 use crate::consensus::consensus_kv::{kv_delete, kv_get, kv_get_next, kv_get_prev, kv_get_prev_or_first, kv_put, overlay_commit_tx, overlay_discard_tx};
 use crate::consensus::tests::chain_harness::Chain;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 struct Lcg(u64);
 impl Lcg {
@@ -40,6 +40,24 @@ fn key(rng: &mut Lcg) -> Vec<u8> {
 
 fn read_cost(seek_len: usize, value: Option<&Vec<u8>>) -> i128 {
     COST_PER_DB_READ_BASE + COST_PER_DB_READ_BYTE * seek_len as i128 + value.map_or(0, |v| COST_PER_DB_READ_BYTE * v.len() as i128)
+}
+
+//a range read pays for the first live value it lands on, matching the prefix or not, and
+//one read per deleted key it steps over; deleted keys are visible while some layer holds them
+fn scan_cost(live: &BTreeMap<Vec<u8>, Vec<u8>>, visible: &BTreeSet<Vec<u8>>, seek: &[u8], forward: bool, inclusive: bool) -> i128 {
+    let candidates: Vec<&Vec<u8>> = if forward {
+        visible.range(seek.to_vec()..).filter(|k| inclusive || k.as_slice() != seek).collect()
+    } else {
+        visible.range(..=seek.to_vec()).rev().filter(|k| inclusive || k.as_slice() != seek).collect()
+    };
+    let mut cost = COST_PER_DB_READ_BASE + COST_PER_DB_READ_BYTE * seek.len() as i128;
+    for k in candidates {
+        match live.get(k) {
+            Some(v) => return cost + COST_PER_DB_READ_BYTE * v.len() as i128,
+            None => cost += COST_PER_DB_READ_BASE,
+        }
+    }
+    cost
 }
 
 fn model_next(m: &BTreeMap<Vec<u8>, Vec<u8>>, prefix: &[u8], seek: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -76,25 +94,32 @@ fn run(seed: u64) {
 
     let mut block = committed.clone();
     let mut tx = block.clone();
+    let mut block_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut tx_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
     for step in 0..400 {
         match rng.below(10) {
             0..=3 => {
                 let (k, v) = (key(&mut rng), vec![rng.below(256) as u8]);
                 kv_put(&mut env, &k, &v);
+                tx_keys.insert(k.clone());
                 tx.insert(k, v);
             }
             4..=5 => {
                 let k = key(&mut rng);
                 kv_delete(&mut env, &k);
-                tx.remove(&k);
+                if tx.remove(&k).is_some() {
+                    tx_keys.insert(k);
+                }
             }
             6 => {
                 overlay_commit_tx(&mut env);
                 block = tx.clone();
+                block_keys.extend(std::mem::take(&mut tx_keys));
             }
             7 => {
                 overlay_discard_tx(&mut env);
                 tx = block.clone();
+                tx_keys.clear();
             }
             _ => {}
         }
@@ -102,22 +127,23 @@ fn run(seed: u64) {
         let prefix = prefix(&mut rng);
         let seek = suffix(&mut rng);
         let probe = key(&mut rng);
-        let seek_len = prefix.len() + seek.len();
 
         let before = env.exec_left;
         let want = tx.get(&probe).cloned();
         assert_eq!(kv_get(&mut env, &probe), want, "seed {} step {} get", seed, step);
         assert_eq!(before - env.exec_left, read_cost(probe.len(), want.as_ref()), "seed {} step {} get cost", seed, step);
 
-        let checks: [(&str, Option<(Vec<u8>, Vec<u8>)>, fn(&mut crate::consensus::consensus_apply::ApplyEnv, &[u8], &[u8]) -> Option<(Vec<u8>, Vec<u8>)>); 3] = [
-            ("next", model_next(&tx, prefix, &seek), kv_get_next),
-            ("prev", model_prev(&tx, prefix, &seek, false), kv_get_prev),
-            ("prev_or_first", model_prev(&tx, prefix, &seek, true), kv_get_prev_or_first),
+        let visible: BTreeSet<Vec<u8>> = committed.keys().cloned().chain(block_keys.iter().cloned()).chain(tx_keys.iter().cloned()).collect();
+        let full = [prefix, seek.as_slice()].concat();
+        let checks: [(&str, Option<(Vec<u8>, Vec<u8>)>, i128, fn(&mut crate::consensus::consensus_apply::ApplyEnv, &[u8], &[u8]) -> Option<(Vec<u8>, Vec<u8>)>); 3] = [
+            ("next", model_next(&tx, prefix, &seek), scan_cost(&tx, &visible, &full, true, false), kv_get_next),
+            ("prev", model_prev(&tx, prefix, &seek, false), scan_cost(&tx, &visible, &full, false, false), kv_get_prev),
+            ("prev_or_first", model_prev(&tx, prefix, &seek, true), scan_cost(&tx, &visible, &full, false, true), kv_get_prev_or_first),
         ];
-        for (name, want, read) in checks {
+        for (name, want, cost, read) in checks {
             let before = env.exec_left;
             assert_eq!(read(&mut env, prefix, &seek), want, "seed {} step {} {}", seed, step, name);
-            assert_eq!(before - env.exec_left, read_cost(seek_len, want.as_ref().map(|(_, v)| v)), "seed {} step {} {} cost", seed, step, name);
+            assert_eq!(before - env.exec_left, cost, "seed {} step {} {} cost", seed, step, name);
         }
     }
 
