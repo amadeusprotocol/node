@@ -3,147 +3,318 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Amadeus TRUSTLESS Bridge</title>
+<meta name="theme-color" content="#000000">
+<title>Amadeus Bridge</title>
 <link rel="icon" href="./logos/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
 <style>
-  :root { --bg: #f4f5f7; --card: #fff; --line: #e3e5ea; --text: #15171c; --muted: #6b7180; --accent: #1f6feb; --ok: #1a7f37; --warn: #b26b00; }
+  /* Amadeus brand kit, as on ama.one and amahub.ama.one */
+  :root {
+    --bg: #000; --rail: #070707; --panel: #0c0c0c; --box: #151515; --box-hi: #1b1b1b;
+    --line: #262626; --field: #3a3a3a; --text: #e8eef4; --muted: #8a98a8; --dim: #737f8d;
+    --lime: #c4f82a; --lime-ink: #0b0f00; --lime-tint: rgba(196, 248, 42, .08);
+    --teal: #2dd4bf; --teal-tint: rgba(45, 212, 191, .1);
+    --ok: #2bd673; --ok-tint: rgba(43, 214, 115, .1);
+    --warn: #ffd479; --warn-tint: rgba(255, 212, 121, .1);
+    --bad: #ff8a8a; --bad-tint: rgba(255, 138, 138, .1);
+    --r-sm: 10px; --r: 14px; --r-lg: 20px; --ctl: 40px;
+    --ease: cubic-bezier(.16, 1, .3, 1);
+    color-scheme: dark;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
-  main { max-width: 560px; margin: 0 auto; padding: 20px 16px 48px; }
-  header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-  header img { width: 32px; height: 32px; }
-  header h1 { font-size: 20px; margin: 0; }
-  .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: #fff3cd; color: #7a5600; border: 1px solid #f1d78a; }
-  .badge.mainnet { background: #e6f4ea; color: var(--ok); border-color: #b7dfc2; }
-  .tl { color: #00b8a9; letter-spacing: .5px; }
-  .note { font-size: 12px; color: var(--muted); margin: -6px 0 14px; }
-  .note a { color: var(--muted); }
-  .note .free { color: var(--ok); }
-  .wallets { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
-  .wallet { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; cursor: pointer; font: inherit; text-align: left; color: var(--text); }
-  .wallet:hover { border-color: #c6cbd5; }
-  .wallet img { width: 28px; height: 28px; border-radius: 6px; flex: none; }
-  .wallet .name { font-weight: 600; font-size: 14px; }
-  .wallet .who { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
-  .wallet.on .who { color: var(--ok); }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
-  .side { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fafbfc; }
-  .side .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 8px; }
-  .pick { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-  .chainbig { display: inline-flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 700; }
-  .chainbig img { width: 40px; height: 40px; border-radius: 50%; }
-  .chainbig .k { display: block; font-size: 11px; font-weight: 400; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
-  .picker { position: relative; }
-  .chainbtn { display: inline-flex; align-items: center; gap: 10px; padding: 6px 12px 6px 6px; border: 1.5px solid #d5dae3; border-radius: 12px; background: #fff; font: inherit; color: var(--text); cursor: pointer; text-align: left; }
-  .chainbtn:hover, .chainbtn.open { border-color: var(--accent); }
-  .chainbtn img { width: 36px; height: 36px; border-radius: 50%; }
-  .chainbtn b { display: block; font-size: 17px; }
-  .chainbtn .k { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
-  .chainbtn .chev { margin-left: 6px; color: var(--muted); font-size: 12px; }
-  .chainbtn.fixed { cursor: default; }
-  .chainbtn.fixed:hover { border-color: #d5dae3; }
-  .menu { position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; min-width: 330px; background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(20, 25, 40, .14); padding: 6px; }
-  .opt { white-space: nowrap; display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: none; font: 600 15px system-ui, sans-serif; color: var(--text); cursor: pointer; text-align: left; }
-  .opt img { width: 28px; height: 28px; border-radius: 50%; }
-  .opt:hover:not(:disabled) { background: #eef3fd; }
-  .opt.sel { background: #e7effd; }
-  .opt .tick { margin-left: auto; color: var(--accent); }
-  .opt small { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--muted); }
-  .opt:disabled { cursor: default; color: var(--muted); }
-  .opt:disabled img { opacity: .45; }
-  .flabel { display: block; font-size: 12px; font-weight: 600; color: #3d4352; margin: 10px 0 5px; }
-  .field { display: flex; align-items: center; gap: 8px; background: #fff; border: 1.5px solid #d5dae3; border-radius: 10px; padding: 8px 12px; }
-  .field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(31, 111, 235, .15); }
-  .field.readonly { background: #f1f3f6; border-style: dashed; }
-  .field .unit { font-weight: 600; color: var(--muted); }
-  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px 9px 8px; border-radius: 99px; background: #fff; border: 1px solid var(--line); font-size: 14px; font-weight: 600; }
-  .pill img { width: 22px; height: 22px; border-radius: 50%; }
-  .pill .coin { margin-right: 9px; }
-  .pill .k { font-weight: 400; color: var(--muted); font-size: 12px; }
-  .pill select { border: 0; background: transparent; font: inherit; font-weight: 600; padding: 0; cursor: pointer; }
-  .coin { position: relative; width: 28px; height: 28px; }
-  .coin img:first-child { width: 28px; height: 28px; }
-  .coin img.small { position: absolute; right: -9px; bottom: -3px; width: 20px; height: 20px; border-radius: 50%; border: 2px solid #fff; background: #fff; }
-  .amount input { flex: 1; min-width: 0; border: 0; background: transparent; font: 600 24px system-ui, sans-serif; color: var(--text); outline: none; padding: 0; }
-  .amount input::placeholder { color: #b3b9c5; }
-  .amount .out { flex: 1; font: 600 24px system-ui, sans-serif; color: var(--text); }
-  .amount #max { border: 1px solid #c9d7f3; border-radius: 6px; background: #eef3fd; color: var(--accent); font: 600 12px system-ui, sans-serif; padding: 3px 8px; cursor: pointer; }
-  .bal { font-size: 12px; color: var(--muted); margin-top: 5px; min-height: 16px; }
-  .flip { display: flex; justify-content: center; margin: -6px 0; position: relative; z-index: 1; }
-  .flip button { width: 38px; height: 38px; border-radius: 10px; border: 4px solid var(--card); background: #e9edf5; font-size: 18px; cursor: pointer; }
-  .flip button:hover { background: #dbe3f1; }
-  .recipient { flex: 1; min-width: 0; border: 0; outline: none; padding: 2px 0; font: 13px ui-monospace, monospace; background: transparent; color: var(--text); }
-  .recipient::placeholder { color: #9aa1ae; }
-  .delivery { margin: 12px 0 4px; display: grid; gap: 6px; }
-  .drop { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 14px; cursor: pointer; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fafbfc; }
-  .drop input { width: 17px; height: 17px; accent-color: var(--accent); }
-  .drop small { color: var(--muted); font-size: 12px; }
-  .summary { font-size: 13px; color: var(--muted); margin: 10px 2px 0; display: grid; gap: 2px; }
-  .summary div { display: flex; justify-content: space-between; }
-  .summary .total { color: var(--text); font-weight: 600; }
-  .go { width: 100%; margin-top: 12px; padding: 13px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font: 600 16px system-ui, sans-serif; cursor: pointer; }
-  .go:disabled { background: #aab3c5; cursor: default; }
-  h2 { font-size: 15px; margin: 22px 0 8px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-  td, th { padding: 7px 8px; border-bottom: 1px solid #eef0f3; text-align: left; }
-  th { color: var(--muted); font-weight: 500; font-size: 12px; }
-  td img { width: 16px; height: 16px; vertical-align: -3px; border-radius: 50%; }
-  .st { display: inline-block; font-size: 12px; line-height: 1.35; padding: 2px 8px; border-radius: 8px; }
-  .st.done { background: #e6f4ea; color: var(--ok); } .st.wait { background: #fff3cd; color: var(--warn); }
-  td button { border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; padding: 3px 9px; cursor: pointer; }
-  .relay { font-size: 12px; color: var(--muted); margin-top: 8px; }
-  .relay a { color: var(--muted); }
-  details { margin-top: 18px; font-size: 13px; color: var(--muted); }
-  #log { white-space: pre-wrap; font: 12px ui-monospace, monospace; color: #444; margin-top: 6px; }
-  @media (max-width: 480px) { .wallets { grid-template-columns: 1fr; } }
+  [hidden] { display: none !important; }
+  html { background: var(--bg); }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 400 15px/1.45 Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+  ::selection { background: var(--lime); color: var(--lime-ink); }
+  a { color: inherit; text-underline-offset: 3px; }
+  button, input { font: inherit; color: inherit; }
+  input { caret-color: var(--lime); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  button { cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+  :focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+  * { scrollbar-width: thin; scrollbar-color: var(--field) transparent; }
+  svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+  .shell { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; }
+
+  /* rail */
+  .rail { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 6px; padding: 18px 12px; background: var(--rail); border-right: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 6px 12px 18px; text-decoration: none; }
+  .brand img { width: 28px; height: 30px; }
+  .brand b { font-size: 20px; letter-spacing: .2px; }
+  .brand span { color: var(--muted); font-size: 20px; }
+  .navh { margin: 14px 12px 4px; font-size: 12.5px; color: var(--dim); }
+  .nav { display: flex; align-items: center; gap: 12px; width: 100%; height: var(--ctl); padding: 0 12px; border: 0; border-radius: var(--r-sm); background: none; color: var(--muted); font-weight: 500; text-decoration: none; text-align: left; transition: background .2s, color .2s; }
+  .nav:hover { background: var(--box); color: var(--text); }
+  .nav[aria-current="page"] { background: var(--box-hi); color: var(--text); }
+  .nav[aria-current="page"] svg.i { color: var(--lime); }
+  .nav .count { margin-left: auto; min-width: 22px; padding: 1px 7px; border-radius: 99px; background: var(--line); color: var(--text); font-size: 12.5px; text-align: center; }
+  .nav .count:empty { display: none; }
+  .nav .ext { margin-left: auto; width: 14px; height: 14px; color: var(--dim); }
+  .railfoot { margin-top: auto; padding: 12px; display: grid; gap: 10px; font-size: 13.5px; color: var(--muted); }
+  .railfoot a { color: var(--muted); }
+  .badge { justify-self: start; padding: 3px 10px; border-radius: 99px; font-size: 12.5px; font-weight: 500; border: 1px solid rgba(255, 212, 121, .35); background: var(--warn-tint); color: var(--warn); }
+  .badge.mainnet { border-color: rgba(43, 214, 115, .35); background: var(--ok-tint); color: var(--ok); }
+
+  /* top bar */
+  .top { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 16px 28px; }
+  .top .mobile-brand { display: none; }
+  .wallet { display: inline-flex; align-items: center; gap: 10px; height: var(--ctl); padding: 0 16px 0 12px; border: 1px solid var(--field); border-radius: 99px; background: var(--box); transition: background .2s, border-color .2s; }
+  .wallet:hover { border-color: var(--muted); background: var(--box-hi); }
+  .wallet img { width: 22px; height: 22px; border-radius: 6px; object-fit: contain; }
+  .wallet .name { font-weight: 500; }
+  .wallet .who { color: var(--muted); }
+  .wallet .who:empty { display: none; }
+  .wallet.on { border-color: var(--line); background: var(--box); }
+  .wallet.on .name { display: none; }
+  .wallet.on .who { color: var(--text); font-weight: 500; }
+
+  /* bridge view */
+  main { min-width: 0; }
+  .stage { display: flex; justify-content: center; align-items: stretch; gap: 20px; padding: 24px 28px 64px; }
+  .widget { width: 440px; max-width: 100%; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg); }
+  .whead { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px 14px; }
+  .whead h1 { margin: 0; font-size: 20px; font-weight: 700; }
+  .whead small { color: var(--muted); font-size: 13.5px; }
+
+  .box { padding: 14px 16px 16px; background: var(--box); border: 1px solid transparent; border-radius: var(--r); transition: border-color .2s, background .2s; }
+  .box:focus-within { border-color: var(--field); }
+  .box:has(.amt:focus-visible) { border-color: var(--lime); }
+  .box.over { border-color: rgba(255, 138, 138, .45); }
+  .boxhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 22px; color: var(--muted); font-size: 13.5px; }
+  .boxhead label, .boxhead .lbl { color: var(--text); font-weight: 500; font-size: 15px; }
+  .bal { display: inline-flex; align-items: center; gap: 6px; }
+  #max { height: 24px; padding: 0 9px; border: 1px solid var(--field); border-radius: 99px; background: none; color: var(--text); font-size: 12.5px; font-weight: 500; }
+  #max:hover { border-color: var(--lime); color: var(--lime); }
+  .boxmain { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .amt { flex: 1; min-width: 0; width: 100%; padding: 0; border: 0; outline: 0; background: none; font-size: 36px; font-weight: 500; line-height: 1.2; letter-spacing: -.5px; text-overflow: ellipsis; }
+  .amt::placeholder { color: var(--dim); }
+  .amt.out { color: var(--text); overflow: hidden; white-space: nowrap; }
+  .amt.out.zero { color: var(--dim); }
+
+  .asset { display: inline-flex; align-items: center; gap: 10px; flex: none; height: 48px; padding: 0 12px 0 6px; border: 1px solid var(--line); border-radius: 99px; background: var(--panel); text-align: left; transition: border-color .2s, background .2s; }
+  .asset:hover:not(:disabled) { border-color: var(--field); background: var(--box-hi); }
+  .asset:disabled { cursor: default; padding-right: 16px; }
+  .alogo { position: relative; width: 34px; height: 34px; flex: none; }
+  .alogo img { width: 34px; height: 34px; border-radius: 50%; }
+  .alogo img.chain { position: absolute; right: -3px; bottom: -3px; width: 16px; height: 16px; border-radius: 4px; outline: 2px solid var(--panel); }
+  .atext { display: grid; line-height: 1.15; }
+  .atext b { font-size: 15px; }
+  .atext small { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+
+  .flipwrap { display: flex; justify-content: center; height: 8px; position: relative; z-index: 1; }
+  #flip { position: absolute; top: -16px; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; border: 4px solid var(--panel); background: var(--box-hi); color: var(--text); transition: transform .35s var(--ease), background .2s; }
+  #flip:hover:not(:disabled) { background: var(--line); transform: rotate(180deg); }
+  #flip:disabled { color: var(--dim); }
+
+  .recip { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .recip label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13.5px; }
+  #recipient { width: 100%; height: var(--ctl); padding: 0 12px; border: 1px solid var(--field); border-radius: var(--r-sm); background: var(--panel); outline: 0; font-size: 15px; text-overflow: ellipsis; }
+  #recipient::placeholder { color: var(--muted); }
+  #recipient:focus { border-color: var(--lime); }
+
+  .drop { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 12px 16px; border-radius: var(--r); background: var(--box); cursor: pointer; }
+  .drop span { flex: 1; }
+  .drop small { display: block; color: var(--muted); font-size: 12.5px; }
+  .drop input { appearance: none; position: relative; flex: none; width: 40px; height: 24px; margin: 0; border-radius: 99px; background: var(--field); box-shadow: inset 0 0 0 1px var(--muted); cursor: pointer; transition: background .2s; }
+  .drop input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--text); transition: transform .25s var(--ease); }
+  .drop input:checked { background: var(--lime); box-shadow: none; }
+  .drop input:checked::after { background: var(--lime-ink); transform: translateX(16px); }
+  #delivery:empty { display: none; }
+
+  .notice { margin-top: 10px; padding: 10px 14px; border-radius: var(--r-sm); background: var(--bad-tint); color: var(--bad); font-size: 13.5px; overflow-wrap: anywhere; }
+  .notice.info { background: var(--teal-tint); color: var(--teal); }
+
+  .go { width: 100%; height: 52px; margin-top: 12px; border: 0; border-radius: 99px; background: var(--lime); color: var(--lime-ink); font-size: 16px; font-weight: 700; transition: filter .2s, transform .15s var(--ease), background .2s, color .2s; }
+  .go:hover:not(:disabled) { filter: brightness(1.06); }
+  .go:active:not(:disabled) { transform: scale(.985); }
+  .go:disabled { background: var(--box-hi); color: var(--muted); }
+  .relay { margin-top: 10px; color: var(--warn); font-size: 13.5px; text-align: center; }
+  .relay:empty { display: none; }
+  .trust { margin: 14px 4px 0; display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--muted); font-size: 12.5px; text-align: center; }
+  .trust svg.i { width: 14px; height: 14px; color: var(--teal); }
+
+  /* side card: route and order history, beside the widget */
+  .side { display: flex; flex-direction: column; width: 420px; max-width: 100%; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+  .sidetabs { display: flex; gap: 4px; padding: 12px 12px 0; }
+  .sidetabs button { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border: 0; border-radius: 99px; background: none; color: var(--muted); font-weight: 500; transition: color .2s, background .2s; }
+  .sidetabs button:hover { color: var(--text); }
+  .sidetabs button[aria-selected="true"] { background: var(--box-hi); color: var(--text); box-shadow: inset 0 -2px 0 var(--lime); }
+  .sidetabs .count { min-width: 20px; padding: 0 6px; border-radius: 99px; background: var(--line); color: var(--text); font-size: 12.5px; text-align: center; }
+  .sidetabs .count:empty { display: none; }
+  .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 14px 16px 16px; animation: rise .35s var(--ease); }
+  .hint { margin: 0 0 12px; color: var(--muted); font-size: 13.5px; }
+  #route-empty { margin: auto 0; padding: 40px 12px; text-align: center; }
+  .path { display: flex; align-items: center; gap: 8px; padding: 14px 12px; margin-bottom: 12px; border-radius: var(--r); background: var(--box); }
+  .hop { display: grid; justify-items: center; gap: 6px; min-width: 64px; font-size: 12.5px; color: var(--muted); text-align: center; }
+  .hop img { width: 32px; height: 32px; border-radius: 50%; }
+  .hop.hub img { outline: 2px solid var(--lime); outline-offset: 2px; }
+  .link { flex: 1; margin-bottom: 20px; border-top: 2px dashed var(--field); }
+  #summary { display: grid; gap: 2px; }
+  #summary div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 2px; font-size: 13.5px; }
+  #summary div span:first-child { color: var(--muted); white-space: nowrap; }
+  #summary div span:last-child { text-align: right; }
+  #summary .total { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 15px; }
+  #summary .total span { color: var(--text) !important; font-weight: 700; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+
+  /* history button and order list */
+  .iconbtn { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 99px; background: none; color: var(--muted); font-size: 13.5px; font-weight: 500; transition: color .2s, border-color .2s, background .2s; }
+  .iconbtn:hover, .iconbtn.on { color: var(--text); border-color: var(--field); background: var(--box); }
+  .iconbtn.on svg.i { color: var(--lime); }
+  .orders { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -8px; padding: 0; list-style: none; }
+  .ord { display: grid; gap: 6px; padding: 12px 10px; border-bottom: 1px solid #191919; }
+  .ord:last-child { border-bottom: 0; }
+  .ordtop { display: flex; align-items: center; gap: 10px; }
+  .ordtop .rt { display: inline-flex; align-items: center; gap: 2px; }
+  .ordtop img { width: 22px; height: 22px; border-radius: 50%; }
+  .ordtop .arrow { color: var(--dim); margin: 0 2px; }
+  .ordtop b { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ordsub { color: var(--muted); font-size: 12.5px; padding-left: 2px; }
+  .st { display: inline-flex; align-items: center; gap: 6px; flex: none; max-width: 190px; padding: 3px 10px; border-radius: 99px; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .st.done { background: var(--ok-tint); color: var(--ok); }
+  .st.wait { background: var(--teal-tint); color: var(--teal); }
+  .st.wait::before { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  [data-claim] { flex: none; height: 30px; padding: 0 14px; border: 0; border-radius: 99px; background: var(--lime); color: var(--lime-ink); font-weight: 700; }
+  .orders .empty { padding: 36px 16px; color: var(--muted); text-align: center; }
+  details.activity { margin: 8px -16px -16px; padding: 12px 16px 14px; border-top: 1px solid var(--line); }
+  details.activity summary { color: var(--muted); cursor: pointer; font-size: 13.5px; }
+  #log { margin-top: 10px; padding: 12px; max-height: 200px; overflow: auto; border-radius: var(--r); background: var(--box); color: var(--muted); font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  /* chain dialog */
+  dialog { width: min(420px, calc(100vw - 32px)); max-height: min(560px, calc(100vh - 64px)); padding: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); color: var(--text); }
+  dialog[open] { display: flex; flex-direction: column; animation: rise .3s var(--ease); }
+  dialog::backdrop { background: rgba(0, 0, 0, .7); backdrop-filter: blur(4px); }
+  .dhead { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 12px; }
+  .dhead h2 { margin: 0; font-size: 20px; }
+  .x { display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--box); color: var(--muted); }
+  .x:hover { color: var(--text); }
+  .search { display: flex; align-items: center; gap: 8px; margin: 0 16px 10px; padding: 0 12px; height: var(--ctl); border: 1px solid var(--field); border-radius: var(--r-sm); color: var(--muted); }
+  .search:focus-within { border-color: var(--lime); }
+  .search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; font-size: 15px; }
+  #chain-list { overflow-y: auto; padding: 4px 8px 12px; }
+  .opt { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px; border: 0; border-radius: var(--r-sm); background: none; text-align: left; }
+  .opt:hover:not(:disabled), .opt:focus-visible { background: var(--box-hi); }
+  .opt img { width: 34px; height: 34px; border-radius: 50%; }
+  .opt span { flex: 1; display: grid; }
+  .opt small { color: var(--muted); font-size: 12.5px; }
+  .opt:disabled { opacity: .45; }
+  .opt .tick { width: 18px; height: 18px; color: var(--lime); }
+
+  @media (min-width: 1081px) { .side { contain: size; } }
+  @media (max-width: 1080px) {
+    .stage { flex-direction: column; align-items: center; }
+    .side { width: 440px; }
+    .orders { max-height: 360px; }
+  }
+  @media (max-width: 860px) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    .rail { position: static; height: auto; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 4px; padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
+    .brand { flex-basis: 100%; padding: 0 0 8px; }
+    .brand b, .brand span { font-size: 18px; }
+    .navh, .nav.extra, .railfoot span:not(.badge) { display: none; }
+    .railfoot { position: absolute; top: 14px; right: 16px; margin: 0; padding: 0; }
+    .rail { position: relative; }
+    #recipient, .search input { font-size: 16px; }
+    .nav[aria-current] { display: none; }
+    .top { padding: 12px 16px; justify-content: flex-start; flex-wrap: wrap; }
+    .wallet { flex: 1; min-width: 0; justify-content: center; }
+    .wallet .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stage { padding: 8px 16px 48px; }
+    .iconbtn span { display: none; }
+    .widget { padding: 12px; }
+    .amt { font-size: 30px; }
+  }
+  @media (max-width: 420px) {
+    .amt { font-size: 26px; }
+    .asset { gap: 8px; padding-right: 10px; }
+    .wallet img { display: none; }
+    .wallet { padding: 0 12px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
 </style>
 <!-- filled in by the worker for this network (worker/index.js) -->
 <script id="config" type="application/json">{}</script>
 </head>
 <body>
-<main>
-  <header>
-    <img src="./logos/ama.svg" alt="">
-    <h1>Amadeus <span class="tl">TRUSTLESS</span> Bridge</h1>
-    <span class="badge" id="network"></span>
-  </header>
-
-  <p class="note">Verified on-chain by light clients on both sides (<a id="lc-link" target="_blank" rel="noopener">contracts</a>) · <b class="free">0 Fee</b></p>
-
-  <div class="wallets">
-    <button class="wallet" id="connect-ama"><img src="./logos/ama-wallet.png" alt=""><span><div class="name">Amadeus wallet</div><div class="who" id="ama-account">Connect</div></span></button>
-    <button class="wallet" id="connect-evm"><img src="./logos/metamask.svg" alt=""><span><div class="name">MetaMask</div><div class="who" id="evm-account">Connect</div></span></button>
-  </div>
-
-  <div class="card">
-    <div class="side">
-      <div class="label">From</div>
-      <div class="pick" id="from-pick"></div>
-      <label class="flabel" for="amount">Amount</label>
-      <div class="field amount"><input id="amount" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="amount-unit"></span><button id="max" type="button">Max</button></div>
-      <div class="bal" id="from-balance"></div>
+<div class="shell">
+  <aside class="rail">
+    <a class="brand" href="/"><img src="./logos/ama-cube.svg" alt=""><b>Amadeus</b><span>Bridge</span></a>
+    <a class="nav" href="/" aria-current="page"><svg class="i" viewBox="0 0 24 24"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg>Bridge</a>
+    <p class="navh">Amadeus</p>
+    <a class="nav extra" href="https://amahub.ama.one" target="_blank" rel="noopener"><svg class="i" viewBox="0 0 24 24"><path d="M4 10l8-6 8 6v9a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>AMA Hub<svg class="i ext" viewBox="0 0 24 24"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
+    <a class="nav extra" href="https://ama.one" target="_blank" rel="noopener"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>ama.one<svg class="i ext" viewBox="0 0 24 24"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
+    <div class="railfoot">
+      <span class="badge" id="network"></span>
+      <span>Verified on-chain by light clients on both sides. <a id="lc-link" target="_blank" rel="noopener">Contracts</a></span>
     </div>
-    <div class="flip"><button id="flip" title="Switch direction">⇅</button></div>
-    <div class="side">
-      <div class="label">To</div>
-      <div class="pick" id="to-pick"></div>
-      <div class="flabel">You receive</div>
-      <div class="field amount readonly"><div class="out" id="receive">0.0</div><span class="unit" id="receive-unit"></span></div>
-      <label class="flabel" for="recipient">Recipient address</label>
-      <div class="field"><input class="recipient" id="recipient" autocomplete="off" spellcheck="false"></div>
-    </div>
+  </aside>
 
-    <div class="delivery" id="delivery"></div>
-    <div class="summary" id="summary"></div>
-    <button class="go" id="go" disabled>Connect a wallet</button>
-    <div class="relay" id="relay-status"></div>
-  </div>
+  <main>
+    <header class="top">
+      <button class="wallet" id="connect-ama" type="button"><img src="./logos/ama-wallet.png" alt=""><span class="name">Amadeus wallet</span><span class="who" id="ama-account"></span></button>
+      <button class="wallet" id="connect-evm" type="button"><img src="./logos/metamask.svg" alt=""><span class="name">MetaMask</span><span class="who" id="evm-account"></span></button>
+    </header>
 
-  <h2>Recent orders</h2>
-  <table><thead><tr><th>Route</th><th>#</th><th>Amount</th><th>To</th><th>Delivery</th><th>Status</th></tr></thead><tbody id="orders"></tbody></table>
+    <section class="stage" id="view-bridge">
+      <div class="widget">
+        <div class="whead"><h1>Bridge</h1><button class="iconbtn" id="history-btn" type="button" aria-controls="pane-history" aria-label="Order history"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>History</span></button></div>
 
-  <details><summary>Activity</summary><div id="log"></div></details>
-</main>
+        <div class="box" id="from-box">
+          <div class="boxhead"><label for="amount">Send</label><span class="bal"><span id="from-balance"></span></span><button id="max" type="button">Max</button></div>
+          <div class="boxmain"><input class="amt" id="amount" inputmode="decimal" placeholder="0" autocomplete="off" aria-describedby="from-balance"><div id="from-pick"></div></div>
+        </div>
+
+        <div class="flipwrap"><button id="flip" type="button" aria-label="Switch direction"><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button></div>
+
+        <div class="box">
+          <div class="boxhead"><span class="lbl" id="receive-label">Receive</span></div>
+          <div class="boxmain"><output class="amt out zero" id="receive" aria-labelledby="receive-label">0</output><div id="to-pick"></div></div>
+          <div class="recip"><label for="recipient">Recipient address</label><input id="recipient" autocomplete="off" spellcheck="false"></div>
+        </div>
+
+        <div id="delivery"></div>
+        <div class="notice" id="notice" role="status" hidden></div>
+        <button class="go" id="go" type="button" disabled>Connect a wallet</button>
+        <div class="relay" id="relay-status" role="status"></div>
+        <p class="trust"><svg class="i" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>Trustless: both chains verify each other with light clients</p>
+      </div>
+
+      <aside class="side" aria-label="Route and order history">
+        <div class="sidetabs" role="tablist">
+          <button role="tab" type="button" id="tab-route" aria-controls="pane-route" aria-selected="true">Route</button>
+          <button role="tab" type="button" id="tab-history" aria-controls="pane-history" aria-selected="false" tabindex="-1">History<span class="count" id="orders-count"></span></button>
+        </div>
+        <div class="pane" id="pane-route" role="tabpanel" aria-labelledby="tab-route" tabindex="0">
+          <div id="route">
+            <div class="path" id="route-path"></div>
+            <div id="summary"></div>
+          </div>
+          <p class="hint" id="route-empty">Enter an amount to see the route, what it costs and when it arrives.</p>
+        </div>
+        <div class="pane" id="pane-history" role="tabpanel" aria-labelledby="tab-history" tabindex="-1" hidden>
+          <p class="hint">Recent transfers on every route, newest first. The relay delivers them, or claim yours yourself.</p>
+          <ul class="orders" id="orders" tabindex="0" aria-label="Recent orders"><li class="empty">Loading orders…</li></ul>
+          <details class="activity"><summary>Activity log</summary><div id="log"></div></details>
+        </div>
+      </aside>
+    </section>
+
+  </main>
+</div>
+
+<dialog id="chain-dialog" aria-labelledby="chain-title">
+  <div class="dhead"><h2 id="chain-title">Select chain</h2><button class="x" type="button" id="chain-close" aria-label="Close"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <label class="search"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input id="chain-search" placeholder="Search chains" autocomplete="off" aria-label="Search chains"></label>
+  <div id="chain-list" aria-labelledby="chain-title"></div>
+</dialog>
 <script type="module" src="./app.js"></script>
 </body>
 </html>
