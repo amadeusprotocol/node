@@ -389,7 +389,7 @@ defmodule Ama.MultiServer do
                 [contract, function] = String.replace(r.path, "/api/contract/view/", "") |> :binary.split("/")
                 contract = Base58.decode(contract)
                 query = r.query && Photon.HTTP.parse_query(r.query)
-                {success, result, logs} = API.Contract.view(contract, function, [], query[:pk])
+                {success, result, logs} = API.Contract.view(contract, function, [], query[:pk] && Base58.decode(query.pk))
                 logs = Enum.map(logs, & RocksDB.ascii_dump(&1))
                 quick_reply(state, JSX.encode!(%{success: success, result: RocksDB.ascii_dump(result), logs: logs}))
             r.method == "GET" and String.starts_with?(r.path, "/api/contract/richlist") ->

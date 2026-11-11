@@ -81,7 +81,7 @@ curl https://mainnet-rpc.ama.one/api/chain/stats
 curl https://mainnet-rpc.ama.one/api/wallet/balance/<base58(pk)>
 curl https://mainnet-rpc.ama.one/api/tx/submit_and_wait/<base58(txbytes)>
 
-curl https://mainnet-rpc.ama.one/api/contract/view/<base58(pk)>/<function>?=pk<base58(view_as_pk)>
+curl https://mainnet-rpc.ama.one/api/contract/view/<base58(pk)>/<function>?pk=<base58(view_as_pk)>
 ```
 
 ### Remote Testnet
