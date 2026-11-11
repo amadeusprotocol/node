@@ -23,8 +23,9 @@ A Privacy Layer 1 for Agentics /w MatMul-based Useful Proof of Work
 | Pitchdeck | https://pitchdeck.ama.one |
 | GitHub | https://github.com/amadeusprotocol |
 | Discord | https://discord.gg/Cus2RwrhXB |
-| Twitter / X | https://x.com/amadeusprotocol |
-| Explorer | https://ama-explorer.ddns.net |
+| Twitter / X | https://x.com/ama_protocol |
+| Explorer | https://explorer.ama.one |
+| Community Explorer | https://ama-explorer.ddns.net |
 | Wallet Web | https://wallet.ama.one |
 | Wallet Extension | https://chromewebstore.google.com/detail/amadeus-wallet/gigmkdnbhopbandngplohmilogilbkjn |
 
@@ -59,13 +60,15 @@ A Privacy Layer 1 for Agentics /w MatMul-based Useful Proof of Work
 ### Testnet
 | Resource | Endpoint |
 |----------|----------|
-| Explorer | https://testnet-ama.ddns.net |
+| Explorer | https://testnet.explorer.ama.one |
+| Community Explorer | https://testnet-ama.ddns.net |
 | RPC | https://testnet-rpc.ama.one |
 | Direct Nodes | testnet.ama.one |
 
 ### Mainnet
 | Resource | Endpoint |
 |----------|----------|
-| Explorer | https://ama-explorer.ddns.net |
+| Explorer | https://explorer.ama.one |
+| Community Explorer | https://ama-explorer.ddns.net |
 | RPC | https://mainnet-rpc.ama.one |
 | Direct Nodes | nodes.amadeus.bot |
