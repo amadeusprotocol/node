@@ -96,15 +96,15 @@
   .amt.out { color: var(--text); overflow: hidden; white-space: nowrap; }
   .amt.out.zero { color: var(--dim); }
 
-  .asset { display: inline-flex; align-items: center; gap: 10px; flex: none; height: 48px; padding: 0 12px 0 6px; border: 1px solid var(--line); border-radius: 99px; background: var(--panel); text-align: left; transition: border-color .2s, background .2s; }
+  .asset { display: inline-flex; align-items: center; gap: 10px; flex: none; width: 236px; height: 48px; padding: 0 12px 0 6px; border: 1px solid var(--line); border-radius: 99px; background: var(--panel); text-align: left; transition: border-color .2s, background .2s; }
   .asset:hover:not(:disabled) { border-color: var(--field); background: var(--box-hi); }
   .asset:disabled { cursor: default; padding-right: 16px; }
   .alogo { position: relative; width: 34px; height: 34px; flex: none; }
   .alogo img { width: 34px; height: 34px; border-radius: 50%; }
   .alogo img.chain { position: absolute; right: -3px; bottom: -3px; width: 16px; height: 16px; border-radius: 4px; outline: 2px solid var(--panel); }
-  .atext { display: grid; line-height: 1.15; }
+  .atext { display: grid; line-height: 1.15; min-width: 0; margin-right: auto; }
   .atext b { font-size: 15px; }
-  .atext small { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+  .atext small { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   .flipwrap { display: flex; justify-content: center; height: 8px; position: relative; z-index: 1; }
   #flip { position: absolute; top: -16px; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; border: 4px solid var(--panel); background: var(--box-hi); color: var(--text); transition: transform .35s var(--ease), background .2s; }
@@ -232,7 +232,7 @@
   }
   @media (max-width: 420px) {
     .amt { font-size: 26px; }
-    .asset { gap: 8px; padding-right: 10px; }
+    .asset { gap: 8px; padding-right: 10px; width: 186px; }
     .wallet img { display: none; }
     .wallet { padding: 0 12px; }
   }
