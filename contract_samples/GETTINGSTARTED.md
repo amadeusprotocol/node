@@ -81,8 +81,10 @@ curl https://mainnet-rpc.ama.one/api/chain/stats
 curl https://mainnet-rpc.ama.one/api/wallet/balance/<base58(pk)>
 curl https://mainnet-rpc.ama.one/api/tx/submit_and_wait/<base58(txbytes)>
 
-curl https://mainnet-rpc.ama.one/api/contract/view/<base58(pk)>/<function>?=pk<base58(view_as_pk)>
+curl https://mainnet-rpc.ama.one/api/contract/view/<base58(pk)>/<function>?pk=<base58(view_as_pk)>
 ```
+
+`submit_and_wait` gives up after about 6 seconds and then replies HTTP 200 with `"error": "timeout"` and the tx `hash`. A timeout does not mean the transaction failed: it may still be pending, or already executed (with `?finalized=true` the receipt can be in the reply). Look the hash up with `/api/chain/tx/<hash>` before sending again: resending builds a new transaction and can pay twice.
 
 ### Remote Testnet
 

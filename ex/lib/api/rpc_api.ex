@@ -83,10 +83,13 @@ defmodule RPC.API do
 
     def transfer_bulk_from_text(seed, text) do
       lines = String.split(String.trim(text), "\n")
-      |> Enum.filter(& &1 != "")
+      |> Enum.filter(& String.trim(&1) != "")
       Enum.map(lines, fn line->
-        [pk, amount] = :binary.split(line, " ")
-        {pk, :erlang.binary_to_integer(amount) * 1.0}
+        with [pk, amount] <- String.split(line), {amount_float, ""} when amount_float > 0 <- Float.parse(amount) do
+          {pk, amount_float}
+        else
+          _ -> throw(%{error: :invalid_line, line: line})
+        end
       end)
     end
 

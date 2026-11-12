@@ -119,8 +119,13 @@ defmodule API.TX do
       txu = tx_packed |> TX.unpack()
       result = if broadcast do TXPool.insert_and_broadcast(txu) else TXPool.insert(txu) end
       if result[:error] == :ok do
-          txres = submit_and_wait_1(result.txu.hash, wait_finalized)
-          %{error: :ok, hash: Base58.encode(result.txu.hash), metadata: txres.metadata, receipt: txres.receipt}
+          hash = result.txu.hash
+          if txres = submit_and_wait_1(hash, wait_finalized) do
+              %{error: :ok, hash: Base58.encode(hash), metadata: txres.metadata, receipt: txres.receipt}
+          else
+              tx = get(hash) || get_pending(hash)
+              %{error: :timeout, hash: Base58.encode(hash), metadata: tx[:metadata], receipt: tx[:receipt]}
+          end
       else
           %{error: result.error}
       end
