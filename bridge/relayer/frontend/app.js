@@ -311,8 +311,7 @@ async function refresh() {
     $('evm-account').textContent = `${short(evmAddress)} · ${Number(formatEther(await rpcOf(c).getBalance(evmAddress))).toFixed(4)} ${c.gasSymbol}`
   }
   await checkRecipientGas()
-  await showOrders()
-  await showRelayStatus()
+  await Promise.all([showOrders(), showRelayStatus()])
 }
 
 //Amadeus verifies an order once its block is final on the source chain: finality trails the head by
@@ -354,8 +353,7 @@ async function readFinalityLag(c) {
   return fin
 }
 //an order Amadeus has not received yet: waiting for its block's finality, or being proven
-async function inboundStatus(c, ev, o) {
-  const fin = await readFinalityLag(c)
+async function inboundStatus(c, ev, o, fin) {
   if (fin.number >= ev.blockNumber) return status(false, o.gasDropFee > 0n ? 'final · relay proving on Amadeus' : 'final · ready to claim')
   const t = (await rpcOf(c).getBlock(ev.blockNumber)).timestamp
   const what = c.arbitrum ? `${c.label} to settle on ${chainOf(c.arbitrum.parent).label}` : c.polygon ? `a ${c.label} checkpoint on ${chainOf(c.polygon.parent).label}` : `${c.label} finality`
@@ -367,34 +365,52 @@ const status = (done, text) => `<span class="st ${done ? 'done' : 'wait'}">${tex
 const keyByName = name => settings.chains.find(c => c.name === name)?.key ?? (name === settings.amaChain ? AMA : null)
 
 /// recent orders of every live chain: Amadeus' own, and those each verifiable chain sent
+const orderRoute = (source, target) => `<span class="rt" title="${side(source).chainName} to ${side(target).chainName}"><img src="${side(source).chainLogo}" alt="${side(source).chainName}"><span class="arrow">→</span><img src="${side(target).chainLogo}" alt="${side(target).chainName}"></span>`
+const settledRows = new Map()
+
+async function amadeusOrderRow(n) {
+  if (settledRows.has(`ama:${n}`)) return settledRows.get(`ama:${n}`)
+  const o = unpackOrder(fromBase58((await amaGet(`/bridge/order/${n}`)).order))
+  const k = keyByName(o.dstChain)
+  if (!k || k === AMA) return null
+  const c = chainOf(k), recipient = hexlify(o.recipient)
+  //for a contract since replaced on that chain: its delivery is not this bridge's to show
+  if (hexlify(o.dstCoin) !== c.wama.toLowerCase()) return null
+  const done = await new Contract(c.bridge, bridgeAbi, rpcOf(c)).received(n)
+  const claim = !done && evmAddress && recipient === evmAddress.toLowerCase() ? `<button type="button" data-claim="${n}" data-chain="${k}" aria-label="Claim order #${n}">Claim</button>` : ''
+  const row = [orderRoute(AMA, k), n, `${fmt(o.outputAmount)} wAMA`, short(recipient), delivery(o), done ? status(true) : claim || status(false, o.gasDropFee > 0n ? 'relay delivering' : 'to claim')]
+  if (done) settledRows.set(`ama:${n}`, row)
+  return row
+}
+
+async function chainOrderRows(c) {
+  const bridge = new Contract(c.bridge, bridgeAbi, rpcOf(c))
+  const head = await rpcOf(c).getBlockNumber()
+  const events = (await bridge.queryFilter(bridge.filters.OrderCreated(), Math.max(0, head - 5000), head)).filter(ev => ev.args.nonce >= BigInt(c.listFrom || 1)).slice(-5).reverse()
+  let fin = null
+  return Promise.all(events.map(async ev => {
+    const key = `${c.key}:${ev.args.nonce}`
+    if (settledRows.has(key)) return settledRows.get(key)
+    const o = unpackOrder(ev.args.order)
+    const k = keyByName(o.dstChain) ?? AMA
+    const onward = k !== AMA
+    const { received } = await amaGet(`/bridge/received/${c.name}/${c.bridge}/${o.nonce}`)
+    const st = received ? status(true, onward ? 'passed on' : undefined) : await inboundStatus(c, ev, o, await (fin ??= readFinalityLag(c)))
+    const row = [orderRoute(c.key, k), o.nonce, `${fmt(o.outputAmount)} ${onward ? 'wAMA' : 'AMA'}`, short(onward ? hexlify(o.recipient) : toBase58(o.recipient)), delivery(o), st]
+    if (received) settledRows.set(key, row)
+    return row
+  }))
+}
+
 async function showOrders() {
-  const rows = []
-  const route = (source, target) => `<span class="rt" title="${side(source).chainName} to ${side(target).chainName}"><img src="${side(source).chainLogo}" alt="${side(source).chainName}"><span class="arrow">→</span><img src="${side(target).chainLogo}" alt="${side(target).chainName}"></span>`
   const { nonce } = await amaGet('/bridge/nonce')
-  for (let n = nonce; n > Math.max(0, nonce - 8, Number(settings.amaListFrom || 1) - 1); n--) {
-    const o = unpackOrder(fromBase58((await amaGet(`/bridge/order/${n}`)).order))
-    const k = keyByName(o.dstChain)
-    if (!k || k === AMA) continue
-    const c = chainOf(k), recipient = hexlify(o.recipient)
-    //for a contract since replaced on that chain: its delivery is not this bridge's to show
-    if (hexlify(o.dstCoin) !== c.wama.toLowerCase()) continue
-    const done = await new Contract(c.bridge, bridgeAbi, rpcOf(c)).received(n)
-    const claim = !done && evmAddress && recipient === evmAddress.toLowerCase() ? `<button type="button" data-claim="${n}" data-chain="${k}" aria-label="Claim order #${n}">Claim</button>` : ''
-    rows.push([route(AMA, k), n, `${fmt(o.outputAmount)} wAMA`, short(recipient), delivery(o), done ? status(true) : claim || status(false, o.gasDropFee > 0n ? 'relay delivering' : 'to claim')])
-  }
-  for (const c of settings.chains.filter(c => c.inbound)) {
-    const bridge = new Contract(c.bridge, bridgeAbi, rpcOf(c))
-    const head = await rpcOf(c).getBlockNumber()
-    const events = (await bridge.queryFilter(bridge.filters.OrderCreated(), Math.max(0, head - 5000), head)).filter(ev => ev.args.nonce >= BigInt(c.listFrom || 1))
-    for (const ev of events.slice(-5).reverse()) {
-      const o = unpackOrder(ev.args.order)
-      const k = keyByName(o.dstChain) ?? AMA
-      const { received } = await amaGet(`/bridge/received/${c.name}/${c.bridge}/${o.nonce}`)
-      const onward = k !== AMA
-      const st = received ? status(true, onward ? 'passed on' : undefined) : await inboundStatus(c, ev, o)
-      rows.push([route(c.key, k), o.nonce, `${fmt(o.outputAmount)} ${onward ? 'wAMA' : 'AMA'}`, short(onward ? hexlify(o.recipient) : toBase58(o.recipient)), delivery(o), st])
-    }
-  }
+  const nonces = []
+  for (let n = nonce; n > Math.max(0, nonce - 8, Number(settings.amaListFrom || 1) - 1); n--) nonces.push(n)
+  const [amadeus, chains] = await Promise.all([
+    Promise.all(nonces.map(n => amadeusOrderRow(n).catch(() => null))),
+    Promise.all(settings.chains.filter(c => c.inbound).map(c => chainOrderRows(c).catch(() => []))),
+  ])
+  const rows = [...amadeus, ...chains.flat()].filter(Boolean)
   $('orders').innerHTML = rows.map(([path, nonce, sent, recipient, via, state]) =>
     `<li class="ord"><div class="ordtop">${path}<b>${sent}</b>${state}</div><div class="ordsub">#${nonce} · to ${recipient} · ${via}</div></li>`).join('') || '<li class="empty">No recent orders yet</li>'
   $('orders-count').textContent = rows.length || ''

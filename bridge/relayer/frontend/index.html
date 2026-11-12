@@ -42,7 +42,8 @@
 
   /* rail */
   .rail { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 6px; padding: 18px 12px; background: var(--rail); border-right: 1px solid var(--line); }
-  .brand { display: flex; align-items: center; gap: 10px; padding: 6px 12px 18px; text-decoration: none; }
+  .brandrow { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 6px 12px 18px; }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
   .brand img { width: 28px; height: 30px; }
   .brand b { font-size: 20px; letter-spacing: .2px; }
   .brand span { color: var(--muted); font-size: 20px; }
@@ -215,10 +216,9 @@
   @media (max-width: 860px) {
     .shell { grid-template-columns: minmax(0, 1fr); }
     .rail { position: static; height: auto; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 4px; padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
-    .brand { flex-basis: 100%; padding: 0 0 8px; }
+    .brandrow { flex-basis: 100%; padding: 0 0 8px; }
     .brand b, .brand span { font-size: 18px; }
-    .navh, .nav.extra, .railfoot span:not(.badge) { display: none; }
-    .railfoot { position: absolute; top: 14px; right: 16px; margin: 0; padding: 0; }
+    .navh, .nav.extra, .railfoot { display: none; }
     .rail { position: relative; }
     #recipient, .search input { font-size: 16px; }
     .nav[aria-current] { display: none; }
@@ -246,13 +246,12 @@
 <body>
 <div class="shell">
   <aside class="rail">
-    <a class="brand" href="/"><img src="./logos/ama-cube.svg" alt=""><b>Amadeus</b><span>Bridge</span></a>
+    <div class="brandrow"><a class="brand" href="/"><img src="./logos/ama-cube.svg" alt=""><b>Amadeus</b><span>Bridge</span></a><span class="badge" id="network"></span></div>
     <a class="nav" href="/" aria-current="page"><svg class="i" viewBox="0 0 24 24"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg>Bridge</a>
     <p class="navh">Amadeus</p>
     <a class="nav extra" href="https://amahub.ama.one" target="_blank" rel="noopener"><svg class="i" viewBox="0 0 24 24"><path d="M4 10l8-6 8 6v9a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>AMA Hub<svg class="i ext" viewBox="0 0 24 24"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
     <a class="nav extra" href="https://ama.one" target="_blank" rel="noopener"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>ama.one<svg class="i ext" viewBox="0 0 24 24"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
     <div class="railfoot">
-      <span class="badge" id="network"></span>
       <span>Verified on-chain by light clients on both sides. <a id="lc-link" target="_blank" rel="noopener">Contracts</a></span>
     </div>
   </aside>
