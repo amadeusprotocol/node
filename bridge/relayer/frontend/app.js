@@ -5,7 +5,7 @@ import { bls12_381 } from '@noble/curves/bls12-381'
 import { unpackOrder, decodeValidatorRecord, rosterEip, g2Eip, pad20 } from '../src/codec.js'
 import { bridgeAbi, lightClientAbi, tokenAbi } from '../src/abi.js'
 import { costToChain, costToAmadeus, costThroughAmadeus, AVG_TX_GAS, AMA_FOR_TWO_TXS, DELIVERY_BYTES } from '../src/tips.js'
-import amaLogo from './logos/ama.svg'
+import amaLogo from './logos/ama-coin.svg'
 import bnbLogo from './logos/bnb.svg'
 import baseLogo from './logos/base.svg'
 import ethLogo from './logos/eth.svg'
@@ -20,6 +20,17 @@ const SEND = 'send(uint128,bytes,bytes,uint64,uint128,uint128)'
 
 const $ = id => document.getElementById(id)
 const log = msg => { $('log').textContent = `${new Date().toLocaleTimeString()} ${msg}\n` + $('log').textContent }
+//what the user must see shows under the form, not only in the activity log
+const notify = (msg, kind = 'error') => {
+  log(msg)
+  $('notice').textContent = msg
+  $('notice').className = `notice${kind === 'info' ? ' info' : ''}`
+  $('notice').setAttribute('role', kind === 'info' ? 'status' : 'alert')
+  $('notice').hidden = false
+}
+const clearNotice = () => { $('notice').hidden = true }
+const icon = pathData => `<svg class="i" viewBox="0 0 24 24"><path d="${pathData}"/></svg>`
+const CHEVRON = icon('M6 9l6 6 6-6'), TICK = icon('M5 12l5 5L20 7')
 const short = a => (a && a.length > 14 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a ?? '')
 const fmt = (v, d = 9) => { const s = formatUnits(v, d); return s.includes('.') ? s.replace(/\.?0+$/, '') : s }
 
@@ -49,37 +60,88 @@ const side = k => k === AMA
 //every chain shows on the From side; those Amadeus cannot verify yet can only receive for now
 const allSides = () => byName([AMA, ...settings.chains.map(c => c.key)])
 
-//the chain picker: a button with the chain's logo, its menu open while `menuOpen` names it
-let menuOpen = null
-function pick(k, options, id) {
-  const s = side(k)
-  const button = `<button type="button" class="chainbtn${options.length > 1 ? '' : ' fixed'}${menuOpen === id ? ' open' : ''}" data-menu="${id}">
-    <img src="${s.chainLogo}" alt=""><span><span class="k">Chain</span><b>${s.chainName}</b></span>${options.length > 1 ? '<span class="chev">▼</span>' : ''}</button>`
-  const menu = menuOpen !== id ? '' : `<div class="menu">${options.map(o => {
-    const off = !sources().includes(o) && id === 'from'
-    return `<button type="button" class="opt${o === k ? ' sel' : ''}" data-pick="${id}:${o}"${off ? ' disabled' : ''}><img src="${side(o).chainLogo}" alt="">${side(o).chainName}${off ? '<small>receive only, for now</small>' : o === k ? '<span class="tick">✓</span>' : ''}</button>`
-  }).join('')}</div>`
-  return `<span class="picker">${button}${menu}</span>
-          <span class="pill"><span class="coin"><img src="${s.coinLogo}" alt="">${s.badge ? `<img class="small" src="${s.badge}" alt="">` : ''}</span><span><span class="k">coin</span> ${s.coin}</span></span>`
+//the asset pill: coin, chain badge and chain name; it opens the chain dialog for its side
+const pick = (key, options, id) => {
+  const shown = side(key)
+  const many = options.length > 1
+  return `<button type="button" class="asset" data-menu="${id}"${many ? ' aria-haspopup="dialog"' : ' disabled'} aria-label="${shown.coin} on ${shown.chainName}, change ${id === 'from' ? 'source' : 'destination'} chain">
+    <span class="alogo"><img src="${shown.coinLogo}" alt="">${shown.badge ? `<img class="chain" src="${shown.badge}" alt="">` : ''}</span>
+    <span class="atext"><b>${shown.coin}</b><small>${shown.chainName}</small></span>${many ? CHEVRON : ''}</button>`
+}
+
+//the chain dialog: every chain for the source (those Amadeus cannot verify yet are receive only), the reachable ones for the destination
+const chainDialog = { side: null }
+function chainOptions() {
+  const id = chainDialog.side, current = id === 'from' ? from : to
+  const options = id === 'from' ? allSides() : destinations(from)
+  const query = $('chain-search').value.trim().toLowerCase()
+  $('chain-list').innerHTML = options.filter(option => side(option).chainName.toLowerCase().includes(query)).map(option => {
+    const off = id === 'from' && !sources().includes(option)
+    const note = off ? 'Receive only, for now' : option === AMA ? 'AMA' : 'wAMA'
+    return `<button type="button" class="opt" aria-current="${option === current}" data-pick="${id}:${option}"${off ? ' disabled' : ''}>
+      <img src="${side(option).chainLogo}" alt=""><span>${side(option).chainName}<small>${note}</small></span>${option === current ? TICK.replace('class="i"', 'class="i tick"') : ''}</button>`
+  }).join('') || '<p class="opt" style="color:var(--muted)">No chain matches</p>'
+}
+function openChains(id) {
+  chainDialog.side = id
+  $('chain-title').textContent = id === 'from' ? 'Send from' : 'Receive on'
+  $('chain-search').value = ''
+  chainOptions()
+  $('chain-dialog').showModal()
+  $('chain-search').focus()
+}
+$('chain-search').oninput = chainOptions
+$('chain-close').onclick = () => $('chain-dialog').close()
+$('chain-dialog').onclick = event => {
+  const box = $('chain-dialog').getBoundingClientRect()
+  const outside = event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom
+  if (event.target === $('chain-dialog') && outside) $('chain-dialog').close()
 }
 
 document.addEventListener('click', e => {
   const opt = e.target.closest('[data-pick]'), btn = e.target.closest('[data-menu]')
   if (opt) {
     const [id, k] = opt.dataset.pick.split(':')
-    menuOpen = null
-    return id === 'from' ? setRoute(k, to) : setRoute(from, k)
+    $('chain-dialog').close()
+    if (id === 'from') setRoute(k, to)
+    else setRoute(from, k)
+    return document.querySelector(`#${id}-pick .asset`)?.focus()
   }
-  const next = btn && !btn.classList.contains('fixed') && menuOpen !== btn.dataset.menu ? btn.dataset.menu : null
-  if (next !== menuOpen) { menuOpen = next; render() }
+  if (btn && !btn.disabled) openChains(btn.dataset.menu)
 })
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && menuOpen) { menuOpen = null; render() } })
+
+//the card beside the widget: the route once there is an amount, else the order history, unless the user picked a tab
+const sideTab = { picked: null }
+function showSide(tab) {
+  for (const name of ['route', 'history']) {
+    $(`tab-${name}`).setAttribute('aria-selected', String(name === tab))
+    $(`tab-${name}`).tabIndex = name === tab ? 0 : -1
+    $(`pane-${name}`).hidden = name !== tab
+  }
+  $('history-btn').classList.toggle('on', tab === 'history')
+}
+const pickTab = name => { sideTab.picked = name; showSide(name) }
+document.querySelector('.sidetabs').onkeydown = event => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const next = $('tab-route').getAttribute('aria-selected') === 'true' ? 'history' : 'route'
+  pickTab(next)
+  $(`tab-${next}`).focus()
+}
+$('tab-route').onclick = () => pickTab('route')
+$('tab-history').onclick = () => pickTab('history')
+$('history-btn').onclick = () => {
+  pickTab('history')
+  $('tab-history').focus()
+}
 
 function setRoute(f, t) {
+  if (f !== from) balances.wama = null
   from = f
   to = destinations(f).includes(t) ? t : destinations(f)[0]
   dropTouched = false; recipientGas = null; gasPrice = null; l1Fee = 0n; gasUnreachable = null
   $('recipient').value = ''
+  clearNotice()
   const lc = chainOf(to === AMA ? from : to)
   if (lc?.explorer) $('lc-link').href = `${lc.explorer}/address/${lc.lightClient}`
   render()
@@ -115,14 +177,13 @@ function render() {
   const f = side(from), t = side(to)
   $('from-pick').innerHTML = pick(from, allSides(), 'from')
   $('to-pick').innerHTML = pick(to, destinations(from), 'to')
-  $('amount-unit').textContent = f.coin
-  $('receive-unit').textContent = t.coin
   const back = sources().includes(to)
   $('flip').disabled = !back
   $('flip').title = back ? 'Switch direction' : `${t.chainName} → ${f.chainName} needs Amadeus to verify ${t.chainName} (coming)`
 
   const bal = from === AMA ? balances.ama : balances.wama
-  $('from-balance').textContent = bal === null ? '' : `Balance: ${fmt(bal)} ${f.coin}`
+  $('from-balance').textContent = bal === null ? '' : `Balance ${fmt(bal)} ${f.coin}`
+  $('max').hidden = bal === null
   $('recipient').placeholder = to === AMA ? (amaAddress ? `${short(amaAddress)} (your Amadeus wallet)` : 'Amadeus address') : (evmAddress ? `${short(evmAddress)} (your MetaMask account)` : `${t.chainName} address (0x…)`)
 
   const gasCoin = to === AMA ? 'AMA' : chainOf(to).gasSymbol
@@ -130,7 +191,7 @@ function render() {
   const has = recipientGas === null ? '' : ` · recipient has ${to === AMA ? fmt(recipientGas) : Number(formatEther(recipientGas)).toFixed(5)} ${gasCoin}`
   //into Amadeus what arrives is AMA, which already pays its gas: a drop there would only move AMA around
   if (to === AMA) drop = false
-  $('delivery').innerHTML = to === AMA ? '' : `<label class="drop"><input type="checkbox" id="drop"${drop ? ' checked' : ''}> Drop ${dropText} of gas to the recipient<small>${has}</small></label>`
+  $('delivery').innerHTML = to === AMA ? '' : `<label class="drop"><span>Drop ${dropText} of gas to the recipient<small>So they can move the coins right away${has}</small></span><input type="checkbox" role="switch" id="drop"${drop ? ' checked' : ''}></label>`
   if ($('drop')) $('drop').onchange = e => { drop = e.target.checked; dropTouched = true; render() }
 
   const c = cost(), a = amount()
@@ -143,19 +204,33 @@ function render() {
     const ppm = to === AMA ? 0n : from === AMA ? amaFeePpm : chainFeePpm
     const bp = a * ppm / 1_000_000n
     receive = a - bp - c
-    rows.push(['Bridge fee', ppm > 0n ? `${fmt(bp)} ${f.coin}` : '0.0'])
+    rows.push(['Bridge fee', ppm > 0n ? `${fmt(bp)} ${f.coin}` : 'None'])
     rows.push([`Gas on ${gasOn}${drop ? ` + ${dropText} gas drop` : ''}, at cost`, `${fmt(c)} ${f.coin}`])
   } else if (to !== AMA && c === null) {
     rows.push([`Gas on ${gasOn}`, gasUnreachable ? `${gasUnreachable} RPC unreachable, retrying…` : 'reading gas price…'])
   }
   rows.push(['Estimated time', arrival()])
-  $('receive').textContent = receive === null ? '0.0' : receive > 0n ? fmt(receive) : '–'
+  $('receive').textContent = receive === null ? '0' : receive > 0n ? fmt(receive) : '0'
+  $('receive').classList.toggle('zero', !(receive > 0n))
   $('summary').innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('')
     + (receive !== null ? `<div class="total"><span>You receive</span><span>${receive > 0n ? `${fmt(receive)} ${t.coin}` : 'amount too small'}</span></div>` : '')
+  //the route: chain to chain passes through Amadeus, where the order is proven and passed on
+  const hop = (key, label, hub = false) => `<div class="hop${hub ? ' hub' : ''}"><img src="${side(key).chainLogo}" alt="">${label}</div>`
+  const via = from !== AMA && to !== AMA
+  $('route-path').innerHTML = [hop(from, f.chainName), '<span class="link"></span>', ...(via ? [hop(AMA, 'via Amadeus', true), '<span class="link"></span>'] : []), hop(to, t.chainName)].join('')
+  const quoted = a !== null && a > 0n
+  $('route').hidden = !quoted
+  $('route-empty').hidden = quoted
+  showSide(sideTab.picked ?? (quoted ? 'route' : 'history'))
+
+  //a send the wallet cannot cover is stopped here, not by the wallet; an Amadeus send keeps its tx budget back
+  const spendable = bal === null ? null : from === AMA ? bal - AMA_FOR_TWO_TXS : bal
+  const over = spendable !== null && a !== null && a > 0n && a > spendable
+  $('from-box').classList.toggle('over', over)
 
   const need = from === AMA ? (!amaAddress ? 'Connect Amadeus wallet' : null) : (!signer ? 'Connect MetaMask' : null)
-  $('go').disabled = Boolean(need) || !(receive > 0n)
-  $('go').textContent = need ?? (receive > 0n ? `Bridge ${fmt(a)} ${f.coin} → ${t.chainName}` : 'Enter an amount')
+  $('go').disabled = Boolean(need) || over || !(receive > 0n)
+  $('go').textContent = need ?? (over ? `Not enough ${f.coin}` : receive > 0n ? `Bridge ${fmt(a)} ${f.coin} to ${t.chainName}` : a !== null && a > 0n ? (receive !== null ? 'Amount too small to cover the gas' : gasUnreachable ? `${gasUnreachable} unreachable, retrying…` : 'Getting a quote…') : 'Enter an amount')
 }
 
 const amaGet = async path => {
@@ -294,7 +369,7 @@ const keyByName = name => settings.chains.find(c => c.name === name)?.key ?? (na
 /// recent orders of every live chain: Amadeus' own, and those each verifiable chain sent
 async function showOrders() {
   const rows = []
-  const route = (a, b) => `<img src="${side(a).chainLogo}" alt=""> → <img src="${side(b).chainLogo}" alt="">`
+  const route = (source, target) => `<span class="rt" title="${side(source).chainName} to ${side(target).chainName}"><img src="${side(source).chainLogo}" alt="${side(source).chainName}"><span class="arrow">→</span><img src="${side(target).chainLogo}" alt="${side(target).chainName}"></span>`
   const { nonce } = await amaGet('/bridge/nonce')
   for (let n = nonce; n > Math.max(0, nonce - 8, Number(settings.amaListFrom || 1) - 1); n--) {
     const o = unpackOrder(fromBase58((await amaGet(`/bridge/order/${n}`)).order))
@@ -304,7 +379,7 @@ async function showOrders() {
     //for a contract since replaced on that chain: its delivery is not this bridge's to show
     if (hexlify(o.dstCoin) !== c.wama.toLowerCase()) continue
     const done = await new Contract(c.bridge, bridgeAbi, rpcOf(c)).received(n)
-    const claim = !done && evmAddress && recipient === evmAddress.toLowerCase() ? `<button data-claim="${n}" data-chain="${k}">Claim</button>` : ''
+    const claim = !done && evmAddress && recipient === evmAddress.toLowerCase() ? `<button type="button" data-claim="${n}" data-chain="${k}" aria-label="Claim order #${n}">Claim</button>` : ''
     rows.push([route(AMA, k), n, `${fmt(o.outputAmount)} wAMA`, short(recipient), delivery(o), done ? status(true) : claim || status(false, o.gasDropFee > 0n ? 'relay delivering' : 'to claim')])
   }
   for (const c of settings.chains.filter(c => c.inbound)) {
@@ -320,12 +395,14 @@ async function showOrders() {
       rows.push([route(c.key, k), o.nonce, `${fmt(o.outputAmount)} ${onward ? 'wAMA' : 'AMA'}`, short(onward ? hexlify(o.recipient) : toBase58(o.recipient)), delivery(o), st])
     }
   }
-  $('orders').innerHTML = rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('') || '<tr><td colspan="6">No recent orders</td></tr>'
-  for (const b of document.querySelectorAll('[data-claim]')) b.onclick = () => claimWithLatestConsensus(Number(b.dataset.claim), chainOf(b.dataset.chain)).catch(e => log(e.shortMessage ?? e.message))
+  $('orders').innerHTML = rows.map(([path, nonce, sent, recipient, via, state]) =>
+    `<li class="ord"><div class="ordtop">${path}<b>${sent}</b>${state}</div><div class="ordsub">#${nonce} · to ${recipient} · ${via}</div></li>`).join('') || '<li class="empty">No recent orders yet</li>'
+  $('orders-count').textContent = rows.length || ''
+  for (const button of document.querySelectorAll('[data-claim]')) button.onclick = () => claimWithLatestConsensus(Number(button.dataset.claim), chainOf(button.dataset.chain)).catch(error => notify(error.shortMessage ?? error.message))
 }
 
 async function claimWithLatestConsensus(n, c) {
-  if (!signer) return log('connect MetaMask to claim')
+  if (!signer) return notify('Connect MetaMask to claim this order')
   await switchTo(c)
   log(`claiming Amadeus order ${n} on ${c.label}`)
   const proofAtTip = await amaGet(`/proof/contractstate/${toBase58(new TextEncoder().encode(`bic:bridge:order:${pad20(n)}`))}`)
@@ -333,7 +410,7 @@ async function claimWithLatestConsensus(n, c) {
   while ((await amaGet('/chain/stats')).stats.rooted_height < h) await new Promise(r => setTimeout(r, 1000))
   const cs = (await amaGet(`/chain/consensus/${h}`)).consensus
   const roster = rosterEip(decodeValidatorRecord(fromBase58((await amaGet(`/bridge/validator_set/${h}`)).record)).validators)
-  if (keccak256(roster) !== await new Contract(c.lightClient, lightClientAbi, rpcOf(c)).rosterHash()) return log('the Amadeus validator set just changed: the relay syncs it within a few minutes, then claim again')
+  if (keccak256(roster) !== await new Contract(c.lightClient, lightClientAbi, rpcOf(c)).rosterHash()) return notify(`The Amadeus validator set changed and ${c.label} has not caught up yet. Claim again once the relay syncs it.`, 'info')
   const p = proofAtTip.proofs[0].proof
   const proof = { siblings: p.siblings.map(s => hexlify(fromBase58(s))), leafPath: hexlify(fromBase58(p.terminus.path)), identity: hexlify(fromBase58(p.terminus.identity_hash)), valueHash: hexlify(fromBase58(p.terminus.value_hash)) }
   const tx = await new Contract(c.bridge, bridgeAbi, signer).receiveOrderWithConsensus(
@@ -352,28 +429,32 @@ async function switchTo(c) {
 }
 
 async function connectEvm() {
-  if (!window.ethereum) return log('MetaMask not found')
+  if (!window.ethereum) return notify('MetaMask not found. Install it to bridge from or to an EVM chain.')
   await switchTo(chainOf(from === AMA ? to : from))
   evmAddress = await signer.getAddress()
   $('connect-evm').classList.add('on')
-  await refresh()
+  $('connect-evm').setAttribute('aria-label', `MetaMask, ${short(evmAddress)}`)
+  refresh().catch(error => log(error.shortMessage ?? error.message))
 }
 
-$('connect-evm').onclick = () => connectEvm().catch(e => log(e.shortMessage ?? e.message))
+$('connect-evm').onclick = () => { clearNotice(); connectEvm().catch(error => notify(error.shortMessage ?? error.message)) }
 
-$('connect-ama').onclick = async () => {
-  if (!window.amadeus) return log('Amadeus wallet extension not found')
+async function connectAma() {
+  if (!window.amadeus) return notify('Amadeus Wallet extension not found. Install it to bridge from Amadeus.')
   const accounts = await window.amadeus.requestAccounts()
   amaAddress = accounts?.[0]?.publicKey ?? accounts?.[0] ?? accounts?.publicKey
   $('ama-account').textContent = short(amaAddress)
   $('connect-ama').classList.add('on')
-  refresh().catch(e => log(e.message))
+  $('connect-ama').setAttribute('aria-label', `Amadeus wallet, ${short(amaAddress)}`)
+  refresh().catch(error => log(error.message))
 }
+$('connect-ama').onclick = () => { clearNotice(); connectAma().catch(error => notify(error.message)) }
 
 $('flip').onclick = () => { if (sources().includes(to)) setRoute(to, from) }
-$('recipient').onchange = () => { dropTouched = false; checkRecipientGas() }
+$('recipient').onchange = () => { dropTouched = false; clearNotice(); checkRecipientGas() }
 let amountTimer
 $('amount').oninput = () => {
+  clearNotice()
   render()
   //the Amadeus gas-drop default depends on how much arrives
   if (to === AMA) { clearTimeout(amountTimer); amountTimer = setTimeout(() => checkRecipientGas(), 400) }
@@ -388,7 +469,7 @@ $('max').onclick = () => {
 async function bridgeFromAmadeus(a) {
   const c = chainOf(to)
   const who = $('recipient').value || evmAddress
-  if (!evmAddressValid(who)) return log(`enter a ${c.label} address, or connect MetaMask`)
+  if (!evmAddressValid(who)) return notify(`Enter a ${c.label} address (0x…), or connect MetaMask`)
   await readGas()
   const gasDrop = drop ? dropOn() : 0n
   const fee = cost()
@@ -398,7 +479,9 @@ async function bridgeFromAmadeus(a) {
     args: ['AMA', a.toString(), c.name, getBytes(c.wama), getBytes(who), '', '0', gasDrop.toString(), fee.toString()],
   })
   log(`Amadeus tx ${JSON.stringify(res).slice(0, 200)}`)
+  if (res?.error !== 'ok' || res?.receipt?.success === false) return notify(`Amadeus rejected the transfer: ${res?.receipt?.result ?? res?.error}`)
   await askRelayToStartNow({ from: 'amadeus' })
+  return true
 }
 
 async function bridgeFromChain(a) {
@@ -413,29 +496,35 @@ async function bridgeFromChain(a) {
     const who = $('recipient').value || amaAddress
     let key
     try { key = fromBase58(who || '') } catch { key = new Uint8Array() }
-    if (!amadeusKeyValid(key)) return log('enter a valid Amadeus address, or connect the Amadeus wallet')
+    if (!amadeusKeyValid(key)) return notify('Enter a valid Amadeus address, or connect the Amadeus wallet')
     log(`burning ${fmt(a)} wAMA on ${src.label} for ${who}, relay cost ${fmt(fee)} wAMA`)
     tx = await bridge.getFunction(SEND)(a, key, '0x', 0, gasDrop, fee)
   } else {
     const dst = chainOf(to)
     const who = $('recipient').value || evmAddress
-    if (!evmAddressValid(who)) return log(`enter a ${dst.label} address`)
+    if (!evmAddressValid(who)) return notify(`Enter a ${dst.label} address (0x…)`)
     log(`burning ${fmt(a)} wAMA on ${src.label} for ${who} on ${dst.label} (via Amadeus), relay cost ${fmt(fee)} wAMA`)
     tx = await bridge.getFunction(SEND_TO)(a, encodeBytes32String(dst.name), getBytes(dst.wama), getBytes(who), '0x', 0, gasDrop, fee)
   }
   log(`${src.label} tx ${tx.hash}`)
   await tx.wait()
   await askRelayToStartNow({ from: src.key, tx: tx.hash })
+  return true
 }
 
 $('go').onclick = async () => {
   $('go').disabled = true
+  clearNotice()
   try {
-    await (from === AMA ? bridgeFromAmadeus : bridgeFromChain)(amount())
-    $('amount').value = ''
-    await refresh()
-  } catch (e) { log(e.shortMessage ?? e.message) }
+    const sent = await (from === AMA ? bridgeFromAmadeus : bridgeFromChain)(amount())
+    if (sent) {
+      $('amount').value = ''
+      notify('Sent. Track it under History.', 'info')
+      pickTab('history')
+    }
+  } catch (e) { notify(e.shortMessage ?? e.message) }
   render()
+  refresh().catch(error => log(error.shortMessage ?? error.message))
 }
 
 $('network').textContent = settings.network
