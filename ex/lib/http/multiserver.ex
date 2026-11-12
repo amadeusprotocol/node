@@ -387,11 +387,16 @@ defmodule Ama.MultiServer do
                 quick_reply(%{state|request: r}, JSX.encode!(%{success: success, result: RocksDB.ascii_dump(result), logs: logs}))
             r.method == "GET" and String.starts_with?(r.path, "/api/contract/view") ->
                 [contract, function] = String.replace(r.path, "/api/contract/view/", "") |> :binary.split("/")
-                contract = Base58.decode(contract)
                 query = r.query && Photon.HTTP.parse_query(r.query)
-                {success, result, logs} = API.Contract.view(contract, function, [], query[:pk] && Base58.decode(query.pk))
-                logs = Enum.map(logs, & RocksDB.ascii_dump(&1))
-                quick_reply(state, JSX.encode!(%{success: success, result: RocksDB.ascii_dump(result), logs: logs}))
+                pk = query[:pk]
+                #contract: a builtin name or a 48-byte key, any base58; pk: a 48-byte key (Base58.decode raises on other characters)
+                if Base58.likely(contract) and (!pk or (Base58.likely(pk) and byte_size(Base58.decode(pk)) == 48)) do
+                    {success, result, logs} = API.Contract.view(Base58.decode(contract), function, [], pk && Base58.decode(pk))
+                    logs = Enum.map(logs, & RocksDB.ascii_dump(&1))
+                    quick_reply(state, JSX.encode!(%{success: success, result: RocksDB.ascii_dump(result), logs: logs}))
+                else
+                    quick_reply(state, %{error: :invalid_args}, 400)
+                end
             r.method == "GET" and String.starts_with?(r.path, "/api/contract/richlist") ->
                 {richlist, _count} = API.Contract.richlist()
                 quick_reply(state, json_fix_floats(%{error: :ok, richlist: richlist}))

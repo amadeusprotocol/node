@@ -34,6 +34,9 @@ A Privacy Layer 1 for Agentics /w MatMul-based Useful Proof of Work
 ### Wallet Connect
 - [Integration Guide](https://docs.ama.one/wallet/creating-a-wallet/chrome-extension-wallet/10.-integration-guide)
 
+### Submitting transactions
+`submit_and_wait` gives up after about 6 seconds and then replies HTTP 200 with `"error": "timeout"` and the tx `hash`. A timeout does not mean the transaction failed: it may still be pending, or already executed (with `?finalized=true` the receipt can be in the reply). Look the hash up with `/api/chain/tx/<hash>` before sending again: resending builds a new transaction and can pay twice.
+
 ### SDKs
 - [TypeScript SDK](https://github.com/amadeusprotocol/amadeus-typescript-sdk)
 - [Wallet API Samples](https://github.com/amadeusprotocol/amadeus-wallet-extension-react-demo)
