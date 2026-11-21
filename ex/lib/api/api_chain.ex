@@ -200,6 +200,7 @@ defmodule API.Chain do
         #new additions
         entry = if !entry.header[:root_tx] do entry else put_in(entry, [:header, :root_tx], Base58.encode(entry.header.root_tx)) end
         entry = if !entry.header[:root_validator] do entry else put_in(entry, [:header, :root_validator], Base58.encode(entry.header.root_validator)) end
+        entry = if !entry.header[:root_chain] do entry else put_in(entry, [:header, :root_chain], Base58.encode(entry.header.root_chain)) end
 
         entry = put_in(entry, [:header], entry.header)
         {claim_hash, score} = DB.Attestation.best_consensus_by_entryhash(hash)

@@ -179,6 +179,14 @@ defmodule ValidatorSetChainTest do
     assert API.Chain.consensus(2) == %{error: :not_found}
   end
 
+  test "entry header roots are base58 for clients", ctx do
+    root = :crypto.strong_rand_bytes(32)
+    client = API.Chain.format_entry_for_client(put_in(ctx.entry, [:header, :root_chain], root))
+    assert Base58.decode(client.header.root_chain) == root
+    assert Base58.decode(client.header.root_tx) == ctx.entry.header.root_tx
+    refute Map.has_key?(API.Chain.format_entry_for_client(ctx.entry).header, :root_chain)
+  end
+
   test "contractstate proofs come from one snapshot with the tip they belong to", ctx do
     %{db: db} = :persistent_term.get({:rocksdb, Fabric})
     rows = [{"bic:epoch:diff_bits", "8"}, {"bic:epoch:total_sols", "5"}]
