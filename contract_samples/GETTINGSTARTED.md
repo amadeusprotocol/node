@@ -92,7 +92,8 @@ This will be finished later, for now its enough to deploy on a local testnet.
   
 Wallet: https://chromewebstore.google.com/detail/amadeus-wallet/gigmkdnbhopbandngplohmilogilbkjn  
 Wallet Test: https://amadeus-wallet-extension-react-demo.vercel.app/  
-Explorer: https://testnet-ama.ddns.net/  
+Explorer: https://testnet.explorer.ama.one/  
+Community Explorer: https://testnet-ama.ddns.net/  
 Faucet to get 100 AMA: https://mcp.ama.one/testnet-faucet
   
 ### Mainnet
